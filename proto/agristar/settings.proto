@@ -1,0 +1,424 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// settings.proto — All configuration settings messages
+// Maps to: Store* functions in StorePostData.c and UI_Send* in UI_Messages.c
+// Each message corresponds to a settings page in the UI.
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+import "agristar/common.proto";
+import "agristar/equipment.proto";
+
+// ─── SettingsUpdate — wrapper for Bridge → Firmware settings POST ────────
+// The bridge sends this; firmware unpacks the oneof and calls the matching
+// Store* function, then replies with Ack.
+message SettingsUpdate {
+  oneof payload {
+    PlenumSettings       plenum         = 1;
+    FanSpeedSettings     fan_speed      = 2;
+    FanBoostSettings     fan_boost      = 3;
+    RampRateSettings     ramp_rate      = 4;
+    RefrigSettings       refrig         = 5;
+    BurnerSettings       burner         = 6;
+    Co2Settings          co2            = 7;
+    CureSettings         cure           = 8;
+    ClimacellSettings    climacell      = 9;
+    ClimacellTimes       climacell_times = 10;
+    HumidCtrlSettings    humid_ctrl     = 11;
+    OutsideAirSettings   outside_air    = 12;
+    MiscSettings         misc           = 13;
+    FailureSettings      failures       = 14;
+    FailureSettings2     failures2      = 15;
+    TempAlarmSettings    temp_alarms    = 16;
+    CureLimitSettings    cure_limits    = 17;
+    RuntimeSettings      runtimes       = 18;
+    DoorSettings         door           = 19;
+    LoadMonitorSettings  load_monitor   = 20;
+    AuxProgramSettings   aux_program    = 21;
+    UserLogSettings      user_log       = 22;
+    PidSettings          pid            = 23;
+    GraphFavoriteSettings graph_favorites = 24;
+    MasterSlaveSettings  master_slave   = 25;
+    DateTimeUpdate       date_time      = 26;
+    EmailSettings        email          = 27;
+    AlertSettings        alerts         = 28;
+    AnalogBoardSettings  analog_board   = 29;
+    PwmChannelSettings   pwm_channels   = 30;
+    ServiceInfoUpdate    service_info   = 31;
+    BasicSetupUpdate     basic_setup    = 32;
+    HttpPortSettings     http_port      = 33;
+    PublicAddressSettings public_address = 34;
+    BayNameSettings      bay_names      = 35;
+    SysModeSettings      sys_mode       = 36;
+  }
+}
+
+// ─── Plenum (StorePlenumSetup / UI_SendPlenSetPoints, tag "p1Plenum") ────
+message PlenumSettings {
+  float  temp_setpoint         = 1;   // Target temperature
+  uint32 humid_setpoint        = 2;   // Target humidity %
+  uint32 humid_setpoint_ref    = 3;   // Humidity reference sensor
+  float  burner_temp_setpoint  = 4;   // Burner target temperature
+  string burner_threshold      = 5;   // Burner threshold
+}
+
+// ─── Fan Speed (StoreFanSpeeds / UI_SendFanSpeed) ────────────────────────
+message FanSpeedSettings {
+  uint32 max_speed           = 1;   // Maximum fan speed %
+  uint32 min_speed           = 2;   // Minimum fan speed %
+  uint32 cool_speed          = 3;   // Cooling speed %
+  uint32 heat_speed          = 4;   // Heating speed %
+  uint32 dry_speed           = 5;   // Drying speed %
+  uint32 cure_speed          = 6;   // Curing speed %
+  uint32 recirc_speed        = 7;   // Recirculation speed %
+  uint32 defrost_speed       = 8;   // Defrost speed %
+  uint32 manual_speed        = 9;   // Manual override speed %
+  uint32 outside_air_speed   = 10;  // Outside air speed %
+}
+
+// ─── Fan Boost (StoreFanBoost / UI_SendFanBoost, tag "selBoostMode") ─────
+message FanBoostSettings {
+  uint32 mode      = 1;  // 0=Off, 1=Interval, 2=Temp based
+  uint32 speed     = 2;  // Boost speed %
+  uint32 interval  = 3;  // Minutes between boosts
+  uint32 duration  = 4;  // Boost duration minutes
+  float  temp      = 5;  // Temperature trigger
+}
+
+// ─── Ramp Rate (StoreRampRate / UI_SendRampRate, tag "updTemp") ──────────
+message RampRateSettings {
+  float  rate_per_day = 1;   // Degrees per day
+  uint32 enabled      = 2;
+}
+
+// ─── Refrigeration (StoreRefrig / UI_SendRefrig, 23 fields) ─────────────
+message RefrigSettings {
+  uint32 num_stages         = 1;
+  repeated RefrigStage stages = 2;  // Up to 8 stages
+  float  p_gain             = 3;   // PID proportional
+  float  i_gain             = 4;   // PID integral
+  float  d_gain             = 5;   // PID derivative
+  float  u_limit            = 6;   // PID output limit
+  uint32 mode               = 7;   // Refrig mode
+  uint32 defrost_interval   = 8;
+  uint32 defrost_duration   = 9;
+  uint32 manual_speed       = 10;
+}
+
+message RefrigStage {
+  float  trigger_temp   = 1;
+  uint32 enabled        = 2;
+  uint32 delay_minutes  = 3;
+}
+
+// ─── Burner (StoreBurner / UI_SendBurner, tag "selBurnerMode") ───────────
+message BurnerSettings {
+  uint32 on        = 1;
+  uint32 low       = 2;
+  float  p_gain    = 3;
+  float  i_gain    = 4;
+  float  d_gain    = 5;
+  float  u_limit   = 6;
+  uint32 mode      = 7;
+  uint32 manual    = 8;
+}
+
+// ─── CO2 Purge (StoreCO2 / UI_SendCo2, tag "selPurgeMode") ──────────────
+message Co2Settings {
+  uint32 mode             = 1;  // 0=Off, 1=Timer, 2=CO2 sensor
+  float  min_temp         = 2;
+  float  max_temp         = 3;
+  uint32 duration_minutes = 4;
+  uint32 cycle_or_set     = 5;
+  uint32 fan_output       = 6;
+  uint32 door_output      = 7;
+}
+
+// ─── Air Cure (StoreAirCure / UI_SendAirCure, tag "CureStartTemp") ──────
+message CureSettings {
+  float  start_temp       = 1;
+  uint32 humid_ref        = 2;
+  float  start_humid      = 3;
+  float  humid_high_limit = 4;
+}
+
+// ─── Climacell (StoreClimacell / UI_SendClimacell) ───────────────────────
+message ClimacellSettings {
+  uint32 efficiency   = 1;
+  uint32 altitude     = 2;
+  uint32 alt_units    = 3;
+  float  p_gain       = 4;
+  float  i_gain       = 5;
+  float  d_gain       = 6;
+  float  u_limit      = 7;
+}
+
+// ─── Climacell hourly schedule (StoreClimacellTimes / UI_SendClimacellTimes)
+message ClimacellTimes {
+  repeated uint32 hourly_efficiency = 1;  // 48 entries (30-min slots)
+}
+
+// ─── Humidity Control (StoreHumidCtrl / UI_SendHumCtrl) ──────────────────
+//
+// The system supports up to THREE independent humidifier units. Each
+// unit has a Mode and three timer "duty cycles" (one per system mode:
+// Cooling, Recirculation, Refrigeration), with separate On/Off seconds
+// per cycle.
+//
+// SAVE direction (Bridge → Firmware): the UI saves ONE humidifier at
+// a time, so the message carries an `index` (0..2) plus the 7 fields
+// for that unit. The firmware splices it into Settings.HumidCtrl[index].
+//
+// LOAD direction (Firmware → Bridge): the firmware emits one
+// HumidCtrlEntry per humidifier inside `entries`, so the bridge sees
+// the full 21-field bank in one envelope and can populate the
+// HumidCtrlData CGI variable for the UI.
+message HumidCtrlEntry {
+  uint32 index            = 1;   // 0, 1, or 2
+  uint32 mode             = 2;   // 0=Manual, 1=Timer, 2=Auto (HM_*)
+  uint32 cool_on          = 3;   // DutyCycle[Cooling].On  (seconds)
+  uint32 cool_off         = 4;   // DutyCycle[Cooling].Off
+  uint32 recirc_on        = 5;   // DutyCycle[Recirc].On
+  uint32 recirc_off       = 6;   // DutyCycle[Recirc].Off
+  uint32 refrig_on        = 7;   // DutyCycle[Refrig].On
+  uint32 refrig_off       = 8;   // DutyCycle[Refrig].Off
+}
+
+message HumidCtrlSettings {
+  // SAVE: exactly one entry (the humidifier being edited).
+  // LOAD: three entries, ordered by index.
+  repeated HumidCtrlEntry entries = 1;
+}
+
+// ─── Outside Air (StoreOutsideAir / UI_SendOutsideAir, tag "ctrlMode") ──
+message OutsideAirSettings {
+  uint32 mode           = 1;
+  float  differential   = 2;
+  float  min_temp       = 3;
+  float  max_temp       = 4;
+}
+
+// ─── Misc (StoreMisc / UI_SendMisc, tag "p1Misc") ───────────────────────
+message MiscSettings {
+  repeated uint32 values = 1;  // Misc settings array
+}
+
+// ─── Failure Limits, Group 1 (StoreFailures / UI_SendFailures, 22 fields)
+message FailureSettings {
+  uint32 fan_mode               = 1;
+  uint32 fan_fail_speed         = 2;
+  uint32 fan_fail_delay         = 3;
+  uint32 heat_fail_temp         = 4;
+  uint32 heat_fail_delay        = 5;
+  uint32 refrig_fail_temp       = 6;
+  uint32 refrig_fail_delay      = 7;
+  uint32 burner_fail_temp       = 8;
+  uint32 burner_fail_delay      = 9;
+  uint32 humid_fail_delay       = 10;
+  uint32 door_fail_delay        = 11;
+  repeated uint32 extra_limits  = 12;  // Remaining fields (variable count)
+}
+
+// ─── Failure Limits, Group 2 (StoreFailures2 / UI_SendFailures2, 13 fields)
+message FailureSettings2 {
+  uint32 out_air_mode          = 1;
+  uint32 sensor_fail_action    = 2;
+  uint32 env_fail_temp_high    = 3;
+  uint32 env_fail_temp_low     = 4;
+  uint32 env_fail_humid_high   = 5;
+  uint32 env_fail_humid_low    = 6;
+  uint32 env_fail_co2_high     = 7;
+  uint32 power_fail_action     = 8;
+  uint32 comm_fail_action      = 9;
+  uint32 comm_fail_timeout     = 10;
+  uint32 analog_fail_action    = 11;
+  uint32 analog_fail_timeout   = 12;
+  float  extra                 = 13;
+}
+
+// ─── Temperature Alarm Limits (StoreTempAlarms / UI_SendTempDevAlarms) ───
+message TempAlarmSettings {
+  float  low_limit    = 1;
+  float  high_limit   = 2;
+  float  dev_limit    = 3;
+  uint32 delay_mins   = 4;
+}
+
+// ─── Cure Temperature Limits (StoreCureLimits) ──────────────────────────
+message CureLimitSettings {
+  float  temp_low_limit  = 1;
+  float  temp_high_limit = 2;
+}
+
+// ─── Runtime Settings (StoreRuntimes / UI_SendRuntimes) ──────────────────
+// RuntimeEntry is defined in equipment.proto — reused here
+message RuntimeSettings {
+  repeated RuntimeEntry entries = 1;
+}
+
+// ─── Door Settings (StoreDoor / UI_SendDoor) ─────────────────────────────
+message DoorSettings {
+  float  air_pressure   = 1;
+  uint32 door_sensor    = 2;
+  uint32 close_delay    = 3;
+}
+
+// ─── Load Monitor (StoreLoadMonitor / UI_SendLoadMonitor, 16 fields) ─────
+message LoadMonitorSettings {
+  string bay1_label     = 1;
+  string bay2_label     = 2;
+  uint32 bay_count      = 3;
+  uint32 enabled        = 4;
+  string units          = 5;
+  uint32 sensor_type    = 6;
+  string pipe_label     = 7;
+  uint32 pipe_count     = 8;
+  uint32 interval       = 9;
+  uint32 auto_start     = 10;
+  uint32 threshold      = 11;
+  uint32 mode           = 12;
+  float  low_limit      = 13;
+  float  high_limit     = 14;
+  uint32 total_count    = 15;
+}
+
+// ─── Aux Program (StoreAuxProgram / UI_SendAuxProgram) ───────────────────
+// Complex: each aux has up to 4 conditional rules.
+message AuxProgramSettings {
+  uint32 aux_index     = 1;   // Which aux channel (0-7)
+  uint32 eq_index      = 2;   // Equipment IO index
+  uint32 duty_cycle    = 3;
+  uint32 period        = 4;
+  uint32 units         = 5;
+  repeated AuxRule rules = 6; // Up to 4 conditional rules
+}
+
+message AuxRule {
+  uint32 type       = 1;   // Rule type enum
+  uint32 io_index   = 2;   // IO index for condition
+  uint32 state      = 3;   // Desired state
+  uint32 op         = 4;   // Comparison operator
+  float  sensor_val = 5;   // Sensor threshold
+  uint32 and_or     = 6;   // AND/OR with next rule
+  uint32 ref_index  = 7;   // Reference sensor index
+}
+
+// ─── User Log Settings (StoreUserLog / UI_SendUserLogSettings) ───────────
+message UserLogSettings {
+  uint32 interval_minutes = 1;
+  uint32 enabled          = 2;
+}
+
+// ─── PID Settings (StorePIDSettings) ─────────────────────────────────────
+message PidSettings {
+  uint32 eq_index  = 1;
+  float  p_gain    = 2;
+  float  i_gain    = 3;
+  float  d_gain    = 4;
+  float  u_limit   = 5;
+  uint32 wrap      = 6;
+}
+
+// ─── Graph Favorites (StoreGraphFavorites / UI_SendGraphFavorites) ────────
+message GraphFavoriteSettings {
+  repeated uint32 favorites = 1;  // List of favorite graph indices
+}
+
+// ─── Master/Slave (StoreMasterSlave) ─────────────────────────────────────
+message MasterSlaveSettings {
+  uint32 mode         = 1;  // 0=Standalone, 1=Master, 2=Slave
+  string master_ip    = 2;
+}
+
+// ─── DateTime Update (StoreDateTime) ─────────────────────────────────────
+message DateTimeUpdate {
+  string date_str = 1;
+  string time_str = 2;
+  uint32 am_pm    = 3;
+}
+
+// ─── Email (StoreEmail / UI_SendEmail) ───────────────────────────────────
+message EmailSettings {
+  string server    = 1;
+  string port      = 2;
+  string username  = 3;
+  string password  = 4;
+  string from_addr = 5;
+  string to_addr   = 6;
+  uint32 enabled   = 7;
+}
+
+// ─── Alert Flags (StoreAlerts / UI_SendEmailAlertFlags) ──────────────────
+message AlertSettings {
+  repeated uint32 alert_flags = 1;  // Per-alarm enable/disable
+}
+
+// ─── Analog Board (StoreAnalogBoard / UI_SendAnalogBoard) ────────────────
+message AnalogBoardSettings {
+  uint32 address    = 1;
+  string label      = 2;
+  uint32 disabled   = 3;
+  repeated SensorConfig sensors = 4;  // Up to 4 sensors per board
+}
+
+message SensorConfig {
+  uint32 slot       = 1;   // Sensor slot on board (0-3)
+  string label      = 2;
+  float  offset     = 3;
+  uint32 disabled   = 4;
+}
+
+// ─── PWM Channels (StorePWMChannels / UI_SendPWMChannels) ────────────────
+message PwmChannelSettings {
+  repeated PwmChannel channels = 1;
+}
+
+message PwmChannel {
+  uint32 index     = 1;
+  uint32 enabled   = 2;
+  uint32 frequency = 3;
+  uint32 duty      = 4;
+}
+
+// ─── Service Info Update (StoreServiceInfo) ──────────────────────────────
+message ServiceInfoUpdate {
+  string dealer_name  = 1;
+  string dealer_phone = 2;
+  string dealer_email = 3;
+  string notes        = 4;
+}
+
+// ─── Basic Setup Update (StoreBasic) ─────────────────────────────────────
+message BasicSetupUpdate {
+  string storage_name  = 1;
+  uint32 temp_type     = 2;
+  uint32 mode          = 3;
+  string home_page     = 4;
+  uint32 system_mode   = 5;
+  uint32 language      = 6;
+  string master_ip     = 7;
+  uint32 multi_view    = 8;
+  string login_pw      = 9;
+  uint32 local_login   = 10;
+  uint32 animations    = 11;
+}
+
+// ─── Other simple settings ───────────────────────────────────────────────
+message HttpPortSettings {
+  uint32 port = 1;
+}
+
+message PublicAddressSettings {
+  uint32 oct1 = 1;
+  uint32 oct2 = 2;
+  uint32 oct3 = 3;
+  uint32 oct4 = 4;
+}
+
+message BayNameSettings {
+  repeated string names = 1;
+}
+
+message SysModeSettings {
+  SystemMode mode = 1;
+}

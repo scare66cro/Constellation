@@ -1,0 +1,72 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// alarms.proto — Warnings and system commands (clear alarm, defaults, etc.)
+// Maps to: UI_SendWarnings, ClearAlarm, SetDefault, etc.
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+import "agristar/common.proto";
+
+// ─── WarningReport — active warnings/alarms (UI_SendWarnings) ────────────
+// Pushed on change. Replaces the dynamic warning string system.
+message WarningReport {
+  repeated Warning warnings = 1;
+}
+
+message Warning {
+  uint32        code        = 1;   // Warning code (unique per warning type)
+  AlarmSeverity severity    = 2;
+  string        message     = 3;   // Human-readable warning text
+  uint32        eq_index    = 4;   // Related equipment (0 if system-level)
+  uint32        timestamp   = 5;   // Seconds since boot when warning occurred
+}
+
+// ─── SystemCmd — action commands (Bridge → Firmware) ─────────────────────
+// Replaces the UI_ActionPosts array (SetDefault, ClearAlarm, BOOTLOADER, etc.)
+message SystemCmd {
+  SystemCmdType cmd_type = 1;
+  uint32        param    = 2;   // Command-specific parameter
+  string        str_param = 3;  // String parameter (for queries, etc.)
+}
+
+enum SystemCmdType {
+  CMD_UNKNOWN           = 0;
+  CMD_CLEAR_ALARM       = 1;
+  CMD_SET_DEFAULT       = 2;   // Restore saved settings
+  CMD_PANEL_DEFAULT     = 3;   // Restore from local flash
+  CMD_FACTORY_DEFAULT   = 4;   // Full factory reset
+  CMD_BOOTLOADER        = 5;   // Enter firmware update mode
+  CMD_CLEAR_DIAG        = 6;   // Clear refrigeration diagnostics
+  CMD_FIND_BOARD        = 7;   // Discover analog boards
+  CMD_RESET_IO_CONFIG   = 8;   // Reset I/O mapping to defaults
+  CMD_RESET_PWM_CONFIG  = 9;   // Reset PWM to defaults
+  CMD_DELETE_NODES      = 10;  // Delete all network nodes
+  CMD_CLEAR_IR_SENSORS  = 11;  // Reset IR sensor flags
+  CMD_DOWNLOAD_SETTINGS = 12;  // Request settings file download
+  CMD_SLAVE_UPDATE      = 13;  // Trigger slave firmware update
+  CMD_SHOW_PASSWORD     = 14;  // Request password display
+  CMD_START_LOAD_LOG    = 15;  // Start load monitoring log
+  // Log-related commands
+  CMD_GRAPH_QUERY       = 20;  // param = query params
+  CMD_RECORDS_QUERY     = 21;
+  CMD_CLEAR_USER_LOG    = 22;
+  CMD_SEND_USER_LOG_USB = 23;
+  CMD_SEND_LOG_FILE     = 24;
+  CMD_SYSLOG_VIEW       = 25;
+  CMD_SYSLOG_USB        = 26;
+  CMD_CLEAR_SYSLOG      = 27;
+  CMD_PID_LOG_VIEW      = 28;
+  CMD_PID_LOG_USB       = 29;
+  CMD_PID_CLEAR_LOG     = 30;
+  CMD_LOAD_LOG_START_DATE = 31;
+  CMD_LOAD_LOG_TABLE    = 32;
+  CMD_SEND_LOAD_LOG_USB = 33;
+  CMD_CLEAR_LOAD_LOG    = 34;
+  CMD_SD_CARD_INIT      = 35;
+  // Navigation (aux/board browsing)
+  CMD_NEXT_AUX          = 40;
+  CMD_PREV_AUX          = 41;
+  CMD_NEXT_BOARD        = 42;
+  CMD_PREV_BOARD        = 43;
+  CMD_SAME_BOARD        = 44;
+}

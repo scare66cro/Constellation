@@ -1,0 +1,12 @@
+# nanopb options for io.proto
+agristar.IoConfig.output_map             max_count:32
+agristar.IoConfig.input_map              max_count:32
+agristar.IoDefinition.entries            max_count:48
+agristar.IoEntry.name                    max_size:24
+agristar.AnalogBoard.label               max_size:16
+agristar.AnalogBoard.version             max_size:16
+agristar.AnalogBoard.sensors             max_count:4
+agristar.AnalogSensor.label              max_size:16
+agristar.AvailableIo.output_pins         max_count:32
+agristar.AvailableIo.input_pins          max_count:32
+agristar.IoNameUpdate.new_name           max_size:24

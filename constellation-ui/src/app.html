@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.png" />
+		<meta name="viewport" content="width=device-width" />
+		%sveltekit.head%
+		<script>
+			// Early service worker registration - runs before SvelteKit hydrates
+			// Critical for loopback mode: ensures SW intercepts requests even on cold start
+			if ('serviceWorker' in navigator) {
+				navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+					.then(function(reg) {
+						console.log('[SW-early] Registered:', reg.scope);
+					})
+					.catch(function(err) {
+						console.warn('[SW-early] Registration failed:', err);
+					});
+			}
+			
+			// Detect if we're on loopback - these should always work without internet
+			var isLoopback = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
+			
+			// Override navigator.onLine for loopback - we don't care about internet status
+			if (isLoopback) {
+				// Force navigator.onLine to true for loopback
+				// This prevents some browser behaviors that check online status
+				try {
+					Object.defineProperty(navigator, 'onLine', {
+						get: function() { return true; },
+						configurable: true
+					});
+				} catch (e) {
+					console.warn('[loopback] Could not override navigator.onLine:', e);
+				}
+			}
+			
+			// Global error handler to catch unhandled errors and show custom UI
+			window.addEventListener('error', function(event) {
+				console.error('[global-error]', event.error || event.message);
+				// Store error for debugging
+				try {
+					var errors = JSON.parse(sessionStorage.getItem('app_errors') || '[]');
+					errors.push({
+						message: event.message,
+						filename: event.filename,
+						lineno: event.lineno,
+						colno: event.colno,
+						timestamp: Date.now(),
+						isLoopback: isLoopback
+					});
+					if (errors.length > 20) errors.shift();
+					sessionStorage.setItem('app_errors', JSON.stringify(errors));
+				} catch (e) {}
+			});
+			
+			// Catch unhandled promise rejections (fetch failures, etc.)
+			window.addEventListener('unhandledrejection', function(event) {
+				console.error('[unhandled-rejection]', event.reason);
+				try {
+					var errors = JSON.parse(sessionStorage.getItem('app_errors') || '[]');
+					errors.push({
+						type: 'unhandledrejection',
+						reason: String(event.reason),
+						timestamp: Date.now(),
+						isLoopback: isLoopback
+					});
+					if (errors.length > 20) errors.shift();
+					sessionStorage.setItem('app_errors', JSON.stringify(errors));
+				} catch (e) {}
+			});
+		</script>
+	</head>
+	<body data-sveltekit-preload-data="hover" data-theme="gellert-theme">
+		<div style="display: contents">%sveltekit.body%</div>
+		<noscript>
+			<style>
+				.offline-fallback {
+					display: flex;
+					align-items: center;
+					justify-content: center;
+					height: 100vh;
+					background: #111;
+					color: #eee;
+					font-family: system-ui, Arial, sans-serif;
+					text-align: center;
+					padding: 20px;
+				}
+			</style>
+			<div class="offline-fallback">
+				<div>
+					<h1>JavaScript Required</h1>
+					<p>Please enable JavaScript to use this application.</p>
+					<p><a href="/" style="color: #4fc3f7;">Reload</a></p>
+				</div>
+			</div>
+		</noscript>
+	</body>
+</html>

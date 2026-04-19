@@ -1,0 +1,119 @@
+#ifndef __DRIVERS_PINOUT_H__
+#define __DRIVERS_PINOUT_H__
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "driverlib/gpio.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/timer.h"
+#include "inc/hw_memmap.h"
+#include "inc/hw_ints.h"
+
+typedef struct
+{
+	unsigned long pin;
+	unsigned long port;
+	unsigned long periph;
+	unsigned long strength;
+	unsigned long type;
+	unsigned int initial_state;
+}_pin_str;
+
+#define RTC_I2C_BASE						I2C0_BASE
+
+// I2C0
+static const _pin_str SCL     		= { GPIO_PIN_2, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,		0 };	// I2C (GPIO_PB2_I2C0SCL)
+static const _pin_str SDA      		= { GPIO_PIN_3, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 }; 	// I2C (GPIO_PB3_I2C0SDA)
+
+// UART0
+static const _pin_str RX      		= { GPIO_PIN_0, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,		0 };	// UART (GPIO_PA0_U0RX)
+static const _pin_str TX      		= { GPIO_PIN_1, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 }; 	// UART (GPIO_PA1_U0TX)
+
+#define LTX_UART		UART1_BASE
+#define LTX_UART_INT	INT_UART1
+static const _pin_str LTX_RX       = { GPIO_PIN_0, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_8MA, GPIO_PIN_TYPE_STD_WPU,	0 };	// UART1
+static const _pin_str LTX_TX       = { GPIO_PIN_1, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_8MA, GPIO_PIN_TYPE_STD_WPU,	0 };	// UART1
+
+// RS485 (analog boards)
+#define AUX_UART    UART2_BASE
+#define AUX_UART_INT  INT_UART2
+static const _pin_str AUX_DIR      = { GPIO_PIN_5, GPIO_PORTC_BASE, SYSCTL_PERIPH_GPIOC, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU, 0 };  // Output
+
+// Watchdog / Heartbeat
+static const _pin_str WD_CPLD      = { GPIO_PIN_0, GPIO_PORTK_BASE, SYSCTL_PERIPH_GPIOK, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,  0 };
+
+// shift registers
+static const _pin_str SS_MOSI       = { GPIO_PIN_4, GPIO_PORTE_BASE, SYSCTL_PERIPH_GPIOE, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 0 };
+static const _pin_str SS_MISO       = { GPIO_PIN_5, GPIO_PORTE_BASE, SYSCTL_PERIPH_GPIOE, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 0 };
+static const _pin_str SS_SCLK       = { GPIO_PIN_5, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 0 };
+static const _pin_str SS_RCLK       = { GPIO_PIN_1, GPIO_PORTH_BASE, SYSCTL_PERIPH_GPIOH, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 0 };
+static const _pin_str SS_CS0        = { GPIO_PIN_4, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_4MA, GPIO_PIN_TYPE_STD_WPU, 1 };
+static const _pin_str SS_CS1        = { GPIO_PIN_4, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_4MA, GPIO_PIN_TYPE_STD_WPU, 1 };
+static const _pin_str SS_CS2        = { GPIO_PIN_5, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_4MA, GPIO_PIN_TYPE_STD_WPU, 1 };
+
+// SPI0
+static const _pin_str SPICLK        = { GPIO_PIN_2, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_8MA, GPIO_PIN_TYPE_STD,		0 };	// SPI
+static const _pin_str MOSI          = { GPIO_PIN_4, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,		0 };	// SPI
+static const _pin_str MISO          = { GPIO_PIN_5, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,		0 };	// SPI
+static const _pin_str FLASH_CS      = { GPIO_PIN_3, GPIO_PORTA_BASE, SYSCTL_PERIPH_GPIOA, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD,	1 }; 	// OUTPUT
+static const _pin_str SD_CS         = { GPIO_PIN_2, GPIO_PORTE_BASE, SYSCTL_PERIPH_GPIOE, GPIO_STRENGTH_4MA, GPIO_PIN_TYPE_STD_WPU,   1 };  // OUTPUT
+//static const _pin_str SD_SW         = { GPIO_PIN_2, GPIO_PORTL_BASE, SYSCTL_PERIPH_GPIOL, GPIO_STRENGTH_4MA, GPIO_PIN_TYPE_STD_WPU,   0 };  // OUTPUT
+
+#define SD_BASE       SSI0_BASE
+#define SD_TX         MOSI
+#define SD_MAX_SPEED  24000000
+
+// Net
+static const _pin_str NET_LINK      = { GPIO_PIN_0, GPIO_PORTF_BASE, SYSCTL_PERIPH_GPIOF, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU, 1 };	// NET
+static const _pin_str NET_ACTIVITY  = { GPIO_PIN_4, GPIO_PORTF_BASE, SYSCTL_PERIPH_GPIOF, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU, 1 };	// NET
+
+
+// Analog inputs
+static const _pin_str RT_AD			= { GPIO_PIN_5, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// ADC 1.3 A5 PD5/AIN6
+static const _pin_str LT_AD			= { GPIO_PIN_4, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// ADC 1.6 A4 PD4/AIN7
+
+// Whats
+#define AES_MUX_TIMER_BASE	TIMER0_BASE
+static const _pin_str AES_MUX		= { GPIO_PIN_4, GPIO_PORTL_BASE, SYSCTL_PERIPH_GPIOL, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	0 };	// INPUT 1.5 A6 PL4 TIMER!
+static const _pin_str AES_ERROR		= { GPIO_PIN_0, GPIO_PORTL_BASE, SYSCTL_PERIPH_GPIOL, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// INPUT 1.19 D1 PL0
+static const _pin_str DEFAULT		= { GPIO_PIN_0, GPIO_PORTP_BASE, SYSCTL_PERIPH_GPIOP, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	0 };	// INPUT 1.10 B1 PP0
+
+// SPI2 Shifters
+//#define SHIFT_595_BASE	SSI2_BASE
+//#define SHIFT_597_BASE	SSI2_BASE
+// Wired backwards!!! SDO-SDI
+static const _pin_str SDO			= { GPIO_PIN_1, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	0 };	// SPI 1.4 A0 PD1 (GPIO_PD1_SSI2XDAT0)
+static const _pin_str SDI			= { GPIO_PIN_0, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// SPI 1.7 B0 PD0 (GPIO_PD0_SSI2XDAT1)
+static const _pin_str SCK			= { GPIO_PIN_3, GPIO_PORTD_BASE, SYSCTL_PERIPH_GPIOD, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	1 };	// SPI 1.28 A2 PD3 (GPIO_PD3_SSI2CLK)
+static const _pin_str CS_595		= { GPIO_PIN_1, GPIO_PORTM_BASE, SYSCTL_PERIPH_GPIOM, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	1 };	// OUTPUT 1.25 A1 PM1
+static const _pin_str CS_597		= { GPIO_PIN_7, GPIO_PORTM_BASE, SYSCTL_PERIPH_GPIOM, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU,	1 };	// OUTPUT 1.27 A3 PM7
+
+// SPI1 Codec
+//static const _pin_str SCLK			= { GPIO_PIN_5, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_12MA, GPIO_PIN_TYPE_STD, 	0 };	// SPI 1.20 E0 PB5 (GPIO_PB5_SSI1CLK)
+//static const _pin_str SI			= { GPIO_PIN_5, GPIO_PORTE_BASE, SYSCTL_PERIPH_GPIOE, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// SPI 2.10 E2 PE5 (GPIO_PE5_SSI1XDAT1)
+//static const _pin_str SO			= { GPIO_PIN_4, GPIO_PORTE_BASE, SYSCTL_PERIPH_GPIOE, GPIO_STRENGTH_12MA, GPIO_PIN_TYPE_STD, 	0 };	// SPI 2.25 E1 PE4 (GPIO_PE4_SSI1XDAT0)
+//static const _pin_str DREQ			= { GPIO_PIN_3, GPIO_PORTL_BASE, SYSCTL_PERIPH_GPIOL, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// INPUT 1.17 E6 PL3
+//static const _pin_str XDCS			= { GPIO_PIN_1, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	1 };	// OUTPUT 1.15 E4 PB1
+//static const _pin_str XCS			= { GPIO_PIN_3, GPIO_PORTP_BASE, SYSCTL_PERIPH_GPIOP, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	1 };	// OUTPUT 1.16 E3 PP3
+//static const _pin_str VLSI_RST		= { GPIO_PIN_0, GPIO_PORTB_BASE, SYSCTL_PERIPH_GPIOB, GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD, 	0 };	// OUTPUT 1.18 E5 PB0
+
+
+
+
+
+extern void configure_output_pin(_pin_str pin);
+
+void set_output(_pin_str pin, unsigned int state);
+unsigned int read_input(_pin_str pin);
+
+
+void CreateSPILocks(void);
+
+void PinoutSet(void);
+
+int spi_lock(unsigned char block);
+void spi_unlock(void);
+
+
+#endif // __DRIVERS_PINOUT_H__

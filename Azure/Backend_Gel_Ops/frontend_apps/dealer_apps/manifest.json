@@ -1,0 +1,20 @@
+{
+  "short_name": "Gellert App",
+  "name": "Gellert Storage Management App",
+  "icons": [
+    {
+      "src": "/static/storage_pwa/logos/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/storage_pwa/logos/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}

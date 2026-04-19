@@ -1,0 +1,5 @@
+# nanopb options for logs.proto
+agristar.LogChunk.data                   max_size:3500
+agristar.LogChunk.metadata               max_size:256
+agristar.LogQuery.start_date             max_size:16
+agristar.LogQuery.end_date               max_size:16

@@ -1,0 +1,29 @@
+{
+    "app.login-title": "Ukrainian writing {time}",
+    "app.error-popup.network-connection": "Помилка мережі, перевірте підключення до Інтернету",
+    "login.input-password":"Пароль",
+    "login.input-username":"Ім'я користувача",
+    "login.login-button":"Вхід",
+    "login.login-credentials-failed":"Ім'я користувача чи пароль неправильні",
+    "login.login-with-google":"Увійти за допомогою Google",
+    "login.login-with-microsoft":"Увійти через Microsoft",
+    "bottomNav.dashboard-tab-label":"Панель приладів",
+    "bottomNav.events-tab-label":"Події",
+    "bottomNav.storages-tab-label":"Сховища",
+    "bottomNav.device-tab-label":"Пристрої",
+    "bottomNav.more-tab-label":"Більше",
+    "bottomNav.BusinessAccount-tab-label":"Бізнес-рахунок",
+    "bottomNav.ManageStaff-tab-label":"Управління персоналом",
+    "bottomNav.MyProfile-tab-label":"Мій профіль",
+    "bottomNav.ContactDealer-tab-label":"Зв'яжіться з дилером",
+    "bottomNav.AppSettings-tab-label":"Налаштування програми",
+    "bottomNav.Logout-tab-label":"Вийти",
+    "sites.no-sites-to-view":"Немає сайтів для перегляду",
+
+    "appSettings.languages-header":"мову",
+    "appSettings.display-units-header":"вимірювальна система",
+    "appSettings.font-size-header":"розмір шрифту",
+
+    "events.no-events-to-view":"Немає подій для перегляду"
+
+}

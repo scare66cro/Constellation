@@ -1,0 +1,19 @@
+# nanopb options for system.proto
+agristar.SystemStatus.fan_speed          max_size:16
+agristar.SystemStatus.cool_output        max_size:16
+agristar.SystemStatus.cool_label         max_size:16
+agristar.SystemStatus.burner_output      max_size:16
+agristar.BasicSetup.storage_name         max_size:32
+agristar.BasicSetup.home_page            max_size:16
+agristar.BasicSetup.master_ip            max_size:16
+agristar.BasicSetup.login_pw             max_size:32
+agristar.DateTime.date_str               max_size:16
+agristar.DateTime.time_str               max_size:16
+agristar.ServiceInfo.dealer_name         max_size:32
+agristar.ServiceInfo.dealer_phone        max_size:20
+agristar.ServiceInfo.dealer_email        max_size:48
+agristar.ServiceInfo.notes               max_size:64
+agristar.VersionInfo.arm_version         max_size:16
+agristar.VersionInfo.bootloader_version  max_size:16
+agristar.BoardVersion.version            max_size:16
+agristar.VersionInfo.boards              max_count:16

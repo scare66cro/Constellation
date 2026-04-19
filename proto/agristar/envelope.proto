@@ -1,0 +1,126 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// envelope.proto — Top-level message wrapper for all serial communication
+//
+// EVERY message on the wire is an Envelope. The oneof determines the payload.
+// Field number ranges:
+//   10-29:  Firmware → Bridge (push / periodic updates)
+//   30-39:  Firmware → Bridge (responses to requests)
+//   80-89:  Bridge → Firmware (equipment/system commands)
+//   90-99:  Bridge → Firmware (settings updates)
+//   100-109: Protocol control (ACK, heartbeat, data request)
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+import "agristar/common.proto";
+import "agristar/system.proto";
+import "agristar/equipment.proto";
+import "agristar/settings.proto";
+import "agristar/io.proto";
+import "agristar/sensors.proto";
+import "agristar/alarms.proto";
+import "agristar/logs.proto";
+import "agristar/accounts.proto";
+import "agristar/firmware.proto";
+import "agristar/orbit.proto";
+
+// ─── Envelope — wraps every message on the wire ──────────────────────────
+message Envelope {
+  uint32 protocol_version = 1;  // Bump only on breaking framing changes
+  uint32 seq              = 2;  // Sequence number (for ACK matching)
+
+  oneof msg {
+    // ── Firmware → Bridge: push/periodic (10-29) ──────────────────────
+    SystemStatus      system_status      = 10;
+    EquipmentStatus   equipment_status   = 11;
+    WarningReport     warning_report     = 12;
+    SensorData        sensor_data        = 13;
+    Runtimes          runtimes           = 14;
+    HumidModes        humid_modes        = 15;
+    AuxSwitches       aux_switches       = 16;
+    DataLoadStatus    data_load_status   = 17;
+    FanRuntime        fan_runtime        = 18;
+
+    // ── Firmware → Bridge: settings/config data (20-29) ───────────────
+    BasicSetup        basic_setup        = 20;
+    DateTime          date_time          = 21;
+    VersionInfo       version_info       = 22;
+    ServiceInfo       service_info       = 23;
+    IoConfig          io_config          = 24;
+    IoDefinition      io_definition      = 25;
+    AnalogBoard       analog_board       = 26;
+    AvailableIo       available_io       = 27;
+    SensorLabels      sensor_labels      = 28;
+    AccountSettings   account_settings   = 29;
+
+    // ── Firmware → Bridge: responses/data (30-39) ─────────────────────
+    LogChunk          log_chunk          = 30;
+    PasswordResponse  password_response  = 31;
+
+    // ── Firmware → Bridge: all settings pages (40-79) ─────────────────
+    PlenumSettings        plenum_settings        = 40;
+    FanSpeedSettings      fan_speed_settings     = 41;
+    FanBoostSettings      fan_boost_settings     = 42;
+    RampRateSettings      ramp_rate_settings     = 43;
+    RefrigSettings        refrig_settings        = 44;
+    BurnerSettings        burner_settings        = 45;
+    Co2Settings           co2_settings           = 46;
+    CureSettings          cure_settings          = 47;
+    ClimacellSettings     climacell_settings     = 48;
+    ClimacellTimes        climacell_times        = 49;
+    HumidCtrlSettings     humid_ctrl_settings    = 50;
+    OutsideAirSettings    outside_air_settings   = 51;
+    MiscSettings          misc_settings          = 52;
+    FailureSettings       failure_settings       = 53;
+    FailureSettings2      failure_settings2      = 54;
+    TempAlarmSettings     temp_alarm_settings    = 55;
+    DoorSettings          door_settings          = 56;
+    LoadMonitorSettings   load_monitor_settings  = 57;
+    AuxProgramSettings    aux_program_settings   = 58;
+    UserLogSettings       user_log_settings      = 59;
+    PidSettings           pid_settings           = 60;
+    GraphFavoriteSettings graph_fav_settings     = 61;
+    EmailSettings         email_settings         = 62;
+    AlertSettings         alert_settings         = 63;
+    PwmChannelSettings    pwm_settings           = 64;
+    NetworkNodeSettings   network_nodes          = 65;
+
+    // ── Firmware → Bridge: log data push (70-79) ──────────────────────
+    LogRecord         log_record         = 70;
+    ActivityEvent     activity_event     = 71;
+
+    // ── Bridge → Firmware: commands (80-89) ───────────────────────────
+    EquipmentCmd      equipment_cmd      = 80;
+    RefrigDiagCmd     refrig_diag_cmd    = 81;
+    SystemCmd         system_cmd         = 82;
+    LogQuery          log_query          = 83;
+    PasswordAuth      password_auth      = 84;
+    NetworkNodeCmd    network_node_cmd   = 85;
+    IoNameUpdate      io_name_update     = 86;
+
+    // ── Bridge → Firmware: settings updates (90-99) ───────────────────
+    SettingsUpdate    settings_update    = 90;
+
+    // ── Protocol control (100-109) ────────────────────────────────────
+    Ack               ack                = 100;
+    Heartbeat         heartbeat          = 101;
+    DataRequest       data_request       = 102;
+
+    // ── Firmware update (110-119) ─────────────────────────────────────
+    // Bridge → Firmware
+    FwBeginUpdate     fw_begin_update    = 110;
+    FwDataChunk       fw_data_chunk      = 111;
+    FwFinalizeUpdate  fw_finalize_update = 112;
+    FwActivateBank    fw_activate_bank   = 113;
+    // Firmware → Bridge
+    FwUpdateStatus    fw_update_status   = 114;
+    FwBankInfo        fw_bank_info       = 115;
+
+    // ── Orbit module management (120-129) ─────────────────────────
+    // Firmware → Bridge
+    OrbitStatus       orbit_status       = 120;
+    OrbitDiscovery    orbit_discovery    = 121;
+    // Bridge → Firmware
+    OrbitRoleAssign   orbit_role_assign  = 122;
+  }
+}

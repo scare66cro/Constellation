@@ -1,0 +1,2291 @@
+{
+  "EquipStatusDynAS2TranslatedText[11].cure": {
+    "defaultMessage": "固化"
+  },
+  "EquipStatusDynAS2TranslatedText[15].burner": {
+    "defaultMessage": "燃烧器输出"
+  },
+  "EquipStatusDynAS2TranslatedText[17].dehumidifier": {
+    "defaultMessage": "除湿 机"
+  },
+  "MainDynTranslatedText[2].blend": {
+    "defaultMessage": "仓库外空气混合"
+  },
+  "RunTimesDynTranslatedText[1].cure": {
+    "defaultMessage": "固化"
+  },
+  "RunTimesDynTranslatedText[3].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "RunTimesDynTranslatedText[5].recirculation": {
+    "defaultMessage": "循环"
+  },
+  "RunTimesDynTranslatedText[7].standby": {
+    "defaultMessage": "待机"
+  },
+  "WARN_ACTLOGREAD": {
+    "defaultMessage": "读取活动日志失败 (检查SD卡)",
+    "description": "Warning message for reading from activity log"
+  },
+  "WARN_ACTLOGWRITE": {
+    "defaultMessage": "写入活动日志失败 (检查SD卡)",
+    "description": "Warning message for writing to activity log"
+  },
+  "WARN_ACTLOG_CLEAR": {
+    "defaultMessage": "活动日志已清除",
+    "description": "Warning message for activity log cleared"
+  },
+  "WARN_AIRFLOW": {
+    "defaultMessage": "气流限制故障",
+    "description": "Warning message for air flow failure"
+  },
+  "WARN_ALARMS_FILE": {
+    "defaultMessage": "No alarms file available (languageAlarms.txt)",
+    "description": "Warning message for no language alarms file"
+  },
+  "WARN_ARMCOMM": {
+    "defaultMessage": "系统控制器未响应",
+    "description": "Warning message for system controller not responding"
+  },
+  "WARN_AUX": {
+    "defaultMessage": "辅助",
+    "description": "Warning message for auxiliary"
+  },
+  "WARN_AUX1_AS1": {
+    "defaultMessage": "辅助 1",
+    "description": "Warning message for auxiliary 1"
+  },
+  "WARN_AUX2_AS1": {
+    "defaultMessage": "辅助 2",
+    "description": "Warning message for auxiliary 2"
+  },
+  "WARN_AUXLOWPLENTEMP": {
+    "defaultMessage": "低气室温度故障",
+    "description": "Warning message for auxiliary low plenum temperature"
+  },
+  "WARN_AUX_AS1": {
+    "defaultMessage": "辅助",
+    "description": "Warning message for auxiliary"
+  },
+  "WARN_BOARDNOTHUMID": {
+    "defaultMessage": "模拟板2不是湿度板",
+    "description": "Warning message for analog board 2 is not humidity board"
+  },
+  "WARN_BOARDNOTTEMP": {
+    "defaultMessage": "模拟板1不是温度板",
+    "description": "Warning message for analog board 1 is not temperature board"
+  },
+  "WARN_BOARDREMOVED": {
+    "defaultMessage": "模拟板已撤掉",
+    "description": "Warning message for analog board removed"
+  },
+  "WARN_BURNER": {
+    "defaultMessage": "燃烧器",
+    "description": "Warning message for burner"
+  },
+  "WARN_CAVHEATCALC": {
+    "defaultMessage": "无法计算空心墙内温度/堆风扇差分——参考温度无效",
+    "description": "Warning message for no cavity heat calculation"
+  },
+  "WARN_CAVITYHEAT": {
+    "defaultMessage": "空心墙加热器/堆风扇",
+    "description": "Warning message for cavity heater"
+  },
+  "WARN_CLEARALERTS": {
+    "defaultMessage": "警报已清除",
+    "description": "Warning message for alarms cleared"
+  },
+  "WARN_CLIMACELL": {
+    "defaultMessage": "蒸發冷卻器",
+    "description": "Warning message for climacell"
+  },
+  "WARN_COMMERR": {
+    "defaultMessage": "模拟板通信错误",
+    "description": "Warning message for analog board communication"
+  },
+  "WARN_DATALOGFULL": {
+    "defaultMessage": "历史记录日志 (SD卡) 是完整的——设置卡覆盖旧记录或插入新卡",
+    "description": "Warning message for sd card full"
+  },
+  "WARN_DATALOGREAD": {
+    "defaultMessage": "读取历史记录日志失败 (检查SD卡)",
+    "description": "Warning message for reading from history log"
+  },
+  "WARN_DATALOGWRITE": {
+    "defaultMessage": "写入历史记录日志失败 (检查SD卡)",
+    "description": "Warning message for writing to history log"
+  },
+  "WARN_DATETIME": {
+    "defaultMessage": "系统日期/时间无效 (检查系统电池)",
+    "description": "Warning message for check system battery"
+  },
+  "WARN_DEFAULTTEMP": {
+    "defaultMessage": "少了默认温度板",
+    "description": "Warning message for default temperature board missing"
+  },
+  "WARN_DEFHUMDIS": {
+    "defaultMessage": "默认湿度板已禁用",
+    "description": "Warning message for default humidity board disabled"
+  },
+  "WARN_DEFTEMPDIS": {
+    "defaultMessage": "默认温度板已禁用",
+    "description": "Warning message for default temperature board is disabled"
+  },
+  "WARN_DSTSTART": {
+    "defaultMessage": "时钟已调整为夏令时",
+    "description": "Warning message for adjusted for daylight saving time"
+  },
+  "WARN_DSTSTOP": {
+    "defaultMessage": "时钟已调整为标准时间",
+    "description": "Warning message for adjusted for standard time"
+  },
+  "WARN_EEPROMACCESS": {
+    "defaultMessage": "无法访问系统内存 (EEPROM)",
+    "description": "Warning message for unable to access system memory"
+  },
+  "WARN_EQUIPDESC_FILE": {
+    "defaultMessage": "No equipment descriptions file available (languageEquipDesc.txt)",
+    "description": "Warning message for no language equipment description file"
+  },
+  "WARN_EXPANSIONBOARD": {
+    "defaultMessage": "输入/输出 扩充板已撤掉",
+    "description": "Warning message for i/o expansion board removed"
+  },
+  "WARN_FACTORYDEFAULT": {
+    "defaultMessage": "系统设置已恢复到出厂默认值",
+    "description": "Warning message for factory default"
+  },
+  "WARN_FAN": {
+    "defaultMessage": "风扇有故障",
+    "description": "Warning message for fan failure"
+  },
+  "WARN_FILEACCESS": {
+    "defaultMessage": "文件下载错误——无法访问存储设备",
+    "description": "Warning message for unable to access storage device"
+  },
+  "WARN_FILENAME": {
+    "defaultMessage": "文件下载错误——没有文件名或未提供IP地址",
+    "description": "Warning message for no file name"
+  },
+  "WARN_FILEWRITE": {
+    "defaultMessage": "文件下载错误——无法写入存储设备 (可能已满)",
+    "description": "Warning message for unable to write storage device"
+  },
+  "WARN_HEAT": {
+    "defaultMessage": "加热",
+    "description": "Warning message for heat"
+  },
+  "WARN_HIGHCO2": {
+    "defaultMessage": "CO2程度高",
+    "description": "Warning message for high co2 level"
+  },
+  "WARN_HIGHPLENTEMP": {
+    "defaultMessage": "高气室温度故障",
+    "description": "Warning message for high plenum temperature"
+  },
+  "WARN_HIGHPLENTEMP_BEE": {
+    "defaultMessage": "高充温警告",
+    "description": "Warning message for high plenum temperature"
+  },
+  "WARN_HUMID1_AS1": {
+    "defaultMessage": "加湿器1",
+    "description": "Warning message for humidifier 1"
+  },
+  "WARN_HUMID2_AS1": {
+    "defaultMessage": "加湿器2",
+    "description": "Warning message for humidifier 2"
+  },
+  "WARN_HUMIDIFIER": {
+    "defaultMessage": "加湿器",
+    "description": "Warning message for humidifier"
+  },
+  "WARN_INVALIDCO2": {
+    "defaultMessage": "CO2值无效",
+    "description": "Warning message for invalid co2 value"
+  },
+  "WARN_INVALIDDATETIME": {
+    "defaultMessage": "由于日期或时间值无效，无法设置时钟",
+    "description": "Warning message for invalid date or time value"
+  },
+  "WARN_INVALIDPLENHUMID": {
+    "defaultMessage": "气室温度无效",
+    "description": "Warning message for invalid plenum humidity"
+  },
+  "WARN_LIGHTS": {
+    "defaultMessage": "灯",
+    "description": "Warning message for lights"
+  },
+  "WARN_LIGHTS1_AS1": {
+    "defaultMessage": "灯1",
+    "description": "Warning message for lights 1"
+  },
+  "WARN_LIGHTS2_AS1": {
+    "defaultMessage": "灯2",
+    "description": "Warning message for lights 2"
+  },
+  "WARN_LIGHTS_OFF": {
+    "defaultMessage": "灯自动关闭",
+    "description": "Warning that the lights automatically turned off"
+  },
+  "WARN_LOADLOG_CLEAR": {
+    "defaultMessage": "已清除装货监视器数据日志",
+    "description": "Warning message for loading monitor log cleared"
+  },
+  "WARN_LOADLOG_FULL": {
+    "defaultMessage": "装货监视日志完全——终止数据获取",
+    "description": "Warning message for loading monitor log full"
+  },
+  "WARN_LOADMON_BAY1": {
+    "defaultMessage": "装货监视器温度高",
+    "description": "Warning message for loading monitor high temperature"
+  },
+  "WARN_LOADMON_BAY2": {
+    "defaultMessage": "装货监视器温度低",
+    "description": "Warning message for loading monitor low temperature"
+  },
+  "WARN_LOWPLENTEMP": {
+    "defaultMessage": "低气室温度故障",
+    "description": "Warning message for low plenum temperature"
+  },
+  "WARN_LOWPLENTEMP_BEE": {
+    "defaultMessage": "充气室低温警告",
+    "description": "Warning message for low plenum temperature"
+  },
+  "WARN_MALLOC": {
+    "defaultMessage": "无法为消息分配内存 (ARM)",
+    "description": "Warning message for unable to allocate memory"
+  },
+  "WARN_MODECHANGE": {
+    "defaultMessage": "系统模式已更改为",
+    "description": "Warning message for system mode changed"
+  },
+  "WARN_NEWBOARD": {
+    "defaultMessage": "检测到新的模拟板",
+    "description": "Warning message for new analog board detected"
+  },
+  "WARN_NOBROADCAST": {
+    "defaultMessage": "此控制器配置为从属服务器，在10分钟内未收到主广播",
+    "description": "Warning message for no master broadcast"
+  },
+  "WARN_NO_OUTPUT": {
+    "defaultMessage": "模式配置错误",
+    "description": "Warning message for mode configuration"
+  },
+  "WARN_NO_PLENTEMP": {
+    "defaultMessage": "无有效的气室温度",
+    "description": "Warning message for no valid plenum temperatures"
+  },
+  "WARN_NO_STARTTEMP": {
+    "defaultMessage": "无法计算冷却可用温度",
+    "description": "Warning message for cooling available temperature"
+  },
+  "WARN_OUTHUMIDSENSOR": {
+    "defaultMessage": "仓库外空气湿度无效",
+    "description": "Warning message for invalid outside air humidity"
+  },
+  "WARN_OUTHUMIDVAR": {
+    "defaultMessage": "仓库外空气湿度方差",
+    "description": "Warning message for outside air humidity variance"
+  },
+  "WARN_OUTTEMPSENSOR": {
+    "defaultMessage": "仓库外空气温度无效",
+    "description": "Warning message for invalid outside air temperature"
+  },
+  "WARN_PLENHUMID": {
+    "defaultMessage": "气室湿度低",
+    "description": "Warning message for low plenum humidity"
+  },
+  "WARN_PLENSENSOR": {
+    "defaultMessage": "气室温度传感器方差",
+    "description": "Warning message for plenum temperature variance"
+  },
+  "WARN_PLENTEMP1": {
+    "defaultMessage": "气室温度无效1",
+    "description": "Warning message for invalid plenum temperature"
+  },
+  "WARN_PLENTEMP2": {
+    "defaultMessage": "气室温度无效2",
+    "description": "Warning message for invalid plenum temperature"
+  },
+  "WARN_POWER": {
+    "defaultMessage": "系统电力故障",
+    "description": "Warning message for system power"
+  },
+  "WARN_REFRIGSTANDBY": {
+    "defaultMessage": "系统进行制冷待机",
+    "description": "Warning message for system in refrigeration standby"
+  },
+  "WARN_REFRIG_AS1": {
+    "defaultMessage": "制冷",
+    "description": "Warning message for refrigeration"
+  },
+  "WARN_REFRIG_DEFROST": {
+    "defaultMessage": "制冷除霜",
+    "description": "Warning message for refrigeration defrost"
+  },
+  "WARN_REFRIG_PWM": {
+    "defaultMessage": "制冷",
+    "description": "Warning message for refrigeration"
+  },
+  "WARN_REFRIG_STAGE": {
+    "defaultMessage": "制冷阶段",
+    "description": "Warning message for regrigeration stage"
+  },
+  "WARN_REMOTESTANDBY": {
+    "defaultMessage": "系统进行遥控待机",
+    "description": "Warning message for system in remote standby"
+  },
+  "WARN_RETURNAIRHUMID": {
+    "defaultMessage": "返回空气湿度无效",
+    "description": "Warning message for return air humidity"
+  },
+  "WARN_RETURNAIRTEMP": {
+    "defaultMessage": "返回空气温度无效",
+    "description": "Warning message for invalid return air temperature"
+  },
+  "WARN_RTCACCESS": {
+    "defaultMessage": "无法访问系统时钟",
+    "description": "Warning message for unable to access system clock"
+  },
+  "WARN_SAVESETTINGS": {
+    "defaultMessage": "无法读取或保存系统设置",
+    "description": "Warning message for unable to read/write system settings"
+  },
+  "WARN_SDCARD": {
+    "defaultMessage": "无法访问SD卡",
+    "description": "Warning message for unable to access SD card"
+  },
+  "WARN_SDCARD_DIFF": {
+    "defaultMessage": "检测到不同的SD卡——继续使用",
+    "description": "Warning message for different SD card"
+  },
+  "WARN_SDCARD_INCOMPAT": {
+    "defaultMessage": "检测到不兼容SD卡——SD卡将被删除",
+    "description": "Warning message for incompatible sd card"
+  },
+  "WARN_SDCARD_INIT": {
+    "defaultMessage": "初始化了SD卡",
+    "description": "Warning message for sd card initialized"
+  },
+  "WARN_SDCARD_LOCKED": {
+    "defaultMessage": "无法访问ＳＤ卡——ＳＤ卡已锁定 (写入已保护)",
+    "description": "Warning message for unable to access sd card"
+  },
+  "WARN_SDCARD_NONE": {
+    "defaultMessage": "SD卡未插入——请插入系统SD卡",
+    "description": "Warning message for sd card not inserted"
+  },
+  "WARN_SDCARD_UNINIT": {
+    "defaultMessage": "无法初始化SD卡",
+    "description": "Warning message for unable to initialize sd card"
+  },
+  "WARN_SETTINGSCNVRTERR": {
+    "defaultMessage": "无法将系统设置转换为新格式",
+    "description": "Warning message for unable to convert system settings"
+  },
+  "WARN_SETTINGSCONVERT": {
+    "defaultMessage": "系统设置转换为新格式",
+    "description": "Warning message for system settings converted to new format"
+  },
+  "WARN_SETTINGSSIZE": {
+    "defaultMessage": "系统设置大小超过分配的EEPROM空间",
+    "description": "Warning message for system settings exceeds space"
+  },
+  "WARN_SLAVENOBROADCAST": {
+    "defaultMessage": "从机控制器正使用本地仓库外温度和湿度直到与主恢复通信",
+    "description": "Warning message for slave using local sensors"
+  },
+  "WARN_SOFTWAREUPDATE": {
+    "defaultMessage": "软件正在升级",
+    "description": "Warning message for software upgrade in process"
+  },
+  "WARN_STARTTEMP": {
+    "defaultMessage": "无法计算起始温度",
+    "description": "Warning message for no start temperature"
+  },
+  "WARN_SYSCONFIG_EQ": {
+    "defaultMessage": "输入/输出配制错误",
+    "description": "Warning message for i/o configuration"
+  },
+  "WARN_TIMERESET": {
+    "defaultMessage": "系统日期/时间无效——系统时钟重置为12:00PM (检查系统电池)",
+    "description": "Warning message for system clock reset"
+  },
+  "WARN_UI": {
+    "defaultMessage": "用户界面未响应 (检查Lantronix)",
+    "description": "Warning message for user interface did not respond"
+  },
+  "WARN_USERLOG_CLEAR": {
+    "defaultMessage": "历史纪录日志已清除",
+    "description": "Warning message for history log cleared"
+  },
+  "WARN_VERSION": {
+    "defaultMessage": "控制器软件版本与网络服务器软件版本不匹配",
+    "description": "Warning message for controller software does not match on web server"
+  },
+  "agristar2.advanced-settings-title": {
+    "defaultMessage": "高级设置",
+    "description": "Advanced Settings (Level 2) title for agristar panel"
+  },
+  "agristar2.alarms-list-empty": {
+    "defaultMessage": "无需查看警报",
+    "description": "Message to display when there are not any alarms items to list in the alarms popup view."
+  },
+  "agristar2.client-list-item.stale": {
+      "defaultMessage": "网络错误",
+      "description": "Unable to get data after 30 minutes"
+  },
+  "agristar2.equipment-control-columnTitle-PanelSwitch": {
+    "defaultMessage": "面板开关",
+    "description": "column title for Panel Switch on the equipment status/control page"
+  },
+  "agristar2.equipment-control-columnTitle-RemoteSwitch": {
+    "defaultMessage": "远程交换机",
+    "description": "column title for Remote Switch on the equipment status/control page"
+  },
+  "agristar2.equipment-control-diagnostics-clear": {
+    "defaultMessage": "诊断模式"
+  },
+  "agristar2.equipment-control-outputname-refrigerationStageNumber": {
+    "defaultMessage": "制冷阶段 {stageNumber}",
+    "description": "name for the equipment type -> refrigeration stage <number>"
+  },
+  "agristar2.general-ReturnAir": {
+    "defaultMessage": "回风",
+    "description": "Return Air Temperature and Humiditiy"
+  },
+  "agristar2.general-plenum": {
+    "defaultMessage": "气室",
+    "description": "a plenum is a passage for air, treated to specific climate requirements, to be pushed into the storage chamber where the food product is."
+  },
+  "agristar2.general-settings-title": {
+    "defaultMessage": "常规设置",
+    "description": "General Settings title for agristar panel"
+  },
+  "agristar2.iotsite-burner": {
+    "defaultMessage": "燃烧器",
+    "description": "Burner output"
+  },
+  "agristar2.iotsite-co2": {
+    "defaultMessage": "CO2"
+  },
+  "agristar2.iotsite-cooling": {
+    "defaultMessage": "冷却",
+    "description": "Cooling Output"
+  },
+  "agristar2.iotsite-fan": {
+    "defaultMessage": "风扇",
+    "description": "Fan speed"
+  },
+  "agristar2.iotsite-pileavg": {
+    "defaultMessage": "Pile Avg:"
+  },
+  "agristar2.iotsite-refrigeration": {
+    "defaultMessage": "制冷",
+    "description": "Refrigeration output"
+  },
+  "agristar2.iotsite-returnvsplenum": {
+    "defaultMessage": "Return vs Plenum:"
+  },
+  "agristar2.mode-translation-UNKNOWN-MODE": {
+    "defaultMessage": "模式未知",
+    "description": "Agristar2 mode that is not known."
+  },
+  "agristar2.moisture-loss": {
+    "defaultMessage": "水分流失"
+  },  
+  "agristar2.pageview-Title-pile-sensors": {
+    "defaultMessage": "桩传感器",
+    "description": "Pile Sensor Page title for agristar panel"
+  },
+  "agristar2.pageview-Title-upgrade": {
+    "defaultMessage": "升级面板物联网客户端",
+    "description": "Title for upgrading iot client on panel"
+  },
+  "agristar2.postAction-error-HTTP503": {
+    "defaultMessage": "Agristar2行动失败。验证Agristar2的互联网连接。",
+    "description": "indicates that the server failed to communicate with the Agristar2(iot) device. Users internet connection is ok."
+  },
+  "agristar2.upgrade-client": {
+    "defaultMessage": "升级客户端",
+    "description": "Upgrade Client Button label"
+  },
+  "agristar2.upgrade-current": {
+    "defaultMessage": "当前版本",
+    "description": "Display Current Version"
+  },
+  "agristar2.upgrade-new": {
+    "defaultMessage": "新版本",
+    "description": "Display Newest Version"
+  },
+  "app.error-popup.authorization-failed": {
+    "defaultMessage": "您没有执行此操作的权限。",
+    "description": "alert pop up for 403 response"
+  },
+  "app.error-popup.internal-server-error": {
+    "defaultMessage": "出了点问题...",
+    "description": "alert pop up for 500 response"
+  },
+  "app.error-popup.network-connection": {
+    "defaultMessage": "网络错误，请检查您的互联网连接。",
+    "description": "alert pop up about the network connnection"
+  },
+  "appSettings.display-units-header": {
+    "defaultMessage": "测量系统",
+    "description": "indicates option to select a metric or standard of measurement"
+  },
+  "appSettings.font-size-header": {
+    "defaultMessage": "字体大小",
+    "description": "indicates option to select an app wide font size"
+  },
+  "appSettings.languages-header": {
+    "defaultMessage": "语言",
+    "description": "indicates option to select a supported language to use in app"
+  },
+  "appSettings.unit-of-measurement-Imperial": {
+    "defaultMessage": "英制（°F）",
+    "description": "Button label to indicate selecting Imperial as the base of measurements for the in app experience"
+  },
+  "appSettings.unit-of-measurement-metric": {
+    "defaultMessage": "公制（°C）",
+    "description": "Button label to indicate selecting Metric as the base of measurements for the in app experience"
+  },
+  "baylight.control": {
+    "defaultMessage": "控制"
+  },
+  "bottomNav.AppSettings-tab-label": {
+    "defaultMessage": "应用设置",
+    "description": "label for the button in the main app bottom navigation bar belonging to AppSettings"
+  },
+  "bottomNav.BusinessAccount-tab-label": {
+    "defaultMessage": "商业账户",
+    "description": "label for the button in the main app bottom navigation bar belonging to BusinessAccount"
+  },
+  "bottomNav.ContactDealer-tab-label": {
+    "defaultMessage": "联系经销商",
+    "description": "label for the button in the main app bottom navigation bar belonging to ContactDealer"
+  },
+  "bottomNav.Logout-tab-label": {
+    "defaultMessage": "注销",
+    "description": "label for the button in the main app bottom navigation bar belonging to Logout"
+  },
+  "bottomNav.ManageSites-tab-label": {
+    "defaultMessage": "管理存储",
+    "description": "label for the button in the main app bottom navigation bar belonging to ManageSites"
+  },
+  "bottomNav.ManageUsers-tab-label": {
+    "defaultMessage": "管理用户",
+    "description": "label for the button in the main app bottom navigation bar belonging to ManageUsers"
+  },
+  "bottomNav.dashboard-tab-label": {
+    "defaultMessage": "挡泥板",
+    "description": "label for the button in the main app bottom navigation bar belonging to dashboard"
+  },
+  "bottomNav.devices-tab-label": {
+    "defaultMessage": "设备",
+    "description": "label for the button in the main app bottom navigation bar belonging to Devices"
+  },
+  "bottomNav.events-tab-label": {
+    "defaultMessage": "事件",
+    "description": "label for the button in the main app bottom navigation bar belonging to Events"
+  },
+  "bottomNav.more-tab-label": {
+    "defaultMessage": "更多",
+    "description": "label for the button in the main app bottom navigation bar belonging to More"
+  },
+  "bottomNav.storages-tab-label": {
+    "defaultMessage": "存储",
+    "description": "label for the button in the main app bottom navigation bar belonging to Storages"
+  },
+  "btnEnter_onclickTranslatedText[2].automatically": {
+    "defaultMessage": "自然而然"
+  },
+  "button.Add": {
+    "defaultMessage": "加",
+    "description": "generic button to add items"
+  },
+  "button.Cancel": {
+    "defaultMessage": "取消",
+    "description": "generic button used throughout the app to cancel things"
+  },
+  "button.dismissAll": {
+    "defaultMessage": "全部取消",
+    "description": "generic button used throughout the app to Dismiss a list of items."
+  },
+  "buttonsTranslatedText[10].recirculation": {
+    "defaultMessage": "循环"
+  },
+  "buttonsTranslatedText[11].standby": {
+    "defaultMessage": "待机"
+  },
+  "buttonsTranslatedText[12].refrigeration": {
+    "defaultMessage": "制冷"
+  },
+  "buttonsTranslatedText[13].off": {
+    "defaultMessage": "关"
+  },
+  "buttonsTranslatedText[14].on": {
+    "defaultMessage": "打开"
+  },
+  "buttonsTranslatedText[15].auto": {
+    "defaultMessage": "自动"
+  },
+  "buttonsTranslatedText[16].coolingOnly": {
+    "defaultMessage": "仅冷却"
+  },
+  "buttonsTranslatedText[19].save": {
+    "defaultMessage": "保存",
+    "description": "Save button label"
+  },
+  "buttonsTranslatedText[20].reset": {
+    "defaultMessage": "重置"
+  },
+  "buttonsTranslatedText[21].alwayson": {
+    "defaultMessage": "始终打开"
+  },
+  "buttonsTranslatedText[22].setNewCooling": {
+    "defaultMessage": "设置",
+    "description": "Set New Cooling Speed"
+  },
+  "buttonsTranslatedText[35].clear": {
+    "defaultMessage": "清除"
+  },
+  "buttonsTranslatedText[44].initialize": {
+    "defaultMessage": "初始化 SD 卡"
+  },
+  "buttonsTranslatedText[45].clear.log": {
+    "defaultMessage": "清除历史记录日志"
+  },
+  "buttonsTranslatedText[46].clear.activity": {
+    "defaultMessage": "清除活动日志"
+  },
+  "buttonsTranslatedText[5].next": {
+    "defaultMessage": "下一页"
+  },
+  "buttonsTranslatedText[63].set.default": {
+    "defaultMessage": "设置为默认值"
+  },
+  "buttonsTranslatedText[6].back": {
+    "defaultMessage": "返回"
+  },
+  "buttonsTranslatedText[9].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "customer-no-sites-to-view": {
+    "defaultMessage": "冷却"
+  },
+  "customers-list-no-items": {
+    "defaultMessage": "无需查看客户存储"
+  },
+  "eqStatusSetRefrigStatusTranslatedText[2].diag.on": {
+    "defaultMessage": "诊断打开",
+    "description": "indicates that a piece of equipments status is Diag On"
+  },
+  "eqStatusSetRefrigStatusTranslatedText[3].diag-off": {
+    "defaultMessage": "诊断关闭",
+    "description": "indicates that a piece of equipments status is Diag Off"
+  },
+  "eqStatusSetStatusTranslatedText[0].Off": {
+    "defaultMessage": "关",
+    "description": "indicates that a piece of equipments status is Off"
+  },
+  "eqStatusSetStatusTranslatedText[1].remote.off": {
+    "defaultMessage": "远程关闭",
+    "description": "indicates that a piece of equipments status is Remote Off"
+  },
+  "eqStatusSetStatusTranslatedText[2].on": {
+    "defaultMessage": "打开",
+    "description": "indicates that a piece of equipments status is on"
+  },
+  "eqStatusSetSwitchTranslatedText[0].auto": {
+    "defaultMessage": "自动",
+    "description": "indicates that a piece of equipments panel switch is set to automatic"
+  },
+  "eqStatusSetSwitchTranslatedText[1].manual": {
+    "defaultMessage": "手动",
+    "description": "indicates that a piece of equipments panel switch is set to Manual"
+  },
+  "events.event-form-FinishedAt-field": {
+    "defaultMessage": "完成于",
+    "description": "lives on the site event form, it is the label for the event Finished At field"
+  },
+  "events.event-form-StartedAt-field": {
+    "defaultMessage": "起价",
+    "description": "lives on the site event form, it is the label for the event Started At field"
+  },
+  "events.event-form-category-field": {
+    "defaultMessage": "类别",
+    "description": "lives on the site event form, it is the label for the event category field"
+  },
+  "events.event-form-notes-field": {
+    "defaultMessage": "笔记",
+    "description": "lives on the site event form, it is the label for the event Notes field"
+  },
+  "events.event-form-save-button": {
+    "defaultMessage": "保存事件",
+    "description": "lives on the site event form, it is the label for the event Save Event button"
+  },
+  "events.event-form-site-field": {
+    "defaultMessage": "库",
+    "description": "lives on the site event form, it is the label for the select storage field"
+  },
+  "events.event-form-title-field": {
+    "defaultMessage": "标题",
+    "description": "lives on the site event form, it is the label for the event Title field"
+  },
+  "events.event-form-title-new-site-event": {
+    "defaultMessage": "新建存储事件",
+    "description": "lives on the site event form, it is the label for the event Finished At field"
+  },
+  "events.no-events-to-view": {
+    "defaultMessage": "没有要查看的事件",
+    "description": "this displays if there are no sites to view"
+  },
+  "form-changePassword-field-currentpassword": {
+    "defaultMessage": "当前密码"
+  },
+  "form-changePassword-field-newpassword": {
+    "defaultMessage": "新密码"
+  },
+  "form-changePassword-field-newpasswordConfirm": {
+    "defaultMessage": "确认密码"
+  },
+  "form-changepassword-instruction1": {
+    "defaultMessage": "密码必须至少为 9 个字符"
+  },
+  "form-changepassword-instruction2": {
+    "defaultMessage": "不要使用个人资料的属性"
+  },
+  "form-changepassword-instruction3": {
+    "defaultMessage": "不要使用常用密码或纯数字密码"
+  },
+  "getCurrentModeTranslatedText[0].shutdown": {
+    "defaultMessage": "关机"
+  },
+  "getCurrentModeTranslatedText[10].REFRIGERATION-RAMPING": {
+    "defaultMessage": "制冷 (梯度)"
+  },
+  "getCurrentModeTranslatedText[11].FAN-MANUAL": {
+    "defaultMessage": "风扇手动"
+  },
+  "getCurrentModeTranslatedText[12].FAN-SWITCH-OFF": {
+    "defaultMessage": "风扇开关关闭"
+  },
+  "getCurrentModeTranslatedText[13].FAN-REMOTE-OFF": {
+    "defaultMessage": "风扇遥控器关闭"
+  },
+  "getCurrentModeTranslatedText[14].REFRIG-REMOTE-OFF": {
+    "defaultMessage": "制冷远程关闭"
+  },
+  "getCurrentModeTranslatedText[17].COOLING-DEHUMID": {
+    "defaultMessage": "冷却（除湿）"
+  },
+  "getCurrentModeTranslatedText[18].REFRIG-DEHUMID": {
+    "defaultMessage": "制冷（除湿）"
+  },
+  "getCurrentModeTranslatedText[19].REMOTE-OFF": {
+    "defaultMessage": "远程关闭"
+  },
+  "getCurrentModeTranslatedText[1].standby": {
+    "defaultMessage": "待机"
+  },
+  "getCurrentModeTranslatedText[20].FAILURE": {
+    "defaultMessage": "失败"
+  },
+  "getCurrentModeTranslatedText[21].FAN-BOOST": {
+    "defaultMessage": "风扇升速"
+  },
+  "getCurrentModeTranslatedText[23].HEATING-RAMPING": {
+    "defaultMessage": "加热（斜坡"
+  },
+  "getCurrentModeTranslatedText[2].REMOTE-STANDBY": {
+    "defaultMessage": "远程待机"
+  },
+  "getCurrentModeTranslatedText[3].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "getCurrentModeTranslatedText[4].REFRIGERATION": {
+    "defaultMessage": "制冷"
+  },
+  "getCurrentModeTranslatedText[5].RECIRCULATING": {
+    "defaultMessage": "循环"
+  },
+  "getCurrentModeTranslatedText[6].HEATING": {
+    "defaultMessage": "加热"
+  },
+  "getCurrentModeTranslatedText[7].DEFROSTING": {
+    "defaultMessage": "除霜"
+  },
+  "getCurrentModeTranslatedText[8].PURGING-CO2": {
+    "defaultMessage": "清除 CO2"
+  },
+  "getCurrentModeTranslatedText[9].COOLING-RAMPING": {
+    "defaultMessage": "冷却 (梯度)"
+  },
+  "getMainDataTranslatedText[6].start": {
+    "defaultMessage": "开始"
+  },
+  "getMainDataTranslatedText[7].stop": {
+    "defaultMessage": "停止"
+  },
+  "getP1MiscDataTranslatedText[8].duty.cycle": {
+    "defaultMessage": "职能周期:"
+  },
+  "getp1Co2PurgeDataTranslatedText[1].auto": {
+    "defaultMessage": "自动"
+  },
+  "getp1Co2PurgeDataTranslatedText[2].manual": {
+    "defaultMessage": "手动"
+  },
+  "getp1Co2PurgeDataTranslatedText[3].none": {
+    "defaultMessage": "无"
+  },
+  "getp1Co2PurgeDataTranslatedText[5].coninuous": {
+    "defaultMessage": "连续的"
+  },
+  "getp1FreqCtrlDataTranslatedText[0].plen.set": {
+    "defaultMessage": "气室设定值 (默认)"
+  },
+  "getp1FreqCtrlDataTranslatedText[1].plen.temp": {
+    "defaultMessage": "气室温度"
+  },
+  "getp1FreqCtrlDataTranslatedText[3].temperature.diff": {
+    "defaultMessage": "温差"
+  },
+  "getp1FreqCtrlDataTranslatedText[4].humidity": {
+    "defaultMessage": "湿度"
+  },
+  "getp1FreqCtrlDataTranslatedText[5].return.temp": {
+    "defaultMessage": "返回空气温度 (默认)"
+  },
+  "getp1MiscDataTranslatedText.enthalpy-cooling": {
+    "defaultMessage": "焓冷却"
+  },
+  "getp1MiscDataTranslatedText[0].economizer": {
+    "defaultMessage": "省电"
+  },
+  "getp1MiscDataTranslatedText[10].standard": {
+    "defaultMessage": "标准"
+  },
+  "getp1MiscDataTranslatedText[11].alphabetic": {
+    "defaultMessage": "字母"
+  },
+  "getp1MiscDataTranslatedText[1].refrigeration.only": {
+    "defaultMessage": "仅制冷"
+  },
+  "getp1MiscDataTranslatedText[2].cavity.heater": {
+    "defaultMessage": "空心墙加热器控制"
+  },
+  "getp1MiscDataTranslatedText[3].pile.fan": {
+    "defaultMessage": "堆风扇控制模式:"
+  },
+  "getp1MiscDataTranslatedText[4].off": {
+    "defaultMessage": "关闭"
+  },
+  "getp1MiscDataTranslatedText[5].manual": {
+    "defaultMessage": "手动"
+  },
+  "getp1MiscDataTranslatedText[6].automatic": {
+    "defaultMessage": "自动"
+  },
+  "getp1MiscDataTranslatedText[7].ref.sensor": {
+    "defaultMessage": "R参考传感器"
+  },
+  "getp1MiscDataTranslatedText[9].norefrig": {
+    "defaultMessage": "如果外部气温低于以下的温度将无法运行"
+  },
+  "getp1OutsideAirDataTranslatedText[12].outsideair": {
+    "defaultMessage": "仓库外空气"
+  },
+  "getp1OutsideAirDataTranslatedText[13].plenum": {
+    "defaultMessage": "气室"
+  },
+  "getp1OutsideAirDataTranslatedText[6].above": {
+    "defaultMessage": "高于"
+  },
+  "getp1OutsideAirDataTranslatedText[7].below": {
+    "defaultMessage": "低于"
+  },
+  "getp1OutsideAirDataTranslatedText[8].plenumSet": {
+    "defaultMessage": "气室设定值"
+  },
+  "getp1OutsideAirDataTranslatedText[9].returnAir": {
+    "defaultMessage": "返回气温"
+  },
+  "p1PlenumDynTranslatedText[0].burnerSetPoint": {
+    "defaultMessage": "燃烧器固化的气室温度设定值"
+  },
+  "p1PlenumDynTranslatedText[1].burnerThreshold": {
+    "defaultMessage": "最大固化燃烧器输出阈值"
+  },
+  "p1PlenumDynTranslatedText[2].manualmode": {
+    "defaultMessage": "在以下的情况下在手动模式燃烧器将关闭"
+  },
+  "p1PlenumDynTranslatedText[3].plenumincreases": {
+    "defaultMessage": "气室温度增加到"
+  },
+  "p1PlenumDynTranslatedText[4].burnerRestart": {
+    "defaultMessage": "'在以下的情况下燃烧器将重新启动"
+  },
+  "p1PlenumDynTranslatedText[5].plenumdecreses": {
+    "defaultMessage": "气室温度下降到"
+  },
+  "p1PlenumDynTranslatedText[7].plenum": {
+    "defaultMessage": "气室"
+  },
+  "p1PlenumDynTranslatedText[8].return": {
+    "defaultMessage": "回风"
+  },
+  "getp1Plenum[0].none": {
+    "defaultMessage": "无"
+  },
+  "getp1Plenum[1].aux1": {
+    "defaultMessage": "辅助开关 1"
+  },
+  "getp1Plenum[2].aux2": {
+    "defaultMessage": "辅助开关 2"
+  },
+  "getp2PIDLogDataTranslatedText[2].no": {
+    "defaultMessage": "否定"
+  },
+  "getp2PIDLogDataTranslatedText[3].yes": {
+    "defaultMessage": "确定"
+  },
+  "global.static-pressure": {
+    "defaultMessage": "静压"
+  },
+  "humidLabelsTranslatedText[0].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "humidLabelsTranslatedText[1].recirculation": {
+    "defaultMessage": "循环"
+  },
+  "iotClient.no-devices": {
+    "defaultMessage": "没有要显示的设备",
+    "description": "indicates to user that there are no logs for the device saved in the cloud database"
+  },
+  "iotClient.type-unknown": {
+    "defaultMessage": "未知设备类型",
+    "description": "used to indicate that the device cant be displayed because its type is not a known one."
+  },
+  "level1.fanboost.and-it": {
+    "defaultMessage": "而且"
+  },
+  "level1.fanboost.fan-boost-control": {
+    "defaultMessage": "风扇升速控制"
+  },
+  "level1.fanboost.fan-boost-control-mode": {
+    "defaultMessage": "风扇升速控制模式"
+  },
+  "level1.fanboost.has-been": {
+    "defaultMessage": "已经"
+  },
+  "level1.fanboost.hours-since-the-last-fan-boost-period": {
+    "defaultMessage": "小时从上次风扇升速期以来。"
+  },
+  "level1.fanboost.if": {
+    "defaultMessage": "："
+  },
+  "level1.fanboost.none-default": {
+    "defaultMessage": "无 (默认)"
+  },
+  "level1.fanboost.runtime-based": {
+    "defaultMessage": "基于运行时"
+  },
+  "level1.fanboost.temperature-based": {
+    "defaultMessage": "基于温度"
+  },
+  "level1.fanboost.the-continuous-Fan-Runtime-exceeds": {
+    "defaultMessage": "连续风扇运行时超过"
+  },
+  "level1.fanboost.the-fan-boost-period-will-last-for": {
+    "defaultMessage": "风扇升速期将持续"
+  },
+  "level1.fanboost.the-fan-speed-will-be-increased-to": {
+    "defaultMessage": "在下面的情况下风扇速度将增加到"
+  },
+  "level1.fanboost.the-outside-temperature-is-below": {
+    "defaultMessage": "仓库外温度低于"
+  },
+  "level1.miscellaneous.enthalpy-cooling-will-turn-off-if-refrigeration-is": {
+    "defaultMessage": "如果制冷已开启，则焓冷却将关闭"
+  },
+  "level1.miscellaneous.or-greater": {
+    "defaultMessage": "或更大。"
+  },
+  "level2.analog.pile-humidity": {
+    "defaultMessage": "堆湿度"
+  },
+  "level2.analog.pile-temperature": {
+    "defaultMessage": "堆温度传感器"
+  },
+  "level2.analog.return-humidity": {
+    "defaultMessage": "返回湿度"
+  },
+  "level2.analog.return-temperature": {
+    "defaultMessage": "返回温度"
+  },
+  "login.input-password": {
+    "defaultMessage": "密码",
+    "description": "input label for Password on login page"
+  },
+  "login.input-username": {
+    "defaultMessage": "用户名",
+    "description": "input label for username on login page"
+  },
+  "login.login-button": {
+    "defaultMessage": "登录",
+    "description": "text for login button"
+  },
+  "login.login-credentials-failed": {
+    "defaultMessage": "用户名或密码不正确",
+    "description": "tells user that their login attempt failed, because either their username or password was incorrect"
+  },
+  "login.login-with-google": {
+    "defaultMessage": "用谷歌登录",
+    "description": "button to click to login using google account"
+  },
+  "login.login-with-microsoft": {
+    "defaultMessage": "微软登录",
+    "description": "button to click to login using Microsoft account"
+  },
+  "manage-site.newpanel": {
+    "defaultMessage": "添加新面板"
+  },
+  "manage-site.newsite": {
+    "defaultMessage": "添加新站点"
+  },
+  "manage-sites.active": {
+    "defaultMessage": "活跃站点："
+  },
+  "manage-sites.addcustomer": {
+    "defaultMessage": "添加客户"
+  },
+  "manage-sites.addpanel": {
+    "defaultMessage": "添加面板"
+  },
+  "manage-sites.addsite": {
+    "defaultMessage": "添加站点"
+  },
+  "manage-sites.customeractive": {
+    "defaultMessage": "处于活动状态"
+  },
+  "manage-sites.customername": {
+    "defaultMessage": "客户名称"
+  },
+  "manage-sites.customerparent": {
+    "defaultMessage": "客户家长"
+  },
+  "manage-sites.newcustomer": {
+    "defaultMessage": "添加新客户"
+  },
+  "manage-sites.panelclienttype": {
+    "defaultMessage": "客户端类型"
+  },
+  "manage-sites.panelip": {
+    "defaultMessage": "不安全的 IP"
+  },
+  "manage-sites.panelname": {
+    "defaultMessage": "面板名称"
+  },
+  "manage-sites.sitename": {
+    "defaultMessage": "站点名称"
+  },
+  "manage-users.add": {
+    "defaultMessage": "添加用户"
+  },
+  "manageUserDialog.assignSites": {
+    "defaultMessage": "为 {user} 分配站点"
+  },
+  "manageUserDialog.add": {
+    "defaultMessage": "添加新用户"
+  },
+  "manageUserDialog.username": {
+    "defaultMessage": "用户名"
+  },
+  "mnEquipStatus[0].title": {
+    "defaultMessage": "设备状态"
+  },
+  "mnEquipStatus[11].auxNumber": {
+    "defaultMessage": "辅助 {number}"
+  },
+  "mnEquipStatus[12].heat": {
+    "defaultMessage": "加热"
+  },
+  "mnEquipStatus[13].cavityHeat": {
+    "defaultMessage": "空心墙加热器"
+  },
+  "mnEquipStatus[1].output": {
+    "defaultMessage": "输出"
+  },
+  "mnEquipStatus[2].status": {
+    "defaultMessage": "状态"
+  },
+  "mnEquipStatus[4].fan": {
+    "defaultMessage": "风扇"
+  },
+  "mnEquipStatus[6].climacell": {
+    "defaultMessage": "蒸发冷却器"
+  },
+  "mnEquipStatus[7].humidifier.head": {
+    "defaultMessage": "加湿器 {number} - 头"
+  },
+  "mnEquipStatus[8].humidifier.pump": {
+    "defaultMessage": "加湿器 {number} - 泵"
+  },
+  "mnMainData[5].cooling.available.temp": {
+    "defaultMessage": "冷却可用温度",
+    "description": "Cooling Available Temperature"
+  },
+  "mnPileHumids[0].humidity": {
+    "defaultMessage": "堆湿度",
+    "description": "Pile Humidity Sensor Title"
+  },
+  "mnPileHumids[1].sensor": {
+    "defaultMessage": "传感器"
+  },
+  "mnPileTemps[0].title": {
+    "defaultMessage": "堆温度传感器"
+  },
+  "mnRunTimes[0].title": {
+    "defaultMessage": "系统运行时钟"
+  },
+  "network-error": {
+    "defaultMessage": "网络错误"
+  },
+  "p1AlertSetupDynTranslatedText[0].enable": {
+    "defaultMessage": "启用"
+  },
+  "p1AlertSetupDynTranslatedText[1].primary": {
+    "defaultMessage": "主要系统警报"
+  },
+  "p1AlertSetupDynTranslatedText[2].secondary": {
+    "defaultMessage": "次要系统警报"
+  },
+  "p1AlertSetup[0].title": {
+    "defaultMessage": "选择电子邮件通知"
+  },
+  "p1ClimacellTimes[0].title": {
+    "defaultMessage": "ClimaCell 控制"
+  },
+  "p1Co2PurgeDynTranslatedText[0].co2": {
+    "defaultMessage": "CO"
+  },
+  "p1Co2PurgeDynTranslatedText[1].level": {
+    "defaultMessage": "程度高于"
+  },
+  "p1Co2PurgeDynTranslatedText[3].purge": {
+    "defaultMessage": "'从上次清除以来已经', "
+  },
+  "p1Co2PurgeDynTranslatedText[4].last": {
+    "defaultMessage": "小时"
+  },
+  "p1Co2Purge[0].high": {
+    "defaultMessage": "高"
+  },
+  "p1Co2Purge[10].last": {
+    "defaultMessage": "清除将持续"
+  },
+  "p1Co2Purge[11].minutes": {
+    "defaultMessage": "分钟与"
+  },
+  "p1Co2Purge[12].fan": {
+    "defaultMessage": "风扇输出"
+  },
+  "p1Co2Purge[13].door": {
+    "defaultMessage": "的风扇输出和"
+  },
+  "p1Co2Purge[16].chinese1": {
+    "defaultMessage": "之间"
+  },
+  "p1Co2Purge[17].chinese2": {
+    "defaultMessage": "的门输出"
+  },
+  "p1Co2Purge[18].target": {
+    "defaultMessage": "目标"
+  },
+  "p1Co2Purge[19].is": {
+    "defaultMessage": "是"
+  },
+  "p1Co2Purge[1].purge": {
+    "defaultMessage": "程度清除控制"
+  },
+  "p1Co2Purge[20].freshair": {
+    "defaultMessage": "新鲜空气门将根据电流进行调整"
+  },
+  "p1Co2Purge[21].freshair": {
+    "defaultMessage": "水平"
+  },
+  "p1Co2Purge[2].mode": {
+    "defaultMessage": "清除控制模式:"
+  },
+  "p1Co2Purge[6].msg1": {
+    "defaultMessage": "下面的情况将造成"
+  },
+  "p1Co2Purge[7].msg2": {
+    "defaultMessage": "清除："
+  },
+  "p1Co2Purge[8].between": {
+    "defaultMessage": "度在而外面空气温"
+  },
+  "p1Co2Purge[9].maximum": {
+    "defaultMessage": "和"
+  },
+  "p1Comm[0].title": {
+    "defaultMessage": "电子邮件通知"
+  },
+  "p1Comm[10].none": {
+    "defaultMessage": "无"
+  },
+  "p1Comm[11].port": {
+    "defaultMessage": "端口："
+  },
+  "p1Comm[12].account": {
+    "defaultMessage": "帐户："
+  },
+  "p1Comm[13].password": {
+    "defaultMessage": "密码："
+  },
+  "p1Comm[14].send.display": {
+    "defaultMessage": "从哪台显示器发送:"
+  },
+  "p1Comm[1].send.email": {
+    "defaultMessage": "发送电子邮件通知:"
+  },
+  "p1Comm[2].enabled": {
+    "defaultMessage": "启用"
+  },
+  "p1Comm[3].disabled": {
+    "defaultMessage": "停用"
+  },
+  "p1Comm[4].to": {
+    "defaultMessage": "收件人："
+  },
+  "p1Comm[5].from": {
+    "defaultMessage": "发件人："
+  },
+  "p1Comm[6].email.server": {
+    "defaultMessage": "电子邮件服务器:"
+  },
+  "p1Comm[7].authentication.type": {
+    "defaultMessage": "身份验证类型:"
+  },
+  "p1Comm[8].starttls": {
+    "defaultMessage": "StartTLS"
+  },
+  "p1Comm[9].tls-ssl": {
+    "defaultMessage": "TLS-SSL"
+  },
+  "p1DateTime[0].title": {
+    "defaultMessage": "设置日期和时间"
+  },
+  "p1DateTime[1].date": {
+    "defaultMessage": "日期"
+  },
+  "p1DateTime[2].time": {
+    "defaultMessage": "时间"
+  },
+  "p1FanRuntimes[0].title": {
+    "defaultMessage": "风扇运行时"
+  },
+  "p1FanRuntimes[1].daily": {
+    "defaultMessage": "每日风扇运行时 (从中午起)"
+  },
+  "p1FanRuntimes[2].runtime-total": {
+    "defaultMessage": "总数风扇运行时"
+  },
+  "p1FanRuntimes[4].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "p1FanRuntimes[5].recirculation": {
+    "defaultMessage": "循环"
+  },
+  "p1FanRuntimes[6].cure": {
+    "defaultMessage": "固化"
+  },
+  "p1FanRuntimes[7].standby": {
+    "defaultMessage": "备用"
+  },
+  "p1FreqCtrlModeChangeTranslatedText[0].a": {
+    "defaultMessage": ""
+  },
+  "p1FreqCtrlModeChangeTranslatedText[11].plenumHumidity": {
+    "defaultMessage": "在气室里低于气室设定值"
+  },
+  "p1FreqCtrlModeChangeTranslatedText[1].the": {
+    "defaultMessage": ""
+  },
+  "p1FreqCtrlModeChangeTranslatedText[5].of": {
+    "defaultMessage": "在"
+  },
+  "p1FreqCtrl[0].title": {
+    "defaultMessage": "风扇转速控制"
+  },
+  "p1FreqCtrl[10].msg5": {
+    "defaultMessage": "在"
+  },
+  "p1FreqCtrl[11].msg6": {
+    "defaultMessage": "和"
+  },
+  "p1FreqCtrl[14].chinese1": {
+    "defaultMessage": "的温度差"
+  },
+  "p1FreqCtrl[15].chinese2": {
+    "defaultMessage": "之间"
+  },
+  "p1FreqCtrl[1].currentSpeed": {
+    "defaultMessage": "当前冷却风扇转速"
+  },
+  "p1FreqCtrl[2].coolingMaximum": {
+    "defaultMessage": "冷却模式最大转速"
+  },
+  "p1FreqCtrl[3].coolingMinimum": {
+    "defaultMessage": "冷却模式最小转速"
+  },
+  "p1FreqCtrl[4].refrigMode": {
+    "defaultMessage": "制冷模式转速"
+  },
+  "p1FreqCtrl[5].recircMode": {
+    "defaultMessage": "循环模式转速"
+  },
+  "p1FreqCtrl[6].msg1": {
+    "defaultMessage": "在冷却模式下风扇速度每"
+  },
+  "p1FreqCtrl[7].msg2": {
+    "defaultMessage": "小时更新一次"
+  },
+  "p1FreqCtrl[8].msg3": {
+    "defaultMessage": "以便保持"
+  },
+  "p1HumidCtrlDynTranslatedText[4].manual": {
+    "defaultMessage": "手动"
+  },
+  "p1HumidCtrlDynTranslatedText[5].timer": {
+    "defaultMessage": "定时器 (默认)"
+  },
+  "p1HumidCtrlDynTranslatedText[6].automatic": {
+    "defaultMessage": "自动"
+  },
+  "p1HumidCtrlModeDynTranslatedText[0].maintain": {
+    "defaultMessage": "系统将自动维护"
+  },
+  "p1HumidCtrlModeDynTranslatedText[1].humidity": {
+    "defaultMessage": "这个气室湿度设定值： {value}%."
+  },
+  "p1HumidCtrlModeDynTranslatedText[2].systemmode": {
+    "defaultMessage": "系统模式"
+  },
+  "p1HumidCtrlModeDynTranslatedText[3].cycleduration": {
+    "defaultMessage": "周期持续时间"
+  },
+  "p1HumidCtrlModeDynTranslatedText[4].autoControlMode": {
+    "defaultMessage": "自动控制模式:"
+  },
+  "p1HumidCtrlModeDynTranslatedText[5].output.not.defined": {
+    "defaultMessage": "加湿器输出还没被定义。"
+  },
+  "p1HumidCtrlUnitsDynTranslatedText[0].seconds.on": {
+    "defaultMessage": "几秒打开"
+  },
+  "p1HumidCtrlUnitsDynTranslatedText[1].seconds.off": {
+    "defaultMessage": "几秒关闭"
+  },
+  "p1HumidCtrl[0].title": {
+    "defaultMessage": "加湿器控制"
+  },
+  "p1HumidCtrl[1].note": {
+    "defaultMessage": "请注意: 每个加湿器的设置必须单独保存"
+  },
+  "p1Misc[0].title": {
+    "defaultMessage": "杂项程序参数"
+  },
+  "p1Misc[1].refrigeration.mode": {
+    "defaultMessage": "制冷方式:"
+  },
+  "p1Misc[2].refrigeration.air.defrost": {
+    "defaultMessage": "每"
+  },
+  "p1Misc[3].refrigeration.hours": {
+    "defaultMessage": "小时在制冷模式下有"
+  },
+  "p1Misc[4].minutes": {
+    "defaultMessage": "分钟将使用空气解冻"
+  },
+  "p1Misc[5].heater.on": {
+    "defaultMessage": "如果气室温度比气室温度设定值还低"
+  },
+  "p1Misc[6].below.plenum": {
+    "defaultMessage": "，  加热器将打开"
+  },
+  "p1Misc[7].temp.diff": {
+    "defaultMessage": "温度差分："
+  },
+  "p1Misc[8].keyboard.preference": {
+    "defaultMessage": "系统键盘首选项:"
+  },
+  "p1OutsideAirDynTranslatedText[0].curemode": {
+    "defaultMessage": "系统将进入仓库外空气固化模式时"
+  },
+  "p1OutsideAirDynTranslatedText[1].outsideabove": {
+    "defaultMessage": "仓库外气温高于"
+  },
+  "p1OutsideAirDynTranslatedText[22].plenum": {
+    "defaultMessage": "气室"
+  },
+  "p1OutsideAirDynTranslatedText[2].and": {
+    "defaultMessage": "和"
+  },
+  "p1OutsideAirDynTranslatedText[3].plenum": {
+    "defaultMessage": "气室湿度"
+  },
+  "p1OutsideAirDynTranslatedText[4].calculated": {
+    "defaultMessage": "计算的湿度"
+  },
+  "p1OutsideAirDynTranslatedText[5].isbelow": {
+    "defaultMessage": "低于"
+  },
+  "p1OutsideAirDynTranslatedText[6].blend": {
+    "defaultMessage": "在室外空气和燃烧器固化模式系统将在空气中混合， 同时"
+  },
+  "p1OutsideAirDynTranslatedText[7].deviationalarm": {
+    "defaultMessage": "气室温度保持在低偏差警报值定于"
+  },
+  "p1OutsideAirDynTranslatedText[8].and": {
+    "defaultMessage": "而"
+  },
+  "p1OutsideAirDynTranslatedText[9].humidity-below": {
+    "defaultMessage": "湿度保持低于"
+  },
+  "p1OutsideAir[0].title": {
+    "defaultMessage": "仓库外空气控制"
+  },
+  "p1OutsideAir[1].msg1": {
+    "defaultMessage": "再下面的情况下，系统可以使用外面冷却模式："
+  },
+  "p1OutsideAir[2].msg2": {
+    "defaultMessage": "温度状态"
+  },
+  "p1PlenTempDevDynTranslatdText[0].msg1": {
+    "defaultMessage": "在以下的情况下系统将警报"
+  },
+  "p1PlenTempDevDynTranslatdText[1].msg2": {
+    "defaultMessage": "气室温度低于"
+  },
+  "p1PlenTempDevDynTranslatdText[2].msg3": {
+    "defaultMessage": ""
+  },
+  "p1PlenTempDevDynTranslatdText[3].msg4": {
+    "defaultMessage": "分钟或"
+  },
+  "p1PlenTempDevDynTranslatdText[4].msg5": {
+    "defaultMessage": "气室温度高于"
+  },
+  "p1PlenTempDevDynTranslatdText[5].msg6": {
+    "defaultMessage": ""
+  },
+  "p1PlenTempDevDynTranslatdText[6].msg7": {
+    "defaultMessage": "分钟。"
+  },
+  "p1PlenTempDev[0].title": {
+    "defaultMessage": "气室温度偏差报警"
+  },
+  "p1PlenTempDev[1].msg1": {
+    "defaultMessage": "在下面的情况下系统将报警"
+  },
+  "p1PlenTempDev[2].msg2": {
+    "defaultMessage": "气室温度在气室温度设定值"
+  },
+  "p1PlenTempDev[3].msg3": {
+    "defaultMessage": "之下保持"
+  },
+  "p1PlenTempDev[4].msg4": {
+    "defaultMessage": "分钟或"
+  },
+  "p1PlenTempDev[5].msg5": {
+    "defaultMessage": "气室温度在气室温度设定值"
+  },
+  "p1PlenTempDev[6].msg6": {
+    "defaultMessage": "之上保持"
+  },
+  "p1PlenTempDev[7].msg7": {
+    "defaultMessage": "分钟。"
+  },
+  "p1Plenum[0].title": {
+    "defaultMessage": "气室设定值"
+  },
+  "p1Plenum[1].temperature": {
+    "defaultMessage": "气室温度设定值:",
+    "description": "Plenum Temperature Setpoint:"
+  },
+  "p1Plenum[2].humidity": {
+    "defaultMessage": "气室湿度设定值:",
+    "description": "Plenum Humidity Setpoint:"
+  },
+  "p1Plenum[3].temperature2": {
+    "defaultMessage": "Refrigeration Temperature",
+    "description": "充气室制冷温度设定值"
+  },
+  "p1Plenum[4].dehumidification": {
+    "defaultMessage": "除湿"
+  },
+  "p1Plenum[5].useRefrig": {
+    "defaultMessage": "使用除湿制冷"
+  },
+  "p1Plenum[6].auxSwitch": {
+    "defaultMessage": "除湿开关:"
+  },
+  "p1RampRate[0].title": {
+    "defaultMessage": "气室设定值温度梯度"
+  },
+  "p1RampRate[2].msg1": {
+    "defaultMessage": "气室设定值将更改"
+  },
+  "p1RampRate[3].msg2": {
+    "defaultMessage": "直到气室设值变成"
+  },
+  "p2AnalogBoardSetup[0].title": {
+    "defaultMessage": "模拟板设置"
+  },
+  "p2AnalogBoardSetup[10].sensor.value": {
+    "defaultMessage": "值"
+  },
+  "p2AnalogBoardSetup[11].sensor.disabled": {
+    "defaultMessage": "停用"
+  },
+  "p2AnalogBoardSetup[1].board": {
+    "defaultMessage": "模拟板"
+  },
+  "p2AnalogBoardSetup[2].board.type": {
+    "defaultMessage": "类型"
+  },
+  "p2AnalogBoardSetup[3].board.label": {
+    "defaultMessage": "标记"
+  },
+  "p2AnalogBoardSetup[5].board.disabled": {
+    "defaultMessage": "停用"
+  },
+  "p2AnalogBoardSetup[6].sensor": {
+    "defaultMessage": "传感器"
+  },
+  "p2AnalogBoardSetup[7].sensor.type": {
+    "defaultMessage": "类型"
+  },
+  "p2AnalogBoardSetup[8].sensor.label": {
+    "defaultMessage": "标记"
+  },
+  "p2AnalogBoardSetup[9].offset": {
+    "defaultMessage": "版本"
+  },
+  "p2AnalogHelperTranslatedText[0].humidity": {
+    "defaultMessage": "版本"
+  },
+  "p2AnalogHelperTranslatedText[1].co2": {
+    "defaultMessage": "CO2"
+  },
+  "p2AnalogHelperTranslatedText[2].temperature": {
+    "defaultMessage": "温度"
+  },
+  "p2AuxProgModeList[0].cooling": {
+    "defaultMessage": "冷却"
+  },
+  "p2AuxProgModeList[2].recirc": {
+    "defaultMessage": "循环"
+  },
+  "p2AuxProgModeList[3].heating": {
+    "defaultMessage": "加热"
+  },
+  "p2AuxProgModeList[4].purge": {
+    "defaultMessage": "清除"
+  },
+  "p2AuxProgModeList[5].defrost": {
+    "defaultMessage": "除霜"
+  },
+  "p2AuxProgModeList[6].standby": {
+    "defaultMessage": "待机"
+  },
+  "p2AuxProgModeList[7].shutdown": {
+    "defaultMessage": "关机"
+  },
+  "p2AuxProgModeList[8].cure": {
+    "defaultMessage": "固化"
+  },
+  "p2AuxProg[0].title": {
+    "defaultMessage": "辅助输出程序"
+  },
+  "p2AuxProg[10].input": {
+    "defaultMessage": "输入"
+  },
+  "p2AuxProg[11].switch": {
+    "defaultMessage": "开关"
+  },
+  "p2AuxProg[12].sensor": {
+    "defaultMessage": "传感器"
+  },
+  "p2AuxProg[13].mode": {
+    "defaultMessage": "模式"
+  },
+  "p2AuxProg[15].on": {
+    "defaultMessage": "开"
+  },
+  "p2AuxProg[16].off": {
+    "defaultMessage": "关闭"
+  },
+  "p2AuxProg[17].equal": {
+    "defaultMessage": "等于"
+  },
+  "p2AuxProg[18].gt": {
+    "defaultMessage": "高于"
+  },
+  "p2AuxProg[19].lt": {
+    "defaultMessage": "低于"
+  },
+  "p2AuxProg[1].output": {
+    "defaultMessage": "输出"
+  },
+  "p2AuxProg[20].option": {
+    "defaultMessage": "选项"
+  },
+  "p2AuxProg[21].value": {
+    "defaultMessage": "值"
+  },
+  "p2AuxProg[22].reference": {
+    "defaultMessage": "参考"
+  },
+  "p2AuxProg[23].minutes": {
+    "defaultMessage": "分钟"
+  },
+  "p2AuxProg[24].hours": {
+    "defaultMessage": "小时"
+  },
+  "p2AuxProg[25].none": {
+    "defaultMessage": "没有辅助输出被定义"
+  },
+  "p2AuxProg[2].rule": {
+    "defaultMessage": "规定"
+  },
+  "p2AuxProg[3].duty.cycle": {
+    "defaultMessage": "职能周期："
+  },
+  "p2AuxProg[4].period": {
+    "defaultMessage": "周期："
+  },
+  "p2AuxProg[5].end": {
+    "defaultMessage": "停止"
+  },
+  "p2AuxProg[6].and": {
+    "defaultMessage": "和"
+  },
+  "p2AuxProg[7].or": {
+    "defaultMessage": "或"
+  },
+  "p2AuxProg[8].manual": {
+    "defaultMessage": "手动"
+  },
+  "p2AuxProg[9].output": {
+    "defaultMessage": "输出"
+  },
+  "p2BasicSetup[0].title": {
+    "defaultMessage": "基本设置"
+  },
+  "p2BasicSetup[10].mnClimacellTimes": {
+    "defaultMessage": "ClimaCell控制"
+  },
+  "p2BasicSetup[11].mnCo2Purge": {
+    "defaultMessage": "清除控制"
+  },
+  "p2BasicSetup[12].mnEquipStatus": {
+    "defaultMessage": "设备状态"
+  },
+  "p2BasicSetup[13].remote.login.password": {
+    "defaultMessage": "远程登录密码"
+  },
+  "p2BasicSetup[14].require.remote.login": {
+    "defaultMessage": "需要远程登录"
+  },
+  "p2BasicSetup[15].login.secure.no": {
+    "defaultMessage": "否定"
+  },
+  "p2BasicSetup[16].login.secure.yes": {
+    "defaultMessage": "确定"
+  },
+  "p2BasicSetup[17].temperature.display": {
+    "defaultMessage": "显示的温度"
+  },
+  "p2BasicSetup[18].fahrenheit": {
+    "defaultMessage": "华氏"
+  },
+  "p2BasicSetup[19].celsius": {
+    "defaultMessage": "摄氏"
+  },
+  "p2BasicSetup[1].storage.name": {
+    "defaultMessage": "仓库名称"
+  },
+  "p2BasicSetup[20].system.mode": {
+    "defaultMessage": "系统模式"
+  },
+  "p2BasicSetup[21].systemmode.potato": {
+    "defaultMessage": "马铃薯o"
+  },
+  "p2BasicSetup[22].systemmode.onion": {
+    "defaultMessage": "洋葱"
+  },
+  "p2BasicSetup[23].multi.view": {
+    "defaultMessage": "多视图系统数"
+  },
+  "p2BasicSetup[24].animations": {
+    "defaultMessage": "显示设备动画"
+  },
+  "p2BasicSetup[25].animations.no": {
+    "defaultMessage": "否定"
+  },
+  "p2BasicSetup[25].co2sensor": {
+    "defaultMessage": "CO2传感器"
+  },
+  "p2BasicSetup[26].animations.yes": {
+    "defaultMessage": "确定"
+  },
+  "p2BasicSetup[26].use50K": {
+    "defaultMessage": "使用 50k 传感器"
+  },
+  "p2BasicSetup[27].mnNetMonitor": {
+    "defaultMessage": "网络监视器"
+  },
+  "p2BasicSetup[28].systemmode.beemode": {
+    "defaultMessage": "蜜蜂"
+  },
+  "p2BasicSetup[29].systemmode.pecanmode": {
+    "defaultMessage": "山核桃"
+  },
+  "p2BasicSetup[2].home.page": {
+    "defaultMessage": "主页"
+  },
+  "p2BasicSetup[3].mnMainData": {
+    "defaultMessage": "系统监视器"
+  },
+  "p2BasicSetup[4].mnPileTemps": {
+    "defaultMessage": "堆温"
+  },
+  "p2BasicSetup[5].mnPileHumids": {
+    "defaultMessage": "堆湿度"
+  },
+  "p2BasicSetup[6].mnRunTimes": {
+    "defaultMessage": "系统运行时钟"
+  },
+  "p2BasicSetup[7].mnFreqCtrl": {
+    "defaultMessage": "风扇转速控制"
+  },
+  "p2BasicSetup[8].mnRampRate": {
+    "defaultMessage": "温度梯度"
+  },
+  "p2BasicSetup[9].mnHumidCtrl": {
+    "defaultMessage": "气室湿度控制"
+  },
+  "p2BurnerDynTranslatedText[0].output": {
+    "defaultMessage": "燃烧器输出"
+  },
+  "p2BurnerDynTranslatedText[10].meters": {
+    "defaultMessage": "米"
+  },
+  "p2BurnerDynTranslatedText[7].altitude": {
+    "defaultMessage": "高度"
+  },
+  "p2BurnerDynTranslatedText[9].feet": {
+    "defaultMessage": "英尺"
+  },
+  "p2Burner[0].title": {
+    "defaultMessage": "燃烧器设置"
+  },
+  "p2Burner[1].control": {
+    "defaultMessage": "燃烧器控制模式:"
+  },
+  "p2Burner[2].none": {
+    "defaultMessage": "无"
+  },
+  "p2Burner[3].manual": {
+    "defaultMessage": "手动"
+  },
+  "p2Burner[4].economy": {
+    "defaultMessage": "省电固化"
+  },
+  "p2Burner[5].maximum": {
+    "defaultMessage": "最大固化"
+  },
+  "p2Burner[6].ignite": {
+    "defaultMessage": "当输出到达以下的程度时燃烧器会点火"
+  },
+  "p2Burner[7].low": {
+    "defaultMessage": "最低燃烧器程度"
+  },
+  "p2Burner[8].PIDU": {
+    "defaultMessage": "PID控制器值"
+  },
+  "p2Climacell[0].title": {
+    "defaultMessage": "ClimaCell 设置"
+  },
+  "p2Climacell[1].efficiency": {
+    "defaultMessage": "ClimaCell 效率"
+  },
+  "p2Climacell[2].altitude": {
+    "defaultMessage": "高度"
+  },
+  "p2Climacell[3].feet": {
+    "defaultMessage": "英尺"
+  },
+  "p2Climacell[4].meters": {
+    "defaultMessage": "米"
+  },
+  "p2Climacell[5].climacell.humidifiers": {
+    "defaultMessage": "ClimaCell 或加湿器的(s)"
+  },
+  "p2Climacell[6].pidu": {
+    "defaultMessage": "PID控制器值"
+  },
+  "p2FailuresDynTranslatedText[2].burner": {
+    "defaultMessage": "燃烧器"
+  },
+  "p2FailuresDynTranslatedText[3].aux1": {
+    "defaultMessage": "辅助 #1"
+  },
+  "p2FailuresDynTranslatedText[4].aux2": {
+    "defaultMessage": "辅助 #2"
+  },
+  "p2FailuresSelectTranslatedText[0].Recirculate": {
+    "defaultMessage": "循环"
+  },
+  "p2FailuresSelectTranslatedText[0].recirculate": {
+    "defaultMessage": "循环"
+  },
+  "p2FailuresSelectTranslatedText[1].Standby": {
+    "defaultMessage": "待机"
+  },
+  "p2FailuresSelectTranslatedText[1].standby": {
+    "defaultMessage": "待机"
+  },
+  "p2FailuresSetup2[0].title": {
+    "defaultMessage": "故障设置-2"
+  },
+  "p2FailuresSetup2[10].humid.setpoint": {
+    "defaultMessage": "低湿度设定值"
+  },
+  "p2FailuresSetup2[11].plenum.sensor": {
+    "defaultMessage": "气室传感器"
+  },
+  "p2FailuresSetup2[12].plen.difference1": {
+    "defaultMessage": " "
+  },
+  "p2FailuresSetup2[13].plen.difference2": {
+    "defaultMessage": "的差异在"
+  },
+  "p2FailuresSetup2[14].plen.difference3": {
+    "defaultMessage": "气室温度传感器"
+  },
+  "p2FailuresSetup2[15].plen.difference4": {
+    "defaultMessage": "和"
+  },
+  "p2FailuresSetup2[16].plen.difference5": {
+    "defaultMessage": "气室温度传感器"
+  },
+  "p2FailuresSetup2[17].plen.difference6": {
+    "defaultMessage": "之间将触发报警和故障。"
+  },
+  "p2FailuresSetup2[1].out.temp": {
+    "defaultMessage": "外部温度传感器"
+  },
+  "p2FailuresSetup2[5].out.humidity": {
+    "defaultMessage": "仓库外的湿度传感器"
+  },
+  "p2FailuresSetup2[6].high": {
+    "defaultMessage": "高"
+  },
+  "p2FailuresSetup2[7].level": {
+    "defaultMessage": "程度"
+  },
+  "p2FailuresSetup2[8].co2.setpoint": {
+    "defaultMessage": "设定值"
+  },
+  "p2FailuresSetup2[9].low.humid": {
+    "defaultMessage": "低气室湿度"
+  },
+  "p2FailuresSetupAS2.lights-off": {
+    "defaultMessage": "关灯"
+  },
+  "p2FailuresSetupAS2[10].run.in": {
+    "defaultMessage": "运行在:"
+  },
+  "p2FailuresSetupAS2[11].refrigeration.stages": {
+    "defaultMessage": "制冷阶段"
+  },
+  "p2FailuresSetupAS2[12].humidifiers": {
+    "defaultMessage": "加湿器"
+  },
+  "p2FailuresSetupAS2[13].auxiliary": {
+    "defaultMessage": "辅助"
+  },
+  "p2FailuresSetupAS2[14].heat": {
+    "defaultMessage": "加热t"
+  },
+  "p2FailuresSetupAS2[15].cavity.heat": {
+    "defaultMessage": "空心墙加热器/"
+  },
+  "p2FailuresSetupAS2[16].bay.lights": {
+    "defaultMessage": "储藏室灯显示器"
+  },
+  "p2FailuresSetupAS2[17].hours": {
+    "defaultMessage": "小时"
+  },
+  "p2FailuresSetupAS2[1].fan": {
+    "defaultMessage": "风扇"
+  },
+  "p2FailuresSetupAS2[3].fail": {
+    "defaultMessage": "故障"
+  },
+  "p2FailuresSetupAS2[5].minutes": {
+    "defaultMessage": "分钟"
+  },
+  "p2FailuresSetupAS2[6].climacell": {
+    "defaultMessage": "ClimaCell",
+    "description": "Label for ClimaCell."
+  },
+  "p2FailuresSetupAS2[7].none": {
+    "defaultMessage": "无"
+  },
+  "p2FailuresSetupAS2[8].alarm": {
+    "defaultMessage": "警报"
+  },
+  "p2FailuresSetupAS2[9].refrig.master": {
+    "defaultMessage": "主机制冷"
+  },
+  "p2FailuresSetup[0].title": {
+    "defaultMessage": "故障设置1"
+  },
+  "p2FailuresSetup[10].run.in": {
+    "defaultMessage": "运行在:"
+  },
+  "p2FailuresSetup[11].humidifier1": {
+    "defaultMessage": "加湿器 #1"
+  },
+  "p2FailuresSetup[12].humidifier2": {
+    "defaultMessage": "加湿器 #2"
+  },
+  "p2FailuresSetup[13].auxiliary": {
+    "defaultMessage": "辅助"
+  },
+  "p2FailuresSetup[14].heat": {
+    "defaultMessage": "加热"
+  },
+  "p2FailuresSetup[15].cavity.heat": {
+    "defaultMessage": "空心墙加热器/"
+  },
+  "p2FailuresSetup[16].bay.lights": {
+    "defaultMessage": "储藏室灯显示器"
+  },
+  "p2FailuresSetup[17].hours": {
+    "defaultMessage": "小时"
+  },
+  "p2FailuresSetup[1].fan": {
+    "defaultMessage": "风扇"
+  },
+  "p2FailuresSetup[2].mode": {
+    "defaultMessage": "模式:"
+  },
+  "p2FailuresSetup[3].fail": {
+    "defaultMessage": "故障"
+  },
+  "p2FailuresSetup[4].timer": {
+    "defaultMessage": "定时器:"
+  },
+  "p2FailuresSetup[5].minutes": {
+    "defaultMessage": "分钟"
+  },
+  "p2FailuresSetup[6].climacell": {
+    "defaultMessage": "ClimaCell"
+  },
+  "p2FailuresSetup[7].none": {
+    "defaultMessage": "无"
+  },
+  "p2FailuresSetup[8].alarm": {
+    "defaultMessage": "警报"
+  },
+  "p2FreshAirSetup[0].title": {
+    "defaultMessage": "新风门安装"
+  },
+  "p2FreshAirSetup[1].pidu": {
+    "defaultMessage": "PID控制器值"
+  },
+  "p2FreshAirSetup[2].actuator.time": {
+    "defaultMessage": "所有执行器阶段的总打开时间"
+  },
+  "p2FreshAirSetup[3].seconds": {
+    "defaultMessage": "秒"
+  },
+  "p2FreshAirSetup[4].cooling.short.cycle": {
+    "defaultMessage": "冷却空气短周期定时器"
+  },
+  "p2FreshAirSetup[5].minutes": {
+    "defaultMessage": "分钟"
+  },
+  "p2IoConfigDynTranslatedText[0].output": {
+    "defaultMessage": "输出"
+  },
+  "p2IoConfigDynTranslatedText[1].input": {
+    "defaultMessage": "输入"
+  },
+  "p2IoConfigDynTranslatedText[3].disabled": {
+    "defaultMessage": "脉冲门-被禁用"
+  },
+  "p2IoConfigDynTranslatedText[4].enabled": {
+    "defaultMessage": "脉冲门-被启用"
+  },
+  "p2IoConfig[0].title": {
+    "defaultMessage": "系统输入输出配置"
+  },
+  "p2LogSettings[0].title": {
+    "defaultMessage": "日志设置"
+  },
+  "p2LogSettings[1].history.log": {
+    "defaultMessage": "历史记录日志设置"
+  },
+  "p2LogSettings[2].record.taken": {
+    "defaultMessage": "每"
+  },
+  "p2LogSettings[3].minutes": {
+    "defaultMessage": "分钟记录将采取"
+  },
+  "p2LogSettings[4].overwrite": {
+    "defaultMessage": "如有必要，改写旧记录:"
+  },
+  "p2LogSettings[5].no": {
+    "defaultMessage": "否定"
+  },
+  "p2LogSettings[6].yes": {
+    "defaultMessage": "确定"
+  },
+  "p2PIDLogs[0].title": {
+    "defaultMessage": "PID控制器值日志记录"
+  },
+  "p2PIDLogs[1].fresh.air": {
+    "defaultMessage": "新鲜空气门"
+  },
+  "p2PIDLogs[3].clear": {
+    "defaultMessage": "清除PID控制器日志"
+  },
+  "p2PIDLogs[4].overwrite": {
+    "defaultMessage": "在必要时覆盖最旧的记录"
+  },
+  "p2PwmOutputs[0].title": {
+    "defaultMessage": "4-20mA / PWM 输出设置"
+  },
+  "p2PwmOutputs[1].equipment": {
+    "defaultMessage": "设备"
+  },
+  "p2PwmOutputs[2].4_20": {
+    "defaultMessage": "4-20 输出"
+  },
+  "p2PwmOutputs[3].doors": {
+    "defaultMessage": "新鲜空气门"
+  },
+  "p2PwmOutputs[5].fan": {
+    "defaultMessage": "风扇"
+  },
+  "p2PwmOutputs[6].burner": {
+    "defaultMessage": "燃烧器"
+  },
+  "p2RefrigerationAS2[12].enabled": {
+    "defaultMessage": "启用"
+  },
+  "p2Refrigeration[0].title": {
+    "defaultMessage": "制冷装置"
+  },
+  "p2Refrigeration[10].purge3": {
+    "defaultMessage": "下面以清除"
+  },
+  "p2Refrigeration[12].stage5": {
+    "defaultMessage": "阶段 5"
+  },
+  "p2Refrigeration[13].stage6": {
+    "defaultMessage": "阶段 6"
+  },
+  "p2Refrigeration[1].stage": {
+    "defaultMessage": "阶段 {stage}",
+    "description": "Stage"
+  },
+  "p2Refrigeration[2].on": {
+    "defaultMessage": "打开:"
+  },
+  "p2Refrigeration[3].off": {
+    "defaultMessage": "关闭:"
+  },
+  "p2Refrigeration[4].defrost": {
+    "defaultMessage": "除霜 {defrost}",
+    "description": "Defrost"
+  },
+  "p2Refrigeration[4].defrost5": {
+    "defaultMessage": "除霜"
+  },
+  "p2Refrigeration[4].defrost6": {
+    "defaultMessage": "除霜"
+  },
+  "p2Refrigeration[5].pidu": {
+    "defaultMessage": "PID控制器值"
+  },
+  "p2Refrigeration[6].purge1": {
+    "defaultMessage": "制冷清除模式："
+  },
+  "p2Refrigeration[7].normal": {
+    "defaultMessage": "正常"
+  },
+  "p2Refrigeration[8].pumpdown": {
+    "defaultMessage": "泵下"
+  },
+  "p2Refrigeration[9].purge2": {
+    "defaultMessage": "输出必须在"
+  },
+  "pageView-Profile-Email": {
+    "defaultMessage": "Email",
+    "description": "title for email field"
+  },
+  "pageView-Profile-Organization": {
+    "defaultMessage": "Organization",
+    "description": "title for Organization field"
+  },
+  "pageView-Profile-SectionTitle-ChangePassword": {
+    "defaultMessage": "Change Password",
+    "description": "title for Change Password section"
+  },
+  "pageView-Profile-Username": {
+    "defaultMessage": "Username",
+    "description": "title for username field"
+  },
+  "rampModeDynTranslatedText[0].temp-differential": {
+    "defaultMessage": "直到达到"
+  },
+  "rampModeDynTranslatedText[1].reached": {
+    "defaultMessage": "的当温度差分"
+  },
+  "rampModeDynTranslatedText[2].between": {
+    "defaultMessage": "在气室设定值和"
+  },
+  "rampModeDynTranslatedText[3].every": {
+    "defaultMessage": "每"
+  },
+  "rampModeDynTranslatedText[4].hours.cooling": {
+    "defaultMessage": "小时冷却或制冷运行时间"
+  },
+  "rampModeDynTranslatedText[5].return": {
+    "defaultMessage": "返回空气温度 (默认)"
+  },
+  "sites.no-device-log-history-in-cloud": {
+    "defaultMessage": "No recorded log history",
+    "description": "indicates to user that there are no logs for the device saved in the cloud database"
+  },
+  "sites.no-sites-to-view": {
+    "defaultMessage": "No sites to view",
+    "description": "this message displays if there are no sites to view"
+  },
+  "title.iotAlarms": {
+    "defaultMessage": "Alarms",
+    "description": "plural of alarm. Alarms. Alarms as in something happened at a site and the client should know about it."
+  },
+  "toggle": {
+    "defaultMessage": "切换"
+  },
+  "units.calculated-humidity": {
+    "defaultMessage": "% (计算)",
+    "description": "calculated humidity"
+  },
+  "units.moisture-loss": {
+    "defaultMessage": "mi",
+    "description": "moisture loss index"
+  },
+  "units.parts-per-million": {
+    "defaultMessage": "PPM",
+    "description": "PPM is the abreviation for parts per million. please keep abreviated "
+  },
+  "units.relative-humidity": {
+    "defaultMessage": "%RH",
+    "description": "RH is the abreviation for relative humidity. please keep abreviated "
+  },
+  "units.temperature-Celsius": {
+    "defaultMessage": "°C",
+    "description": "metric unit of measurement for temperature Celsius"
+  },
+  "units.temperature-fahrenheit": {
+    "defaultMessage": "°F",
+    "description": "standard unit of measurement for temperature Fahrenheit"
+  },
+  "units.time-days-short": {
+    "defaultMessage": "d",
+    "description": "This is short hand or acronym for Day, it must be 2 letters or less"
+  },
+  "units.time-hourss-short": {
+    "defaultMessage": "h",
+    "description": "This is short hand or acronym for hours, it must be 2 letters or less"
+  },
+  "units.time-minutes-short": {
+    "defaultMessage": "m",
+    "description": "This is short hand or acronym for minute, it must be 2 letters or less"
+  },
+  "units.time-now-short": {
+    "defaultMessage": "now",
+    "description": "A consice and short way express that the data was retrieved now and is fresh."
+  },
+  "updCoolingOutputTranslatedText[2].burner": {
+    "defaultMessage": "燃烧器输出"
+  },
+  "updOutsideTempTranslatedText[0].OutsideAir": {
+    "defaultMessage": "仓库外气温",
+    "description": "Outside Air Temperature and Humidity"
+  },
+  "user.active": {
+    "defaultMessage": "积极"
+  },
+  "user.areyousure": {
+    "defaultMessage": "是否确实要删除 {username}",
+    "description": "User Name Delete"
+  },
+  "user.assignSites": {
+    "defaultMessage": "分配其他站点"
+  },
+  "user.email": {
+    "defaultMessage": "电邮地址"
+  },
+  "user.first": {
+    "defaultMessage": "电邮地址"
+  },
+  "user.last": {
+    "defaultMessage": "姓"
+  },
+  "user.level1": {
+    "defaultMessage": "级别 1"
+  },
+  "user.level2": {
+    "defaultMessage": "级别 2"
+  },
+  "user.manageSite": {
+    "defaultMessage": "管理存储"
+  },
+  "user.no": {
+    "defaultMessage": "不"
+  },
+  "user.siteaccess": {
+    "defaultMessage": "网站访问"
+  },
+  "user.upgrade": {
+    "defaultMessage": "升级"
+  },
+  "user.view": {
+    "defaultMessage": "管理用户"
+  },
+  "user.yes": {
+    "defaultMessage": "是的"
+  },
+  "validateIoConfigTranslatedText[0].outputs": {
+    "defaultMessage": "重复或无效输出被定义。"
+  },
+  "validateIoConfigTranslatedText[1].inputs": {
+    "defaultMessage": "重复或无效输入被定义。"
+  },
+  "validateIoConfigTranslatedText[2].7and8": {
+    "defaultMessage": "只能定义辅助输出或储藏室输出7和8。"
+  }
+}

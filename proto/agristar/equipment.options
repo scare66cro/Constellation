@@ -1,0 +1,6 @@
+# nanopb options for equipment.proto
+agristar.EquipmentStatus.items           max_count:32
+agristar.EquipState.label                max_size:24
+agristar.Runtimes.entries                max_count:32
+agristar.AuxSwitches.switch_state        max_count:8
+agristar.RuntimeEntry.eq_index           int_size:8

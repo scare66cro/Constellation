@@ -1,0 +1,541 @@
+{
+  "id": 4,
+  "ipAddress": "10.47.27.4",
+  "role": 3,
+  "digitalInputs": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    false
+  ],
+  "eStop": false,
+  "digitalOutputs": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "dc24vOutputs": [
+    false,
+    false,
+    false,
+    false
+  ],
+  "analogOutputs": [
+    0,
+    0
+  ],
+  "aoModes": [
+    "voltage",
+    "voltage"
+  ],
+  "vfdRegisters": {
+    "100": 1038,
+    "101": 0,
+    "102": 819,
+    "103": 0,
+    "104": 0,
+    "105": 0,
+    "106": 0,
+    "107": 0,
+    "108": 0,
+    "109": 0,
+    "110": 649,
+    "111": 0,
+    "112": 35,
+    "113": 0,
+    "114": 0,
+    "115": 0,
+    "116": 1038,
+    "117": 0,
+    "118": 819,
+    "119": 0,
+    "120": 0,
+    "121": 0,
+    "122": 0,
+    "123": 0,
+    "124": 0,
+    "125": 0,
+    "126": 650,
+    "127": 0,
+    "128": 35,
+    "129": 0,
+    "130": 0,
+    "131": 0,
+    "132": 1038,
+    "133": 0,
+    "134": 819,
+    "135": 0,
+    "136": 0,
+    "137": 0,
+    "138": 0,
+    "139": 0,
+    "140": 0,
+    "141": 0,
+    "142": 650,
+    "143": 0,
+    "144": 35,
+    "145": 0,
+    "146": 0,
+    "147": 0
+  },
+  "vfdActivity": true,
+  "sensorRegisters": {},
+  "sensorActivity": true,
+  "firmwareVersion": "1.0.0",
+  "cpuTemp": 42,
+  "uptime": 153701,
+  "commLost": false,
+  "safeMode": false,
+  "outputLabels": [
+    "Liquid Solenoid",
+    "Compressor",
+    "Unloader 1",
+    "Unloader 2",
+    "Cond Fan 1",
+    "Cond Fan 2",
+    "Cond Fan 3",
+    "Cond Fan 4",
+    "Defrost",
+    ""
+  ],
+  "inputLabels": [
+    "Phase Monitor",
+    "HP Switch",
+    "LP Switch",
+    "Compressor Overload",
+    "Cond Fan Overload",
+    "Run Prove",
+    "Pumpdown Switch",
+    "Auto-Run Permissive",
+    "",
+    ""
+  ],
+  "analogBoards": [
+    {
+      "address": 0,
+      "type": 3,
+      "present": true,
+      "label": "Temperature",
+      "sensorTypes": [
+        3,
+        3,
+        3,
+        3
+      ],
+      "sensorValues": [
+        195,
+        296,
+        246,
+        245
+      ],
+      "sensorLabels": [
+        "Suction T",
+        "Discharge T",
+        "LLS T",
+        "Ambient T"
+      ]
+    },
+    {
+      "address": 1,
+      "type": 4,
+      "present": true,
+      "label": "Pressure",
+      "sensorTypes": [
+        4,
+        4,
+        4,
+        5
+      ],
+      "sensorValues": [
+        869,
+        545,
+        1,
+        50
+      ],
+      "sensorLabels": [
+        "Suction P",
+        "Discharge P",
+        "Oil P",
+        "Demand"
+      ]
+    }
+  ],
+  "gdcActuators": [
+    {
+      "position": 0,
+      "target": 0,
+      "moving": false,
+      "openSwitch": false,
+      "closeSwitch": true,
+      "label": "Door 1",
+      "stageAssignment": 1,
+      "openTravelTime": 0,
+      "closeTravelTime": 0,
+      "calibrated": false
+    },
+    {
+      "position": 0,
+      "target": 0,
+      "moving": false,
+      "openSwitch": false,
+      "closeSwitch": true,
+      "label": "Door 2",
+      "stageAssignment": 2,
+      "openTravelTime": 0,
+      "closeTravelTime": 0,
+      "calibrated": false
+    },
+    {
+      "position": 0,
+      "target": 0,
+      "moving": false,
+      "openSwitch": false,
+      "closeSwitch": true,
+      "label": "Door 3",
+      "stageAssignment": 3,
+      "openTravelTime": 0,
+      "closeTravelTime": 0,
+      "calibrated": false
+    },
+    {
+      "position": 0,
+      "target": 0,
+      "moving": false,
+      "openSwitch": false,
+      "closeSwitch": true,
+      "label": "Door 4",
+      "stageAssignment": 4,
+      "openTravelTime": 0,
+      "closeTravelTime": 0,
+      "calibrated": false
+    },
+    {
+      "position": 0,
+      "target": 0,
+      "moving": false,
+      "openSwitch": false,
+      "closeSwitch": true,
+      "label": "Door 5",
+      "stageAssignment": 5,
+      "openTravelTime": 0,
+      "closeTravelTime": 0,
+      "calibrated": false
+    }
+  ],
+  "gdcStages": [
+    {
+      "stageNum": 1,
+      "label": "Control Door"
+    },
+    {
+      "stageNum": 2,
+      "label": "Volume Group 1"
+    },
+    {
+      "stageNum": 3,
+      "label": "Volume Group 2"
+    },
+    {
+      "stageNum": 4,
+      "label": "Volume Group 3"
+    },
+    {
+      "stageNum": 5,
+      "label": "Volume Group 4"
+    }
+  ],
+  "freshAirDoorPct": 0,
+  "activeStageCount": 0,
+  "actuatorTravelTime": 90,
+  "calibrating": false,
+  "calibrationPhase": "idle",
+  "calibrationStartTimes": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "triton": {
+    "enabled": true,
+    "label": "Triton Refrigeration Unit",
+    "compressorOn": false,
+    "compressorRuntimeSec": 0,
+    "compressorAmps": 0,
+    "condenserFanStage": 0,
+    "condenserFanCount": 4,
+    "dischargeTargetP": 123,
+    "evapFanOn": true,
+    "exvOpenPct": 0,
+    "defrostActive": false,
+    "lastDefrostEnd": 1776616806098,
+    "manualMode": "auto",
+    "demand": 50,
+    "sensors": {
+      "suctionP": {
+        "value": 86.94564057843559,
+        "valid": true,
+        "lowAlarm": 5,
+        "highAlarm": 120
+      },
+      "suctionT": {
+        "value": 19.50597953637209,
+        "valid": true,
+        "lowAlarm": -40,
+        "highAlarm": 90
+      },
+      "dischargeP": {
+        "value": 54.479901149040266,
+        "valid": true,
+        "lowAlarm": 10,
+        "highAlarm": 425
+      },
+      "dischargeT": {
+        "value": 29.564041052610534,
+        "valid": true,
+        "lowAlarm": 10,
+        "highAlarm": 250
+      },
+      "llsT": {
+        "value": 24.56308036898565,
+        "valid": true,
+        "lowAlarm": -40,
+        "highAlarm": 200
+      },
+      "oilP": {
+        "value": 0.05435810371368994,
+        "valid": true,
+        "lowAlarm": 8,
+        "highAlarm": 100
+      },
+      "ambientT": {
+        "value": 24.5,
+        "valid": true,
+        "lowAlarm": -40,
+        "highAlarm": 130
+      }
+    },
+    "setpoints": {
+      "cutInP": 82,
+      "cutOutP": 42,
+      "minOffTime": 180,
+      "minRuntime": 120,
+      "warmUpSec": 30,
+      "proveSec": 60,
+      "powerFailMinutes": 30,
+      "crankcaseRunHours": 2,
+      "lowAmbientCutoutF": -5,
+      "pumpDownMode": 1,
+      "variableStartPct": 30,
+      "refrigerantType": 2,
+      "groupId": 0,
+      "rotationOrder": 1,
+      "rotateHours": 168,
+      "superheatTarget": 11.5,
+      "superheatLowF": 5,
+      "superheatWindowHighF": 25,
+      "superheatWindowLowF": 3,
+      "discHighUnloadP": 350,
+      "sucLowUnloadP": 15,
+      "condFanCount": 4,
+      "condFanVfdMode": 0,
+      "condFanVfdMinPct": 30,
+      "condFanVfdMaxPct": 100,
+      "condFanVfdSetpointP": 240,
+      "fanStageOnP": [
+        180,
+        220,
+        260,
+        300
+      ],
+      "fanStageOffP": [
+        160,
+        200,
+        240,
+        280
+      ],
+      "condenserMode": 1,
+      "condApproachF": 10,
+      "condMinHeadP": 123,
+      "condMaxHeadP": 252,
+      "fanDiffOnP": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60
+      ],
+      "fanDiffOffP": [
+        5,
+        5,
+        5,
+        5,
+        5,
+        5
+      ],
+      "exvKp": 2.5,
+      "exvKi": 0.1,
+      "exvKd": 0,
+      "exvMinPct": 5,
+      "exvMaxPct": 100,
+      "exvManualPct": 50,
+      "subcoolingTarget": 8,
+      "defrostMode": 1,
+      "defrostStages": 1,
+      "defrostIntervalHours": 7,
+      "defrostMaxMinutes": 20,
+      "defrostTermT": 55,
+      "dripTimeSec": 120,
+      "pumpDownBeforeDefrost": 1,
+      "capP": 4,
+      "capI": 0.5,
+      "capD": 0,
+      "capU": 0.5,
+      "condP": 5,
+      "condI": 15,
+      "condD": 2,
+      "condU": 3,
+      "leakDetectEnabled": 1,
+      "leakSuperheatMarginF": 8,
+      "leakExvOpenPct": 85,
+      "leakSustainMinutes": 15
+    },
+    "failures": {
+      "suctionP": {
+        "mode": 2,
+        "delaySec": 15
+      },
+      "dischargeP": {
+        "mode": 1,
+        "delaySec": 5
+      },
+      "oilP": {
+        "mode": 1,
+        "delaySec": 60
+      },
+      "suctionT": {
+        "mode": 0,
+        "delaySec": 60
+      },
+      "dischargeT": {
+        "mode": 1,
+        "delaySec": 30
+      },
+      "llsT": {
+        "mode": 0,
+        "delaySec": 60
+      },
+      "ambientT": {
+        "mode": 0,
+        "delaySec": 60
+      }
+    },
+    "ioConfig": {
+      "aoMode": [
+        1,
+        2,
+        0,
+        0
+      ],
+      "doRole": [
+        5,
+        1,
+        6,
+        7,
+        2,
+        2,
+        2,
+        2,
+        4,
+        0
+      ]
+    },
+    "compressorStatus": 0,
+    "totalRuntimeHours": 0,
+    "dailyRuntimeHours": 0,
+    "alarms": [
+      {
+        "code": "OIL_LOW_P",
+        "label": "Oil Pressure Low",
+        "active": false,
+        "acked": false,
+        "timestamp": 1776459758246
+      },
+      {
+        "code": "NO_DISCHARGE",
+        "label": "No Discharge Pressure Rise",
+        "active": false,
+        "acked": false,
+        "timestamp": 1776523782744
+      }
+    ],
+    "safeties": {
+      "phaseMonitor": true,
+      "hpSwitch": true,
+      "lpSwitch": true,
+      "compOverload": true,
+      "condFanOverload": true,
+      "runProve": true,
+      "pumpdownSwitch": true,
+      "autoRunPermissive": true,
+      "lockoutMask": 0
+    },
+    "leakDetect": {
+      "shAvgF": 14.45826166208031,
+      "exvAvgPct": 25.619161460163394,
+      "sustainedSec": 0,
+      "leakAlarmActive": false,
+      "warmupSec": 0
+    },
+    "failureStates": {
+      "suctionP": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "dischargeP": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "oilP": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "suctionT": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "superheatLow": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "dischargeT": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "llsT": {
+        "overSec": 0,
+        "tripped": false
+      },
+      "ambientT": {
+        "overSec": 0,
+        "tripped": false
+      }
+    },
+    "safeOffMask": 0,
+    "lastTickMs": 1776616871788
+  }
+}

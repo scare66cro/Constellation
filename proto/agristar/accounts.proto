@@ -1,0 +1,57 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// accounts.proto — User accounts, authentication, network nodes
+// Maps to: StorePassword/UI_SendAccounts, PasswordAuth, NetworkNode,
+//          EmailSettings
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── AccountSettings — user accounts (UI_SendAccounts, tag "AcctId0") ────
+message AccountSettings {
+  repeated UserAccount users = 1;
+  uint32 user_count          = 2;
+  bool   password_defined    = 3;
+}
+
+message UserAccount {
+  uint32 slot     = 1;
+  string user_id  = 2;
+}
+
+// ─── PasswordAuth — login authentication (tag "dlr") ─────────────────────
+// Bridge → Firmware. Replaces the "dlr" POST tag.
+message PasswordAuth {
+  string password = 1;
+}
+
+// ─── PasswordResponse — auth result ──────────────────────────────────────
+message PasswordResponse {
+  bool   authenticated = 1;
+  uint32 access_level  = 2;
+}
+
+// ─── NetworkNode — multi-panel nodes (StoreNetworkNode) ──────────────────
+message NetworkNodeSettings {
+  repeated NetworkNode nodes = 1;
+}
+
+message NetworkNode {
+  uint32 index   = 1;
+  string ip_addr = 2;
+  string name    = 3;
+  uint32 status  = 4;   // 0=offline, 1=online
+}
+
+// ─── NetworkNodeCmd — node management commands ───────────────────────────
+message NetworkNodeCmd {
+  NetworkNodeCmdType cmd_type = 1;
+  uint32 node_index           = 2;
+  string ip_addr              = 3;
+}
+
+enum NetworkNodeCmdType {
+  NODE_CMD_ADD    = 0;
+  NODE_CMD_DELETE = 1;
+  NODE_CMD_UPDATE = 2;
+  NODE_CMD_FIND   = 3;
+}

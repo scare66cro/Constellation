@@ -1,0 +1,152 @@
+/*
+ * nova_fw_update.h — Firmware update manager for Nova (AM2434)
+ *
+ * Dual-bank OSPI flash layout:
+ *   0x000000 - 0x00FFFF  Boot header + bank metadata (64 KB)
+ *   0x010000 - 0x1FFFFF  Bank A firmware image (~2 MB)
+ *   0x200000 - 0x3FFFFF  Bank B firmware image (~2 MB)
+ *   0x400000 - 0x5FFFFF  Golden recovery image (~2 MB, write-once)
+ *   0x600000 - 0x7FFFFF  Settings vault (~2 MB)
+ *
+ * Copyright (c) 2026 Agristar
+ * SPDX-License-Identifier: MIT
+ */
+#ifndef NOVA_FW_UPDATE_H
+#define NOVA_FW_UPDATE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* ─── Flash offsets (within OSPI, relative to 0x50000000) ─────────────── */
+#define FW_HEADER_OFFSET      0x000000
+#define FW_HEADER_SIZE        0x010000   /* 64 KB */
+#define FW_BANK_A_OFFSET      0x010000
+#define FW_BANK_B_OFFSET      0x200000
+#define FW_GOLDEN_OFFSET      0x400000
+#define FW_SETTINGS_OFFSET    0x600000
+#define FW_BANK_MAX_SIZE      0x1F0000   /* ~2 MB minus header region */
+#define FW_SECTOR_SIZE        4096
+
+/* ─── Bank header (stored at FW_HEADER_OFFSET) ────────────────────────── */
+/* 128 bytes per bank entry, two entries, total 256 bytes.
+ * The rest of the 64 KB header sector is reserved for future use. */
+
+#define FW_BANK_MAGIC         0x4E4F5641   /* "NOVA" */
+#define FW_BANK_A_HDR_OFFSET  0x000000
+#define FW_BANK_B_HDR_OFFSET  0x000080     /* +128 bytes */
+#define FW_BOOT_META_OFFSET   0x000100     /* +256 bytes: boot counter + reason */
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;           /* Must be FW_BANK_MAGIC */
+    uint32_t image_size;      /* Size of firmware image in bytes */
+    uint32_t image_crc;       /* CRC-32 of the image data */
+    uint32_t valid;           /* 1 = image verified OK, 0 = not valid */
+    uint32_t active;          /* 1 = this is the active bank */
+    uint32_t sequence;        /* Monotonic: higher = newer */
+    char     version[32];     /* Version string, null-terminated */
+    uint8_t  reserved[80];    /* Pad to 128 bytes */
+} FwBankHeader;
+
+typedef struct __attribute__((packed)) {
+    uint32_t boot_count;      /* Total boot count */
+    uint32_t boot_reason;     /* 0=normal, 1=watchdog, 2=fallback */
+    uint32_t watchdog_strikes; /* Consecutive failed boots */
+    uint8_t  reserved[116];   /* Pad to 128 bytes */
+} FwBootMeta;
+
+/* ─── Update states ───────────────────────────────────────────────────── */
+
+typedef enum {
+    FW_STATE_IDLE      = 0,
+    FW_STATE_ERASING   = 1,
+    FW_STATE_RECEIVING = 2,
+    FW_STATE_VERIFYING = 3,
+    FW_STATE_VERIFIED  = 4,
+    FW_STATE_ACTIVATING = 5,
+    FW_STATE_ERROR     = 6
+} FwUpdateState;
+
+/* ─── Public API ──────────────────────────────────────────────────────── */
+
+/** Initialize: read bank headers, determine active bank */
+void NovaFwUpdate_Init(void);
+
+/** Get the currently active bank (0=A, 1=B) */
+uint32_t NovaFwUpdate_GetActiveBank(void);
+
+/** Get the inactive bank (opposite of active) */
+uint32_t NovaFwUpdate_GetInactiveBank(void);
+
+/** Get the current update state */
+FwUpdateState NovaFwUpdate_GetState(void);
+
+/** Handle FwBeginUpdate command from bridge.
+ *  Erases inactive bank, prepares for receiving chunks.
+ *  Returns 0 on success, error code on failure. */
+uint32_t NovaFwUpdate_Begin(uint32_t total_size, uint32_t crc32,
+                             const char *version, uint32_t chunk_size);
+
+/** Handle FwDataChunk: write one chunk to the inactive bank.
+ *  Returns 0 on success, error code on failure. */
+uint32_t NovaFwUpdate_WriteChunk(uint32_t offset, const uint8_t *data,
+                                  uint32_t len, uint32_t chunk_crc);
+
+/** Handle FwFinalizeUpdate: verify full-image CRC.
+ *  Returns 0 on success, error code on failure. */
+uint32_t NovaFwUpdate_Finalize(uint32_t expected_crc);
+
+/** Handle FwActivateBank: mark the just-written bank as active.
+ *  If reboot=true, triggers a system reset.
+ *  Returns 0 on success. */
+uint32_t NovaFwUpdate_Activate(bool reboot);
+
+/** Abort an in-progress update, return to IDLE */
+void NovaFwUpdate_Abort(void);
+
+/** Get bytes written so far (for progress reporting) */
+uint32_t NovaFwUpdate_GetBytesWritten(void);
+
+/** Get total expected size */
+uint32_t NovaFwUpdate_GetTotalSize(void);
+
+/** Read bank header for a given bank (0=A, 1=B) */
+void NovaFwUpdate_GetBankHeader(uint32_t bank, FwBankHeader *hdr);
+
+/** Read boot metadata */
+void NovaFwUpdate_GetBootMeta(FwBootMeta *meta);
+
+/** Validate a bank's image (read + CRC check). Returns true if valid. */
+bool NovaFwUpdate_ValidateBank(uint32_t bank);
+
+/** Called by bootloader: increment boot count, check watchdog strikes */
+void NovaFwUpdate_BootValidation(void);
+
+/** Called by application after successful boot (clears watchdog strikes) */
+void NovaFwUpdate_ConfirmBoot(void);
+
+/* ─── Firmware Image Signing ──────────────────────────────────────────── */
+/*
+ * Images must include a 256-byte signature trailer:
+ *   [firmware payload][256-byte ECDSA-P256 signature]
+ *
+ * The signature is over SHA-256(payload).
+ * The public key is embedded in the golden recovery image and cannot
+ * be updated — only the corresponding private key (held by Agristar
+ * build server) can produce valid signatures.
+ *
+ * Verification happens during Finalize, before marking the bank as valid.
+ * If verification fails, the bank is NOT marked valid and Activate will
+ * refuse to switch to it.
+ */
+
+#define FW_SIGNATURE_SIZE       256   /* ECDSA P-256 DER signature max */
+#define FW_PUBKEY_SIZE          64    /* Uncompressed P-256 public key (x || y) */
+
+/** Set the signing public key (called at boot from golden image) */
+void NovaFwUpdate_SetSigningKey(const uint8_t pubkey[FW_PUBKEY_SIZE]);
+
+/** Verify the signature of a bank's image. Returns true if valid.
+ *  The last FW_SIGNATURE_SIZE bytes of the image are the signature. */
+bool NovaFwUpdate_VerifySignature(uint32_t bank);
+
+#endif /* NOVA_FW_UPDATE_H */

@@ -1,0 +1,45 @@
+// DATA payload
+{
+    "Mode": "FAILURE",
+    // "deviceId": "GellertTest", //is a setting
+    "messageId": 20, //ignore
+    "timestamp": "2021-04-09T19:43:03.033Z", //ignore
+    "PlenumTemp": "43.7",
+    // "PlenumTempSet": "47.0", //is a setting
+    "PlenumHumid": "95",
+    // "PlenumHumidSet": "95", //is a setting
+    "ReturnTemp": "43.6",
+
+    // need to add the following:
+    "ReturnTemp": "43.6",
+    "ReturnHumid": "43.6",
+    "CO2ppm":"1200",
+    "OutsideTemp":"",
+    "OutsideHumid":"",
+    "CoolingAvailableTemp":"",
+    // "AVGFanOutput":"", //what should this data really look like??
+    "" 
+}
+
+// SETTINGS payload
+{
+    // add the following
+    "deviceId": "GellertTest", //currently in data
+    "MeasurementSystem":"metric", 
+    
+    "Plenum":{ //currently in data
+        "TempSet": "47.0",
+        "HumidSet": "95",
+    },
+
+    "CO2PurgeSettings":{
+        "ControlMode":"",
+        "HoursSinceLastPurge":"",
+        "MaxCO2ppm":"1400",
+        "OutsideTempMin":"",
+        "OutsideTempMax":"",
+        "PurgeDurationInMin":"",
+        "FanOutput":"",
+        "DoorOutput":""
+    }
+}

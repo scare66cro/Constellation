@@ -1,0 +1,1 @@
+default_app_config = 'gellert_apps.api.apps.ApiConfig'

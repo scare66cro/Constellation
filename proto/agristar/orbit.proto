@@ -1,0 +1,64 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// orbit.proto — Orbit I/O module status, discovery, and zone configuration
+//
+// Constellation supports up to 16 Orbit modules on the Modbus TCP network.
+// Each module is assigned a zone role (storage, door, refrigeration) and
+// optionally maps to a legacy IoBoard[] slot (0-2) for Controls.c compat.
+//
+// Messages:
+//   OrbitStatus       — per-board health snapshot (firmware → bridge, periodic)
+//   OrbitDiscovery    — full discovery results (firmware → bridge, on demand)
+//   OrbitRoleAssign   — assign zone role to a board (bridge → firmware)
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── Zone role assignment (matches orbit_role_t in hal_orbit.h) ──────────
+enum OrbitRole {
+  ORBIT_ROLE_UNASSIGNED_PB = 0;
+  ORBIT_ROLE_STORAGE_PB    = 1;
+  ORBIT_ROLE_DOOR_PB       = 2;
+  ORBIT_ROLE_REFRIG_PB     = 3;
+}
+
+// ─── Per-board status snapshot ───────────────────────────────────────────
+message OrbitBoardStatus {
+  uint32    slot           = 1;   // Discovery slot index (0..15)
+  uint32    dipswitch_id   = 2;   // DIP switch value (1-63)
+  bool      connected      = 3;   // Last poll succeeded
+  uint32    comm_errors    = 4;   // Consecutive error count
+  bool      estop_active   = 5;   // Board reports E-Stop
+  bool      safe_mode      = 6;   // Board in safe mode
+  float     cpu_temp       = 7;   // CPU temperature °C
+  uint32    uptime_secs    = 8;   // Board uptime in seconds
+  uint32    firmware_ver   = 9;   // Orbit firmware version
+  OrbitRole role           = 10;  // Assigned zone role
+  uint32    zone_id        = 11;  // Zone index (0=Room A, 1=Room B, ...)
+  int32     legacy_slot    = 12;  // IoBoard[] index, or -1 if not mapped
+  uint32    refrig_stage   = 13;  // For REFRIG role: compressor stage 1-8
+  string    ip_address     = 14;  // IP address string for display
+}
+
+// ─── Full discovery results (firmware → bridge) ──────────────────────────
+// Sent on startup and when bridge sends DataRequest for orbit discovery.
+message OrbitDiscovery {
+  uint32 max_slots          = 1;  // NOVA_MAX_ORBITS (currently 16)
+  uint32 boards_found       = 2;  // Number of connected boards
+  repeated OrbitBoardStatus boards = 3;
+}
+
+// ─── Periodic orbit status push (firmware → bridge) ──────────────────────
+// Sent every ~5s with all connected boards' status.
+message OrbitStatus {
+  repeated OrbitBoardStatus boards = 1;
+}
+
+// ─── Zone role assignment command (bridge → firmware) ────────────────────
+// Assigns a zone role to a specific orbit slot.
+message OrbitRoleAssign {
+  uint32    slot           = 1;   // Discovery slot index
+  OrbitRole role           = 2;   // New role
+  uint32    zone_id        = 3;   // Zone index
+  int32     legacy_slot    = 4;   // IoBoard[] mapping (-1 for none)
+  uint32    refrig_stage   = 5;   // Compressor stage (REFRIG role only)
+}

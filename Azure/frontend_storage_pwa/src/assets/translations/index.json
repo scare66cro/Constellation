@@ -1,0 +1,98 @@
+{
+  "app.error-popup.internal-server-error": {
+    "defaultMessage": "Something went wrong...",
+    "description": "alert pop up for 500 response"
+  },
+  "app.error-popup.network-connection": {
+    "defaultMessage": "Network error, please check your internet connection.",
+    "description": "alert pop up about the network connnection"
+  },
+  "appSettings.display-units-header": {
+    "defaultMessage": "Measurement System",
+    "description": "indicates option to select a metric or standard of measurement"
+  },
+  "appSettings.font-size-header": {
+    "defaultMessage": "Font Size",
+    "description": "indicates option to select an app wide font size"
+  },
+  "appSettings.languages-header": {
+    "defaultMessage": "Language",
+    "description": "indicates option to select a supported language to use in app"
+  },
+  "bottomNav.AppSettings-tab-label": {
+    "defaultMessage": "App Settings",
+    "description": "label for the button in the main app bottom navigation bar belonging to AppSettings"
+  },
+  "bottomNav.BusinessAccount-tab-label": {
+    "defaultMessage": "Business Account",
+    "description": "label for the button in the main app bottom navigation bar belonging to BusinessAccount"
+  },
+  "bottomNav.ContactDealer-tab-label": {
+    "defaultMessage": "Contact Dealer",
+    "description": "label for the button in the main app bottom navigation bar belonging to ContactDealer"
+  },
+  "bottomNav.Logout-tab-label": {
+    "defaultMessage": "Logout",
+    "description": "label for the button in the main app bottom navigation bar belonging to Logout"
+  },
+  "bottomNav.ManageStaff-tab-label": {
+    "defaultMessage": "Manage Staff",
+    "description": "label for the button in the main app bottom navigation bar belonging to ManageStaff"
+  },
+  "bottomNav.MyProfile-tab-label": {
+    "defaultMessage": "My Profile",
+    "description": "label for the button in the main app bottom navigation bar belonging to MyProfile"
+  },
+  "bottomNav.dashboard-tab-label": {
+    "defaultMessage": "Dashboard",
+    "description": "label for the button in the main app bottom navigation bar belonging to dashboard"
+  },
+  "bottomNav.devices-tab-label": {
+    "defaultMessage": "Devices",
+    "description": "label for the button in the main app bottom navigation bar belonging to Devices"
+  },
+  "bottomNav.events-tab-label": {
+    "defaultMessage": "Events",
+    "description": "label for the button in the main app bottom navigation bar belonging to Events"
+  },
+  "bottomNav.more-tab-label": {
+    "defaultMessage": "More",
+    "description": "label for the button in the main app bottom navigation bar belonging to More"
+  },
+  "bottomNav.storages-tab-label": {
+    "defaultMessage": "Storages",
+    "description": "label for the button in the main app bottom navigation bar belonging to Storages"
+  },
+  "events.no-events-to-view": {
+    "defaultMessage": "No events to view",
+    "description": "this displays if there are no sites to view"
+  },
+  "login.input-password": {
+    "defaultMessage": "Password",
+    "description": "input label for Password on login page"
+  },
+  "login.input-username": {
+    "defaultMessage": "Username",
+    "description": "input label for username on login page"
+  },
+  "login.login-button": {
+    "defaultMessage": "Login",
+    "description": "text for login button"
+  },
+  "login.login-credentials-failed": {
+    "defaultMessage": "Username or Password is incorrect",
+    "description": "tells user that their login attempt failed, because either their username or password was incorrect"
+  },
+  "login.login-with-google": {
+    "defaultMessage": "Login with Google",
+    "description": "button to click to login using google account"
+  },
+  "login.login-with-microsoft": {
+    "defaultMessage": "Login with Microsoft",
+    "description": "button to click to login using Microsoft account"
+  },
+  "sites.no-sites-to-view": {
+    "defaultMessage": "No sites to view",
+    "description": "this message displays if there are no sites to view"
+  }
+}

@@ -1,0 +1,48 @@
+{
+    "app.login-title": "Russian writing {time}",
+    "app.error-popup.network-connection": "Ошибка сети, проверьте подключение к Интернету",
+    "login.input-password":"Пароль",
+    "login.input-username":"Имя пользователя",
+    "login.login-button":"Авторизоваться",
+    "login.login-credentials-failed":"Логин или пароль неверны",
+    "login.login-with-google":"Войти через гугл",
+    "login.login-with-microsoft":"Войти через microsoft",
+    "bottomNav.dashboard-tab-label":"Приборная панель",
+    "bottomNav.events-tab-label":"События",
+    "bottomNav.storages-tab-label":"Хранилища",
+    "bottomNav.device-tab-label":"Устройства",
+    "bottomNav.more-tab-label":"Более",
+    "bottomNav.BusinessAccount-tab-label":"Бизнес аккаунт",
+    "bottomNav.ManageStaff-tab-label":"Управлять персоналом",
+    "bottomNav.MyProfile-tab-label":"Мой профиль",
+    "bottomNav.ContactDealer-tab-label":"Связаться с дилером",
+    "bottomNav.AppSettings-tab-label":"Настройки приложения",
+    "bottomNav.Logout-tab-label":"Выйти",
+    "sites.no-sites-to-view":"Нет сайтов для просмотра",
+    
+    "appSettings.languages-header":"язык",
+    "appSettings.display-units-header":"система измерения",
+    "appSettings.font-size-header":"размер шрифта",
+
+    "events.no-events-to-view":"нет событий для просмотра",
+
+    "events.event-form-site-field":"хранилище",
+    "events.event-form-category-field":"категория",
+    "events.event-form-title-field":"название",
+    "events.event-form-StartedAt-field":"Начало",
+    "events.event-form-notes-field":"заметки",
+    "events.event-form-FinishedAt-field":"закончился",
+    "events.event-form-title-new-site-event":"новое событие хранения",
+    "events.event-form-save-button":"представить",
+    "button.Cancel":"отменить", 
+
+    "sites.no-device-log-history-in-cloud":"нет записанной истории журнала",
+
+    "agristar2.mode-translation-shutdown":"неисправность",
+    "agristar2.general-settings-PlenumSetpoints":"Plenum Setpoints", 
+
+    "agristar2.general-plenum":"пленум",
+    "agristar2.general-ReturnAir":"прием",
+    "agristar2.general-OutsideAir":"наружный воздух",
+    "agristar2.general-CoolingTempAvailable":"доступно охлаждение"
+  }

@@ -1,0 +1,101 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// firmware.proto — Firmware update protocol for Constellation Nova
+//
+// Architecture: Dual-bank flash with golden recovery image.
+//   OSPI flash (8 MB) layout:
+//     0x000000 - 0x00FFFF  Boot header + bank metadata (64 KB)
+//     0x010000 - 0x1FFFFF  Bank A firmware image (~2 MB)
+//     0x200000 - 0x3FFFFF  Bank B firmware image (~2 MB)
+//     0x400000 - 0x5FFFFF  Golden recovery image (~2 MB, write-once)
+//     0x600000 - 0x7FFFFF  Settings vault (~2 MB)
+//
+// Update flow:
+//   1. Bridge sends FwBeginUpdate (total_size, crc32, version_string)
+//   2. Firmware ACKs if ready (enough flash space, not already updating)
+//   3. Bridge sends FwDataChunk messages (offset, data, chunk_crc)
+//   4. Firmware writes each chunk to the INACTIVE bank, ACKs each
+//   5. Bridge sends FwFinalizeUpdate after all chunks sent
+//   6. Firmware verifies full-image CRC, writes bank header, ACKs
+//   7. Bridge sends FwActivateBank to swap active bank + reboot
+//   8. On reboot, bootloader validates active bank → boots it
+//   9. If boot fails (watchdog), bootloader falls back to other bank
+//      or golden image
+//
+// Recovery: The golden image is flashed once at manufacturing and never
+// overwritten. If both banks are corrupted, the bootloader loads golden.
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── FwBeginUpdate — Bridge → Firmware: start an update session ──────────
+// Firmware erases the inactive bank and prepares to receive chunks.
+message FwBeginUpdate {
+  uint32 total_size      = 1;   // Total firmware image size in bytes
+  uint32 crc32           = 2;   // CRC-32 of the complete image
+  string version         = 3;   // Version string (e.g. "2.1.0")
+  uint32 chunk_size      = 4;   // Negotiated chunk size (default 1024)
+}
+
+// ─── FwDataChunk — Bridge → Firmware: one chunk of firmware data ─────────
+// Chunks are sent sequentially. offset must be monotonically increasing.
+message FwDataChunk {
+  uint32 offset    = 1;   // Byte offset within the image
+  bytes  data      = 2;   // Chunk payload (up to chunk_size bytes)
+  uint32 chunk_crc = 3;   // CRC-32 of this chunk's data field
+}
+
+// ─── FwFinalizeUpdate — Bridge → Firmware: all chunks sent ───────────────
+// Firmware verifies the full image CRC matches FwBeginUpdate.crc32.
+message FwFinalizeUpdate {
+  uint32 crc32   = 1;   // Same CRC from FwBeginUpdate (for confirmation)
+}
+
+// ─── FwActivateBank — Bridge → Firmware: swap active bank + reboot ───────
+// Only valid after a successful FwFinalizeUpdate.
+message FwActivateBank {
+  bool reboot = 1;   // true = reboot immediately after activation
+}
+
+// ─── FwUpdateStatus — Firmware → Bridge: update progress/result ──────────
+// Sent after each FwDataChunk and on state transitions.
+message FwUpdateStatus {
+  FwUpdateState state          = 1;
+  uint32        bytes_written  = 2;   // Total bytes written so far
+  uint32        total_size     = 3;   // Total expected size
+  uint32        error_code     = 4;   // 0 = no error
+  string        error_message  = 5;   // Human-readable error text
+  string        active_version = 6;   // Currently running firmware version
+  string        staged_version = 7;   // Version in inactive bank (if any)
+  FwBankId      active_bank    = 8;   // Which bank is currently active
+}
+
+enum FwUpdateState {
+  FW_IDLE          = 0;   // No update in progress
+  FW_ERASING       = 1;   // Erasing inactive bank
+  FW_RECEIVING     = 2;   // Receiving and writing chunks
+  FW_VERIFYING     = 3;   // Verifying full-image CRC
+  FW_VERIFIED      = 4;   // Image verified, ready to activate
+  FW_ACTIVATING    = 5;   // Writing bank header + rebooting
+  FW_ERROR         = 6;   // Update failed (see error_code/message)
+}
+
+enum FwBankId {
+  FW_BANK_A       = 0;
+  FW_BANK_B       = 1;
+  FW_BANK_GOLDEN  = 2;   // Recovery image
+}
+
+// ─── FwBankInfo — Firmware → Bridge: boot/bank status on connect ─────────
+// Sent once after handshake so the bridge knows the current state.
+message FwBankInfo {
+  FwBankId active_bank     = 1;
+  string   bank_a_version  = 2;
+  uint32   bank_a_crc      = 3;
+  bool     bank_a_valid    = 4;
+  string   bank_b_version  = 5;
+  uint32   bank_b_crc      = 6;
+  bool     bank_b_valid    = 7;
+  string   golden_version  = 8;
+  uint32   boot_count      = 9;   // Incremented each boot
+  uint32   boot_reason     = 10;  // 0=normal, 1=watchdog, 2=fallback
+}

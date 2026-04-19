@@ -1,0 +1,106 @@
+# ─── Node / npm ──────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+.npm/
+
+# ─── Build outputs ───────────────────────────────────────────────────────
+build/
+dist/
+out/
+.svelte-kit/
+.vite/
+.turbo/
+.next/
+.nuxt/
+.cache/
+*.tsbuildinfo
+
+# Firmware build artifacts
+Nova_Firmware/build/
+orbit-simulator/build/
+qemu-constellation/build/
+**/*.elf
+**/*.bin
+**/*.hex
+**/*.map
+**/*.o
+**/*.d
+**/*.a
+**/*.lst
+
+# ─── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Editor / OS ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+*.iml
+.vscode/*.log
+
+# Keep .vscode shared settings but ignore user-local
+.vscode/.ropeproject/
+.vscode/chrome/
+.vscode/ipch/
+
+# ─── Logs / runtime ──────────────────────────────────────────────────────
+*.log
+.constellation-pids
+.tmp-*.json
+constellation-ui/server/.sim-config/
+constellation-ui/__azurite_db_*
+constellation-ui/test-results/
+constellation-ui/playwright-report/
+
+# ─── Secrets / local config ──────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+**/local.settings.json
+**/dev_secrets.py
+**/.terraform/
+*.pem
+*.key
+
+# ─── Archives / packaged artifacts ───────────────────────────────────────
+*.zip
+*.tar.gz
+*.tgz
+
+# ─── Azure Functions ─────────────────────────────────────────────────────
+Azure/AgristarCloud/.azure/
+Azure/AgristarCloud/bin/
+Azure/AgristarCloud/obj/
+
+# ─── QEMU / runtime simulator data ───────────────────────────────────────
+qemu-constellation/*.qcow2
+qemu-constellation/*.raw
+
+# ─── Generated proto bundles (large, regenerable) ────────────────────────
+# Keep proto/ source but ignore generated/ since it's reproducible
+generated/
+
+# ─── Deploy / runtime artifacts (large, regenerable) ─────────────────────
+constellation-ui/server/deploy/
+constellation-ui/server/data/*.db
+constellation-ui/server/data/*.db-wal
+constellation-ui/server/data/*.db-shm
+constellation-ui/build/
+
+# ─── Legacy reference firmware (huge & not built) ────────────────────────
+# Keep top-level READMEs but ignore the bulk of legacy code
+"Mini_IO legacy refference only firmware/"
+GRC/
+

@@ -1,0 +1,133 @@
+@import 'simple-keyboard/build/css/index.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@tailwind variants;
+
+/*Write your global styles here, in PostCSS syntax */
+/*place global styles here */
+
+/* Apply h-full consistently */
+html,
+body {
+	@apply h-full;
+}
+
+/* Default state: Hide cursor */
+body:not(.show-cursor) * {
+	cursor: none !important; /* Force hide when not active */
+}
+
+/* Active state: Show cursor */
+body.show-cursor * {
+	cursor: default !important; /* Show default cursor when active */
+}
+
+.select option {
+	@apply !bg-white !text-black text-lg md:text-xl 3xl:text-2xl;
+}
+
+.select option:checked {
+	@apply !bg-primary-900 !text-white text-lg md:text-xl 3xl:text-2xl;
+}
+
+.select option:hover {
+	@apply !bg-primary-600 !text-white text-lg md:text-xl 3xl:text-2xl;
+}
+
+.select option:focus {
+	@apply !bg-primary-800 !text-white text-lg md:text-xl 3xl:text-2xl;
+}
+
+/* Checked + hover combined state */
+.select option:checked:hover {
+	@apply !bg-primary-700 !text-white text-lg md:text-xl 3xl:text-2xl;
+}
+
+/* Base select styling */
+.select {
+	@apply bg-white text-black;
+}
+
+/* Increase the inline input width if used without Tailwind width class */
+:root {
+	--date-input-width: 24rem;
+}
+
+/* Scale up the popup date picker */
+.date-time-picker.svelte-w239uu {
+	font-size: 2rem !important; /* base text bigger */
+}
+.date-time-picker.svelte-w239uu .header-cell.svelte-w239uu {
+	width: 1.75rem;
+}
+.date-time-picker.svelte-w239uu .cell.svelte-w239uu {
+	width: 1.75rem;
+	height: 2.75rem;
+	border-color: lightgray;
+}
+.date-time-picker.svelte-w239uu select.svelte-w239uu {
+	height: 3rem;
+	line-height: 3rem !important;
+	padding-right: 1.25rem;
+}
+.date-time-picker.svelte-w239uu select.svelte-w239uu option {
+	font-size: 1.25rem !important; /* Smaller option text */
+	line-height: 1.75rem !important;
+	padding: 0.5rem !important;
+}
+.date-time-picker.svelte-w239uu select.svelte-w239uu option:disabled {
+	color: #d1d5db !important; /* Light gray for disabled options */
+	background-color: #f9fafb !important;
+}
+.date-time-picker.svelte-w239uu .page-button.svelte-w239uu {
+	width: 1.5rem;
+	height: 1.5rem;
+}
+
+.checkbox:checked {
+	@apply bg-primary-900 border-primary-900 text-white;
+}
+
+.checkbox:checked:focus {
+	@apply bg-primary-900 border-primary-500 text-white;
+}
+
+.checkbox:checked:hover {
+	@apply bg-primary-900 border-primary-700 text-white;
+}
+
+
+/* Global text size utilities for pages with minimal content */
+@layer components {
+	.text-size {
+		@apply text-lg md:text-xl xl:text-lg 3xl:text-3xl;
+	}
+	
+	.text-size-large {
+		@apply text-xl md:text-2xl xl:text-xl 3xl:text-4xl;
+	}
+	
+	.text-size-xl {
+		@apply text-2xl md:text-3xl xl:text-2xl 3xl:text-5xl;
+	}
+	
+	/* Container width utilities for pages that need more space */
+	.container-wide {
+		@apply w-11/12 mx-auto;
+	}
+	
+	.container-full {
+		@apply w-full mx-auto;
+	}
+	
+	.container-standard {
+		@apply w-3/4 mx-auto;
+	}
+}
+
+/* Global form control sizing */
+.date-time-field input[type="text"] {
+	@apply !text-lg md:!text-xl xl:!text-2xl w-full;
+}

@@ -1,0 +1,111 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# nanopb options for the Constellation protocol
+# These set max sizes for embedded (no malloc) — critical for firmware.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── String field max lengths ──────────────────────────────────────────────
+# Match the firmware's existing buffer sizes (LTX_FIELD_LENGTH = 32 typical)
+agristar.SystemStatus.fan_speed          max_size:16
+agristar.SystemStatus.cool_output        max_size:16
+agristar.SystemStatus.cool_label         max_size:16
+agristar.SystemStatus.burner_output      max_size:16
+
+agristar.BasicSetup.storage_name         max_size:32
+agristar.BasicSetup.home_page            max_size:16
+agristar.BasicSetup.master_ip            max_size:16
+agristar.BasicSetup.login_pw             max_size:32
+
+agristar.DateTime.date_str               max_size:16
+agristar.DateTime.time_str               max_size:16
+
+agristar.ServiceInfo.dealer_name         max_size:32
+agristar.ServiceInfo.dealer_phone        max_size:20
+agristar.ServiceInfo.dealer_email        max_size:48
+agristar.ServiceInfo.notes               max_size:64
+
+agristar.VersionInfo.arm_version         max_size:16
+agristar.VersionInfo.bootloader_version  max_size:16
+agristar.BoardVersion.version            max_size:16
+agristar.VersionInfo.boards              max_count:16
+
+agristar.Warning.message                 max_size:64
+agristar.WarningReport.warnings          max_count:20
+
+agristar.EquipmentStatus.items           max_count:32
+agristar.EquipState.label                max_size:24
+
+agristar.Runtimes.entries                max_count:32
+agristar.AuxSwitches.switch_state        max_count:8
+
+agristar.IoConfig.output_map             max_count:32
+agristar.IoConfig.input_map              max_count:32
+agristar.IoDefinition.entries            max_count:48
+agristar.IoEntry.name                    max_size:24
+
+agristar.AnalogBoard.label               max_size:16
+agristar.AnalogBoard.version             max_size:16
+agristar.AnalogBoard.sensors             max_count:4
+agristar.AnalogSensor.label              max_size:16
+
+agristar.AvailableIo.output_pins         max_count:32
+agristar.AvailableIo.input_pins          max_count:32
+
+agristar.SensorData.temperatures         max_count:32
+agristar.SensorData.humidities           max_count:16
+agristar.SensorLabels.temp_labels        max_count:32
+agristar.SensorLabels.humid_labels       max_count:16
+agristar.SensorLabel.label               max_size:16
+
+agristar.AccountSettings.users           max_count:8
+agristar.UserAccount.user_id             max_size:16
+agristar.PasswordAuth.password           max_size:32
+agristar.NetworkNodeSettings.nodes       max_count:16
+agristar.NetworkNode.ip_addr             max_size:16
+agristar.NetworkNode.name                max_size:32
+agristar.NetworkNodeCmd.ip_addr          max_size:16
+
+agristar.ClimacellTimes.hourly_efficiency  max_count:48
+agristar.MiscSettings.values             max_count:32
+agristar.FailureSettings.extra_limits    max_count:12
+agristar.AlertSettings.alert_flags       max_count:32
+agristar.GraphFavoriteSettings.favorites max_count:16
+agristar.BayNameSettings.names           max_count:8, max_size:24
+
+agristar.LogChunk.data                   max_size:3500
+agristar.LogChunk.metadata               max_size:256
+agristar.LogQuery.start_date             max_size:16
+agristar.LogQuery.end_date               max_size:16
+
+agristar.RefrigSettings.stages           max_count:8
+agristar.AuxProgramSettings.rules        max_count:4
+agristar.PwmChannelSettings.channels     max_count:8
+
+# Settings string fields
+agristar.PlenumSettings.burner_threshold max_size:16
+agristar.LoadMonitorSettings.bay1_label  max_size:24
+agristar.LoadMonitorSettings.bay2_label  max_size:24
+agristar.LoadMonitorSettings.units       max_size:8
+agristar.LoadMonitorSettings.pipe_label  max_size:24
+agristar.SensorConfig.label              max_size:16
+agristar.AnalogBoardSettings.label       max_size:16
+agristar.IoNameUpdate.new_name           max_size:24
+agristar.EmailSettings.server            max_size:48
+agristar.EmailSettings.port              max_size:8
+agristar.EmailSettings.username          max_size:32
+agristar.EmailSettings.password          max_size:32
+agristar.EmailSettings.from_addr         max_size:48
+agristar.EmailSettings.to_addr           max_size:48
+agristar.MasterSlaveSettings.master_ip   max_size:16
+agristar.DateTimeUpdate.date_str         max_size:16
+agristar.DateTimeUpdate.time_str         max_size:16
+agristar.BasicSetupUpdate.storage_name   max_size:32
+agristar.BasicSetupUpdate.home_page      max_size:16
+agristar.BasicSetupUpdate.master_ip      max_size:16
+agristar.BasicSetupUpdate.login_pw       max_size:32
+agristar.ServiceInfoUpdate.dealer_name   max_size:32
+agristar.ServiceInfoUpdate.dealer_phone  max_size:20
+agristar.ServiceInfoUpdate.dealer_email  max_size:48
+agristar.ServiceInfoUpdate.notes         max_size:64
+agristar.SystemCmd.str_param             max_size:64
+agristar.RuntimeSettings.entries         max_count:32
+agristar.AnalogBoardSettings.sensors     max_count:4

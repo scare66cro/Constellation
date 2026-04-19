@@ -1,0 +1,12 @@
+{
+    "python.envFile": "C:/Projects/Cloud/Backend_Gel_Ops/venv",
+    "python.pipenvPath": "C:/Projects/Cloud/Backend_Gel_Ops/venv/Scripts/activate",
+    "json.schemas": [
+        {"python.pythonPath": "C:/Projects/Cloud/Backend_Gel_Ops/venv/Scripts/python.exe"}
+    ],
+    "cmake.configureOnOpen": false,
+    "appService.defaultWebAppToDeploy": "/subscriptions/601c714b-903e-4122-bad1-57f92008858a/resourceGroups/gcp/providers/Microsoft.Web/sites/new-GellertOpsBackend/slots/subscriptions/601c714b-903e-4122-bad1-57f92008858a/resourceGroups/gcp/providers/Microsoft.Web/sites/new-gellertopsbackend/slots/staging",
+    "appService.deploySubpath": ".",
+    "i18n-ally.enabled": false,
+    "i18n-ally.localesPaths": [],
+}

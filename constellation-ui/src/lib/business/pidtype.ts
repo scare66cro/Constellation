@@ -1,0 +1,1 @@
+export type PidType = { date: string, P: number, I: number, D: number, Output: number, Error: number };

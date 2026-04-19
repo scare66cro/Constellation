@@ -1,0 +1,5 @@
+venv/
+gellert_project/secrets_dev.py
+__pycache__
+staticfiles
+.env

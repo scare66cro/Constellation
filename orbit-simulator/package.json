@@ -1,0 +1,16 @@
+{
+  "name": "orbit-simulator",
+  "version": "1.0.0",
+  "description": "Standalone Orbit I/O board simulator — Modbus TCP + REST API + web panel",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

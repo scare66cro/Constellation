@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Django",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}\\manage.py",
+            "args": [
+                "runserver_plus",
+                "0.0.0.0:8000",
+                "--cert-file",
+                "cert.pem",
+                "--key-file",
+                "key.pem",
+            ],
+            "justMyCode": false,
+            "django": true,
+            "env": {
+                // "REQUESTS_CA_BUNDLE": "C:\\Users\\john.AGRI-STOR\\AppData\\Local\\mkcert\\rootCA.pem"
+                // "REQUESTS_CA_BUNDLE": "C:\\Projects\\Backend_Gel_Ops\\venv\\Lib\\site-packages\\certifi\\cacert.pem"
+                "REQUESTS_CA_BUNDLE": "C:\\Users\\john.AGRI-STOR\\AppData\\Local\\mkcert\\combined.pem",
+                "DJANGO_ENV": "development"
+            }
+        },
+        {
+            "name": "Docker: Python - Django",
+            "type": "docker",
+            "request": "launch",
+            "preLaunchTask": "docker-run: debug",
+            "python": {
+                "pathMappings": [
+                    {
+                        "localRoot": "${workspaceFolder}",
+                        "remoteRoot": "/app"
+                    }
+                ],
+                "projectType": "django"
+            }
+        }
+    ]
+}

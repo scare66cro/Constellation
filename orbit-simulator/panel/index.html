@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orbit Simulator</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155; --border: #475569;
+    --text: #e2e8f0; --text2: #94a3b8; --accent: #4fc3f7; --accent2: #81c784;
+    --warn: #fbbf24; --err: #f87171; --on: #4ade80; --off: #64748b;
+    --purple: #ce93d8; --orange: #ff9800;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+  /* ── Header ── */
+  header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
+  header .meta { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 12px; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .status-dot.ok { background: var(--on); box-shadow: 0 0 6px var(--on); }
+  .status-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
+  .stat-badge { background: var(--bg3); padding: 2px 8px; border-radius: 4px; font-variant-numeric: tabular-nums; }
+
+  /* ── Layout ── */
+  main { max-width: 100%; margin: 0 auto; padding: 0 16px 16px; }
+
+  /* ── Tab bar ── */
+  .tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 16px; position: sticky; top: 0; z-index: 20; background: var(--bg); padding-top: 12px; }
+  .tab-btn { padding: 10px 24px; font-size: 13px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text2); background: transparent; border: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: color 0.15s, border-color 0.15s; }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+
+  /* ── Sections ── */
+  section { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  section.full { grid-column: 1 / -1; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text2); margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 13px; color: var(--accent); margin: 12px 0 6px; }
+  .section-note { font-size: 11px; color: var(--text2); margin-bottom: 8px; padding: 6px 10px; background: var(--bg); border-radius: 4px; border-left: 3px solid var(--accent); }
+
+  /* ── Buttons ── */
+  button { padding: 8px 16px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg3); color: var(--text); font-size: 13px; cursor: pointer; transition: all 0.15s; }
+  button:hover { background: var(--border); border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { opacity: 0.85; }
+  button.warn { background: var(--warn); color: var(--bg); border-color: var(--warn); font-weight: 600; }
+  button.danger { background: var(--err); color: #fff; border-color: var(--err); font-weight: 600; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .btn-xs { padding: 4px 8px; font-size: 11px; }
+
+  /* ── Toast ── */
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--accent); border-radius: 6px; padding: 10px 16px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
+  .toast.show { opacity: 1; }
+
+  /* ── SVG Board ── */
+  .board-wrap { background: var(--bg2); border-radius: 12px; padding: 1rem; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .orbit-board { width: 100%; display: block; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.4)); }
+  .nova-board { width: 100%; display: block; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.4)); }
+  .boards-container { display: flex; align-items: center; justify-content: center; gap: 0; flex-wrap: nowrap; width: 100%; }
+  .nova-wrap { flex: 1 1 38%; min-width: 300px; }
+  .orbit-wrap { flex: 1 1 55%; min-width: 400px; }
+  .cable-wrap { flex: 0 0 80px; display: flex; align-items: center; justify-content: center; }
+  .cable-svg { width: 80px; height: 80px; }
+  .clickable { cursor: pointer; }
+  .clickable:hover { filter: brightness(1.3); }
+  .glow-green { filter: drop-shadow(0 0 4px #2ecc71); }
+  .glow-red   { filter: drop-shadow(0 0 4px #e74c3c); }
+  .glow-amber { filter: drop-shadow(0 0 3px #f39c12); }
+  .glow-blue  { filter: drop-shadow(0 0 3px #3498db); }
+
+  /* ── Status Bar ── */
+  .status-bar { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.75rem; color: var(--text2); }
+  .status-bar .warn { color: var(--warn); font-weight: 700; }
+  .status-bar .err { color: var(--err); font-weight: 700; }
+  .status-bar .ok { color: var(--on); }
+
+  /* ── Enhanced DI/DO Grid ── */
+  .io-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg3); border-radius: 4px; border: 1px solid var(--border); transition: border-color 0.2s; margin-bottom: 4px; }
+  .io-row.on { border-color: var(--on); }
+  .io-row.off { border-color: var(--border); }
+  .io-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .io-dot.on { background: var(--on); box-shadow: 0 0 6px var(--on); }
+  .io-dot.off { background: var(--off); }
+  .io-port { font-weight: 600; font-size: 12px; min-width: 32px; }
+  .io-label { flex: 1; font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .io-label.has-label { color: var(--text); }
+  .io-state { font-size: 11px; font-weight: 700; min-width: 32px; text-align: right; }
+  .io-state.on { color: var(--on); }
+  .io-state.off { color: var(--off); }
+  .io-toggle { padding: 3px 10px; font-size: 10px; font-weight: 600; border-radius: 3px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.15s; border: 1px solid var(--border); background: var(--bg); color: var(--text2); }
+  .io-toggle:hover { background: var(--bg3); }
+  .io-toggle.active-on { background: var(--on); color: #000; border-color: var(--on); }
+  .io-toggle.active-off { background: var(--err); color: #fff; border-color: var(--err); }
+  .di-grid, .do-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+
+  /* ── E-Stop ── */
+  .estop-btn { width: 80px; height: 80px; border-radius: 50%; border: 3px solid #333; font-weight: 900; font-size: 14px; cursor: pointer; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.2; }
+  .estop-btn.off { background: #7b241c; color: #fca5a5; }
+  .estop-btn.on { background: #ef4444; color: #fff; box-shadow: 0 0 20px rgba(239,68,68,0.5); }
+
+  /* ── AO Panel ── */
+  .ao-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 8px; padding: 8px 12px; background: var(--bg3); border-radius: 6px; }
+  .ao-label { font-size: 13px; color: var(--text2); min-width: 40px; font-weight: 600; }
+  .ao-track { flex: 1; height: 12px; background: var(--bg); border-radius: 999px; overflow: hidden; }
+  .ao-fill { height: 100%; background: #3b82f6; border-radius: 999px; transition: width 0.3s; }
+  .ao-val { font-size: 12px; color: var(--text); width: 80px; text-align: right; font-family: monospace; font-weight: 600; }
+  .ao-mode { font-size: 10px; color: var(--text2); min-width: 40px; }
+
+  /* ── DC24V ── */
+  .dc24v-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .dc24v-item { text-align: center; padding: 8px; background: var(--bg3); border-radius: 6px; border: 1px solid var(--border); transition: border-color 0.2s; }
+  .dc24v-item.on { border-color: var(--on); }
+
+  /* ── Sensor Boards ── */
+  .sensor-card { background: var(--bg3); border-radius: 8px; padding: 14px; margin-bottom: 10px; border: 1px solid var(--border); }
+  .sc-hdr { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .sc-hdr select, .sc-hdr input[type=text] { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.4rem; font-size: 0.75rem; }
+  .addr-badge { background: var(--bg); color: var(--text2); font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-family: monospace; }
+  .sr { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+  .sr-badge { font-size: 0.6rem; padding: 0.15rem 0.4rem; border-radius: 3px; width: 3.5rem; text-align: center; flex-shrink: 0; font-weight: 600; }
+  .sr-badge.t-temp { background: #b91c1c33; color: #fca5a5; }
+  .sr-badge.t-hum { background: #1d4ed833; color: #93c5fd; }
+  .sr-badge.t-co2 { background: #065f4633; color: #6ee7b7; }
+  .sr-badge.t-ir { background: #92400e33; color: #fcd34d; }
+  .sr-badge.t-press { background: #6b21a833; color: #d8b4fe; }
+  .sr-badge.t-ma { background: #92400e33; color: #fdba74; }
+  .sr-lbl { font-size: 0.7rem; color: var(--text2); width: 5.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+  .sr-slider { flex: 1; accent-color: var(--accent); height: 6px; }
+  .sr-val { font-size: 0.75rem; color: var(--text); width: 5.5rem; text-align: right; font-family: monospace; flex-shrink: 0; font-weight: 600; }
+  .sr-sub { font-size: 0.6rem; color: var(--text2); width: 4rem; text-align: right; font-family: monospace; flex-shrink: 0; }
+
+  /* ── VFD Drives ── */
+  .vfd-card { background: var(--bg3); border-radius: 8px; padding: 14px; margin-bottom: 10px; border: 1px solid var(--border); display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .vfd-card .vfd-id { font-size: 1.2rem; font-weight: 700; color: var(--accent); min-width: 3rem; text-align: center; }
+  .vfd-card .vfd-info { flex: 1; min-width: 12rem; }
+  .vfd-card .vfd-info input[type=text], .vfd-card .vfd-info input[type=number] { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.4rem; font-size: 0.75rem; width: 8rem; }
+  .vfd-card .vfd-info input[type=number] { width: 4rem; }
+  .vfd-card .vfd-status { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; }
+  .vfd-card .vfd-status .running { color: var(--on); font-weight: 600; }
+  .vfd-card .vfd-status .stopped { color: var(--off); }
+  .vfd-card .vfd-status .faulted { color: var(--err); font-weight: 600; }
+  .vfd-card .vfd-actions { display: flex; gap: 6px; }
+
+  @media (max-width: 1100px) {
+    .boards-container { flex-direction: column; }
+    .cable-wrap { transform: rotate(90deg); }
+  }
+  @media (max-width: 900px) {
+    .tab-content.active { grid-template-columns: 1fr; }
+    .di-grid, .do-grid { grid-template-columns: 1fr; }
+    .dc24v-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  /* ── Orbit Selector Bar ── */
+  .orbit-bar { background: #0c0c0c; border-bottom: 1px solid var(--border); padding: 6px 24px; display: flex; align-items: center; gap: 12px; font-size: 12px; }
+  .orbit-bar .label { color: var(--text2); font-weight: 600; }
+  .orbit-tabs { display: flex; gap: 4px; }
+  .orbit-tab { padding: 4px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg3); color: var(--text2); cursor: pointer; transition: all 0.15s; text-decoration: none; font-size: 11px; }
+  .orbit-tab:hover { background: var(--border); color: var(--text); }
+  .orbit-tab.current { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  .orbit-add { padding: 4px 10px; border: 1px dashed var(--accent); border-radius: 4px; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; transition: all 0.15s; }
+  .orbit-add:hover { background: var(--accent); color: var(--bg); }
+  .orbit-remove { padding: 2px 6px; border: 1px solid var(--err); border-radius: 3px; background: transparent; color: var(--err); cursor: pointer; font-size: 10px; margin-left: 4px; }
+  .orbit-remove:hover { background: var(--err); color: #fff; }
+</style>
+</head>
+<body>
+
+<!-- Orbit Selector Bar -->
+<div class="orbit-bar" id="orbit-bar">
+  <span class="label">ORBITS:</span>
+  <div class="orbit-tabs" id="orbit-tabs"></div>
+  <button class="orbit-add" onclick="addOrbit()" title="Add new orbit board">+ Add Orbit</button>
+</div>
+
+<header>
+  <div>
+    <h1>&#127806; Orbit I/O Simulator</h1>
+    <div style="font-size:12px;color:var(--text2);margin-top:2px;">
+      Board #<span id="h-id">2</span> &mdash; <span id="h-ip">10.47.27.2</span> &mdash;
+      <span id="h-conn" style="color:var(--err)">Connecting&hellip;</span>
+    </div>
+  </div>
+  <div class="meta">
+    <span><span class="status-dot" id="connDot"></span><span id="connLabel">---</span></span>
+    <span class="stat-badge">FW: <span id="statFw">1.0.0</span></span>
+    <span class="stat-badge">Up: <span id="statUp">0s</span></span>
+    <button onclick="resetBoard()" style="padding:4px 12px;font-size:11px">Reset Board</button>
+  </div>
+</header>
+
+<main>
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('board')">&#128268; Board</button>
+    <button class="tab-btn" onclick="switchTab('io')">&#9889; Equipment &amp; I/O</button>
+    <button class="tab-btn" onclick="switchTab('sensors')">&#128203; Sensors</button>
+  </div>
+
+  <!-- ═══ Tab 1: Board ═══ -->
+  <div id="tab-board" class="tab-content active">
+    <section class="full">
+      <div class="boards-container">
+        <div class="board-wrap nova-wrap">
+          <svg id="nova-board" viewBox="0 0 450 350" xmlns="http://www.w3.org/2000/svg" class="nova-board"></svg>
+        </div>
+        <div class="cable-wrap">
+          <svg viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg" class="cable-svg">
+            <line x1="0" y1="40" x2="80" y2="40" stroke="#c59d5f" stroke-width="3" stroke-linecap="round"/>
+            <line x1="0" y1="40" x2="80" y2="40" stroke="#0e3650" stroke-width="1.5" stroke-dasharray="6,3"/>
+            <circle r="3" fill="#f39c12" opacity="0.9">
+              <animateMotion dur="1.5s" repeatCount="indefinite" path="M0,40 L80,40" begin="0s"/>
+            </circle>
+            <circle r="3" fill="#4fc3f7" opacity="0.9">
+              <animateMotion dur="1.5s" repeatCount="indefinite" path="M80,40 L0,40" begin="0.75s"/>
+            </circle>
+            <text x="40" y="15" text-anchor="middle" fill="#94a3b8" font-size="8">Ethernet</text>
+            <text x="40" y="70" text-anchor="middle" fill="#94a3b8" font-size="7">Modbus TCP</text>
+          </svg>
+        </div>
+        <div class="board-wrap orbit-wrap">
+          <svg id="board" viewBox="0 0 550 450" xmlns="http://www.w3.org/2000/svg" class="orbit-board"></svg>
+        </div>
+      </div>
+    </section>
+    <section class="full">
+      <div class="status-bar" id="status-bar"></div>
+    </section>
+  </div>
+
+  <!-- ═══ Tab 2: Equipment & I/O ═══ -->
+  <div id="tab-io" class="tab-content">
+
+    <!-- Digital Outputs -->
+    <section>
+      <h2>&#128268; Digital Outputs</h2>
+      <div class="section-note">Read-only &mdash; driven by Nova firmware via Modbus TCP. Labels from IO Config.</div>
+      <div class="do-grid" id="do-grid-enhanced"></div>
+    </section>
+
+    <!-- Digital Inputs -->
+    <section>
+      <h2>&#128223; Digital Inputs</h2>
+      <div class="section-note">Click Open/Closed to simulate field wiring state. Labels from IO Config.</div>
+      <div class="di-grid" id="di-grid-enhanced"></div>
+    </section>
+
+    <!-- Analog Outputs -->
+    <section>
+      <h2>&#128202; Analog Outputs</h2>
+      <div class="section-note">0-10V or 4-20mA output channels driven by firmware.</div>
+      <div id="ao-enhanced"></div>
+    </section>
+
+    <!-- DC 24V & E-Stop -->
+    <section>
+      <h2>&#9889; DC 24V Outputs &amp; E-Stop</h2>
+      <div style="display:flex;gap:24px;align-items:flex-start;">
+        <div style="flex:1">
+          <h3>24V DC Outputs (5-8)</h3>
+          <div class="dc24v-grid" id="dc24v-grid"></div>
+        </div>
+        <div style="text-align:center;">
+          <h3>Emergency Stop</h3>
+          <button class="estop-btn off" id="estop-btn" onclick="toggleEStop()">
+            <span style="font-size:18px">E</span>
+            <span>STOP</span>
+          </button>
+          <div id="estop-label" style="font-size:11px;margin-top:6px;color:var(--text2)">Click to activate</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- VFD Drives -->
+    <section class="full">
+      <h2>&#9889; VFD Drives (RS-485 Port 1)</h2>
+      <div class="section-note">Configure simulated VFD drives on the Modbus RTU bus. Add, remove, or inject faults.</div>
+      <div id="vfd-drives"></div>
+      <div class="btn-row" style="margin-top:12px">
+        <button class="primary" onclick="addVfdDrive()">+ Add Drive</button>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ═══ Tab 3: Sensors ═══ -->
+  <div id="tab-sensors" class="tab-content">
+
+    <!-- Quick Sensor Overview -->
+    <section class="full">
+      <h2>&#127777;&#65039; Sensor Overview</h2>
+      <div class="section-note">Live values from analog sensor boards. Temperature displayed in &deg;F (&deg;C shown below).</div>
+      <div id="sensor-overview" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;"></div>
+    </section>
+
+    <!-- Analog Boards -->
+    <section class="full">
+      <h2>&#128203; Analog Sensor Boards</h2>
+      <div class="section-note">Configure simulated analog boards on the RS-485 sensor bus. Drag sliders to set sensor values.</div>
+      <div id="sensor-boards"></div>
+      <div class="btn-row" style="margin-top:12px">
+        <button class="primary" onclick="addBoard()">+ Add Board</button>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════
+var S = {
+  id: 2, ipAddress: '10.47.27.2', firmwareVersion: '1.0.0',
+  uptime: 0, cpuTemp: 42, commLost: true, safeMode: false, eStop: false,
+  digitalInputs: Array(10).fill(false),
+  digitalOutputs: Array(10).fill(false),
+  dc24vOutputs: Array(4).fill(false),
+  analogOutputs: [0, 0],
+  aoModes: ['voltage', 'voltage'],
+  vfdActivity: false, sensorActivity: false,
+  outputLabels: Array(10).fill(''),
+  inputLabels: Array(10).fill(''),
+  analogBoards: [],
+};
+var connected = false;
+var blinkOn = true;
+setInterval(function() { blinkOn = !blinkOn; }, 500);
+
+var API = location.origin;
+
+// ═══════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════
+function cToF(c) { return (c * 9 / 5 + 32).toFixed(1); }
+function showToast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 2000);
+}
+function fmtUp(s) {
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? h + 'h ' + m + 'm' : m + 'm ' + (s % 60) + 's';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tab Switching
+// ═══════════════════════════════════════════════════════════════
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
+  document.querySelectorAll('.tab-btn').forEach(function(el) { el.classList.remove('active'); });
+  var panel = document.getElementById('tab-' + tabId);
+  if (panel) panel.classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(function(btn) {
+    if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(tabId) !== -1) {
+      btn.classList.add('active');
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// API Calls
+// ═══════════════════════════════════════════════════════════════
+var _sbInit = false;
+function fetchStatus() {
+  fetch(API + '/api/status').then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function(d) {
+    Object.assign(S, d);
+    connected = true;
+    currentOrbitId = S.id;  // Update orbit ID for selector bar
+    if (!_sbInit && S.analogBoards) { renderSensorBoards(); _sbInit = true; }
+    if (!_vfdInit) { fetchVfdDrives(); _vfdInit = true; }
+  }).catch(function() { connected = false; });
+  render();
+}
+
+function setDI(i, val) {
+  fetch(API + '/api/di', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ index: i, value: val }),
+  }).then(function() {
+    S.digitalInputs[i] = val;
+    var lbl = S.inputLabels[i] || ('DI' + (i + 1));
+    showToast(lbl + ' \u2192 ' + (val ? 'CLOSED' : 'OPEN'));
+    render();
+  }).catch(function() {});
+}
+
+function toggleDI(i) { setDI(i, !S.digitalInputs[i]); }
+
+function toggleEStop() {
+  fetch(API + '/api/estop', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active: !S.eStop }),
+  }).then(function() {
+    S.eStop = !S.eStop;
+    showToast(S.eStop ? '\ud83d\uded1 E-STOP ACTIVATED' : 'E-Stop released');
+    render();
+  }).catch(function() {});
+}
+
+function resetBoard() {
+  fetch(API + '/api/reset', { method: 'POST' }).then(function() {
+    _sbInit = false;
+    fetchStatus();
+    showToast('Board reset to defaults');
+  }).catch(function() {});
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SVG Board Rendering
+// ═══════════════════════════════════════════════════════════════
+var PCB = '#1a5276', PCB_EDGE = '#0e3650', COPPER = '#c59d5f';
+var LED_OFF = '#2c3e50', LED_GREEN = '#2ecc71', LED_RED = '#e74c3c';
+var LED_AMBER = '#f39c12', LED_BLUE = '#3498db';
+var CONNECTOR = '#1c2833', LABEL = '#ecf0f1', SILK = '#d5dbdb';
+var COMPONENT = '#34495e', FUSE_OK = '#27ae60';
+
+function gc(fill) {
+  if (fill === LED_GREEN) return 'glow-green';
+  if (fill === LED_RED || fill === '#ff4444') return 'glow-red';
+  if (fill === LED_AMBER) return 'glow-amber';
+  if (fill === LED_BLUE) return 'glow-blue';
+  return '';
+}
+
+function renderBoard() {
+  var W = 550, H = 450;
+  var ds = [0, 1, 2, 3, 4].map(function(i) { return (S.id >> i) & 1; });
+
+  var svg = '';
+  svg += '<rect x="0" y="0" width="' + W + '" height="' + H + '" rx="8" ry="8" fill="' + PCB + '" stroke="' + PCB_EDGE + '" stroke-width="3"/>';
+  // Mounting holes
+  [[18,18],[W-18,18],[18,H-18],[W-18,H-18]].forEach(function(p) {
+    svg += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="8" fill="none" stroke="' + COPPER + '" stroke-width="2"/>';
+    svg += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3" fill="' + PCB_EDGE + '"/>';
+  });
+  // RJ45 #1
+  var rjFill1 = S.commLost ? LED_OFF : LED_GREEN;
+  var rjFill2 = !S.commLost && blinkOn ? LED_AMBER : LED_OFF;
+  svg += '<rect x="40" y="5" width="55" height="35" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="67" y="25" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-family="monospace">RJ45</text>';
+  svg += '<text x="67" y="50" text-anchor="middle" fill="' + SILK + '" font-size="6">TCP/IP</text>';
+  svg += '<circle cx="50" cy="14" r="3" fill="' + rjFill1 + '" class="' + gc(rjFill1) + '"/>';
+  svg += '<circle cx="83" cy="14" r="3" fill="' + rjFill2 + '" class="' + gc(rjFill2) + '"/>';
+  // 24V DC outputs 5-8
+  for (var i = 0; i < 4; i++) {
+    var x = 160 + i * 55, f = S.dc24vOutputs[i] ? LED_GREEN : LED_OFF;
+    svg += '<rect x="' + x + '" y="8" width="42" height="28" rx="2" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+    svg += '<text x="' + (x+21) + '" y="26" text-anchor="middle" fill="' + LABEL + '" font-size="8" font-weight="bold">' + (i+5) + '</text>';
+    svg += '<circle cx="' + (x+21) + '" cy="42" r="4" fill="' + f + '" class="' + gc(f) + '"/>';
+  }
+  svg += '<text x="270" y="55" text-anchor="middle" fill="' + SILK + '" font-size="6">24V DC 1A Outputs</text>';
+  // RJ45 #2
+  svg += '<rect x="' + (W-95) + '" y="5" width="55" height="35" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="' + (W-67) + '" y="25" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-family="monospace">RJ45</text>';
+  svg += '<text x="' + (W-67) + '" y="50" text-anchor="middle" fill="' + SILK + '" font-size="6">TCP/IP</text>';
+  svg += '<circle cx="' + (W-85) + '" cy="14" r="3" fill="' + rjFill1 + '" class="' + gc(rjFill1) + '"/>';
+  svg += '<circle cx="' + (W-52) + '" cy="14" r="3" fill="' + rjFill2 + '" class="' + gc(rjFill2) + '"/>';
+  // 24V DC In
+  svg += '<rect x="' + (W-40) + '" y="55" width="30" height="50" rx="2" fill="' + CONNECTOR + '" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="' + (W-25) + '" y="78" text-anchor="middle" fill="' + LED_AMBER + '" font-size="6" font-weight="bold">24V</text>';
+  svg += '<text x="' + (W-25) + '" y="88" text-anchor="middle" fill="' + LED_AMBER + '" font-size="5">DC in</text>';
+  // DO 1-10
+  svg += '<text x="8" y="78" fill="' + SILK + '" font-size="7" font-weight="bold">DO</text>';
+  for (var i = 0; i < 10; i++) {
+    var y = 85 + i * 33, f = S.digitalOutputs[i] ? LED_GREEN : LED_OFF;
+    var lbl = S.outputLabels[i] || '';
+    svg += '<rect x="8" y="' + y + '" width="30" height="22" rx="2" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+    svg += '<text x="23" y="' + (y+15) + '" text-anchor="middle" fill="' + LABEL + '" font-size="8" font-weight="bold">' + (i+1) + '</text>';
+    svg += '<circle cx="48" cy="' + (y+11) + '" r="5" fill="' + f + '" stroke="#333" stroke-width="1" class="' + gc(f) + '"/>';
+    svg += '<rect x="56" y="' + (y+6) + '" width="12" height="10" rx="1" fill="' + FUSE_OK + '" stroke="#333" stroke-width="0.5"/>';
+    svg += '<text x="62" y="' + (y+14) + '" text-anchor="middle" fill="#fff" font-size="5">F</text>';
+    if (lbl) svg += '<text x="74" y="' + (y+15) + '" fill="' + (S.digitalOutputs[i] ? '#4ade80' : '#94a3b8') + '" font-size="6.5" font-weight="' + (S.digitalOutputs[i] ? 'bold' : 'normal') + '">' + lbl + '</text>';
+  }
+  // E-Stop
+  var ef = S.eStop ? LED_RED : '#7b241c';
+  var ef2 = S.eStop ? '#ff4444' : '#922b21';
+  svg += '<g class="clickable" onclick="toggleEStop()">';
+  svg += '<circle cx="' + (W-25) + '" cy="125" r="18" fill="' + ef + '" stroke="#222" stroke-width="2"' + (S.eStop ? ' class="glow-red"' : '') + '/>';
+  svg += '<circle cx="' + (W-25) + '" cy="125" r="12" fill="' + ef2 + '" stroke="#333" stroke-width="1"/>';
+  svg += '<text x="' + (W-25) + '" y="121" text-anchor="middle" fill="#fff" font-size="6" font-weight="bold">E</text>';
+  svg += '<text x="' + (W-25) + '" y="131" text-anchor="middle" fill="#fff" font-size="5">STOP</text>';
+  svg += '</g>';
+  if (S.eStop) svg += '<text x="' + (W-25) + '" y="152" text-anchor="middle" fill="' + LED_RED + '" font-size="6" font-weight="bold" class="glow-red">ACTIVE</text>';
+  // DI 1-10
+  svg += '<text x="' + (W-8) + '" y="168" text-anchor="end" fill="' + SILK + '" font-size="7" font-weight="bold">DI</text>';
+  for (var i = 0; i < 10; i++) {
+    var y = 175 + i * 25, on = S.digitalInputs[i], f = on ? LED_GREEN : LED_OFF;
+    var lbl = S.inputLabels[i] || '';
+    if (lbl) svg += '<text x="' + (W-56) + '" y="' + (y+13) + '" text-anchor="end" fill="' + (on ? '#4ade80' : '#94a3b8') + '" font-size="6.5" font-weight="' + (on ? 'bold' : 'normal') + '">' + lbl + '</text>';
+    svg += '<g class="clickable" onclick="toggleDI(' + i + ')">';
+    svg += '<rect x="' + (W-38) + '" y="' + y + '" width="30" height="18" rx="2" fill="' + (on ? '#1a6b3c' : CONNECTOR) + '" stroke="' + (on ? LED_GREEN : '#555') + '" stroke-width="1.5"/>';
+    svg += '<text x="' + (W-23) + '" y="' + (y+13) + '" text-anchor="middle" fill="' + LABEL + '" font-size="8" font-weight="bold">' + (i+1) + '</text>';
+    svg += '</g>';
+    svg += '<circle cx="' + (W-48) + '" cy="' + (y+9) + '" r="4" fill="' + f + '" stroke="#333" stroke-width="0.5" class="' + gc(f) + '"/>';
+  }
+  // Dipswitches
+  svg += '<rect x="175" y="68" width="120" height="28" rx="3" fill="#2c3e50" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="235" y="83" text-anchor="middle" fill="' + SILK + '" font-size="6">DIPSWITCHES</text>';
+  for (var i = 0; i < 5; i++) {
+    var sx = 188 + i * 22, sw = ds[i];
+    svg += '<rect x="' + sx + '" y="72" width="10" height="20" rx="1" fill="#1a252f" stroke="#555" stroke-width="0.5"/>';
+    svg += '<rect x="' + (sx+1) + '" y="' + (sw ? 73 : 83) + '" width="8" height="8" rx="1" fill="' + (sw ? LED_AMBER : '#555') + '"/>';
+    svg += '<text x="' + (sx+5) + '" y="99" text-anchor="middle" fill="' + SILK + '" font-size="5">' + (i+1) + '</text>';
+  }
+  svg += '<text x="235" y="108" text-anchor="middle" fill="' + SILK + '" font-size="5.5">IP: ' + S.ipAddress + '</text>';
+  // AM2432 MCU
+  svg += '<rect x="160" y="130" width="150" height="90" rx="4" fill="#1c2833" stroke="' + COPPER + '" stroke-width="1.5"/>';
+  for (var i = 0; i < 16; i++) { svg += '<rect x="' + (163+i*9) + '" y="126" width="4" height="4" fill="' + COPPER + '"/><rect x="' + (163+i*9) + '" y="220" width="4" height="4" fill="' + COPPER + '"/>'; }
+  for (var i = 0; i < 10; i++) { svg += '<rect x="156" y="' + (134+i*8) + '" width="4" height="4" fill="' + COPPER + '"/><rect x="310" y="' + (134+i*8) + '" width="4" height="4" fill="' + COPPER + '"/>'; }
+  svg += '<text x="235" y="160" text-anchor="middle" fill="' + LABEL + '" font-size="10" font-weight="bold">AM2432</text>';
+  svg += '<text x="235" y="175" text-anchor="middle" fill="' + SILK + '" font-size="7">' + (S.safeMode ? 'SAFE MODE' : 'v' + S.firmwareVersion) + '</text>';
+  svg += '<text x="235" y="188" text-anchor="middle" fill="' + SILK + '" font-size="6">' + S.cpuTemp + '\u00b0C | ' + fmtUp(S.uptime) + '</text>';
+  var mcuLed = S.commLost ? (blinkOn ? LED_RED : LED_OFF) : S.safeMode ? LED_AMBER : LED_GREEN;
+  svg += '<circle cx="295" cy="145" r="5" fill="' + mcuLed + '" class="' + gc(mcuLed) + '"/>';
+  // Analog hard connection
+  svg += '<rect x="160" y="240" width="150" height="45" rx="3" fill="' + COMPONENT + '" stroke="' + COPPER + '" stroke-width="1" stroke-dasharray="4,2"/>';
+  svg += '<text x="235" y="260" text-anchor="middle" fill="' + SILK + '" font-size="7">Analog Hard Connection</text>';
+  svg += '<text x="235" y="273" text-anchor="middle" fill="' + SILK + '" font-size="5.5">Stackable</text>';
+  // RS-485 Port 1
+  var vfda = S.vfdActivity && blinkOn ? LED_BLUE : LED_OFF;
+  svg += '<rect x="80" y="' + (H-65) + '" width="70" height="35" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="115" y="' + (H-44) + '" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-weight="bold">1</text>';
+  svg += '<text x="115" y="' + (H-24) + '" text-anchor="middle" fill="' + SILK + '" font-size="5.5">VFD RTU</text>';
+  svg += '<circle cx="138" cy="' + (H-53) + '" r="3" fill="' + vfda + '" class="' + gc(vfda) + '"/>';
+  // RS-485 Port 2
+  var sensa = S.sensorActivity && blinkOn ? LED_BLUE : LED_OFF;
+  svg += '<rect x="170" y="' + (H-65) + '" width="70" height="35" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="205" y="' + (H-44) + '" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-weight="bold">2</text>';
+  svg += '<text x="205" y="' + (H-24) + '" text-anchor="middle" fill="' + SILK + '" font-size="5.5">Sensor RTU</text>';
+  svg += '<circle cx="228" cy="' + (H-53) + '" r="3" fill="' + sensa + '" class="' + gc(sensa) + '"/>';
+  // Analog Outputs
+  for (var ch = 0; ch < 2; ch++) {
+    var ax = 320 + ch * 95;
+    var maxV = S.aoModes[ch] === 'voltage' ? 10000 : 20000;
+    var pct = Math.min(100, (S.analogOutputs[ch] / maxV) * 100);
+    var valStr = S.aoModes[ch] === 'voltage'
+      ? (S.analogOutputs[ch] / 1000).toFixed(1) + 'V'
+      : (S.analogOutputs[ch] / 1000).toFixed(1) + 'mA';
+    var modeStr = S.aoModes[ch] === 'voltage' ? '0-10V' : '4-20mA';
+    svg += '<rect x="' + ax + '" y="' + (H-70) + '" width="80" height="45" rx="3" fill="' + COMPONENT + '" stroke="' + COPPER + '" stroke-width="1"/>';
+    svg += '<text x="' + (ax+40) + '" y="' + (H-52) + '" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-weight="bold">AO ' + (ch+1) + '</text>';
+    svg += '<rect x="' + (ax+5) + '" y="' + (H-44) + '" width="70" height="8" rx="2" fill="#0d1117"/>';
+    svg += '<rect x="' + (ax+5) + '" y="' + (H-44) + '" width="' + Math.max(0, 70*pct/100) + '" height="8" rx="2" fill="' + LED_GREEN + '"/>';
+    svg += '<text x="' + (ax+40) + '" y="' + (H-28) + '" text-anchor="middle" fill="' + SILK + '" font-size="6">' + valStr + ' (' + modeStr + ')</text>';
+  }
+  // Footer
+  svg += '<text x="' + (W/2) + '" y="' + (H-8) + '" text-anchor="middle" fill="' + SILK + '" font-size="6" opacity="0.6">Constellation Orbit \u2014 ' + S.ipAddress + '</text>';
+
+  document.getElementById('board').innerHTML = svg;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Nova Board Rendering
+// ═══════════════════════════════════════════════════════════════
+function renderNovaBoard() {
+  var W = 450, H = 350;
+  var svg = '';
+  // PCB Background
+  svg += '<rect x="0" y="0" width="' + W + '" height="' + H + '" rx="8" ry="8" fill="' + PCB + '" stroke="' + PCB_EDGE + '" stroke-width="3"/>';
+  // Mounting holes
+  [[16,16],[W-16,16],[16,H-16],[W-16,H-16]].forEach(function(p) {
+    svg += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="7" fill="none" stroke="' + COPPER + '" stroke-width="2"/>';
+    svg += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="2.5" fill="' + PCB_EDGE + '"/>';
+  });
+  // RJ45 TCP/IP Modbus (top-left)
+  var linkFill = !S.commLost ? LED_GREEN : LED_OFF;
+  var actFill = !S.commLost && blinkOn ? LED_AMBER : LED_OFF;
+  svg += '<rect x="35" y="5" width="55" height="35" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="62" y="18" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-family="monospace">RJ45</text>';
+  svg += '<text x="62" y="28" text-anchor="middle" fill="' + SILK + '" font-size="5.5">TCP/IP</text>';
+  svg += '<circle cx="45" cy="12" r="3" fill="' + linkFill + '" class="' + gc(linkFill) + '"/>';
+  svg += '<circle cx="79" cy="12" r="3" fill="' + actFill + '" class="' + gc(actFill) + '"/>';
+  svg += '<text x="62" y="48" text-anchor="middle" fill="' + SILK + '" font-size="5">Modbus TCP</text>';
+  // Debug Port (top-center)
+  svg += '<rect x="160" y="8" width="80" height="25" rx="3" fill="' + CONNECTOR + '" stroke="#555" stroke-width="1"/>';
+  svg += '<text x="200" y="25" text-anchor="middle" fill="' + LABEL + '" font-size="7">Debug</text>';
+  // JTAG (top-right)
+  svg += '<rect x="' + (W-75) + '" y="8" width="45" height="30" rx="2" fill="' + CONNECTOR + '" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="' + (W-52) + '" y="27" text-anchor="middle" fill="' + LABEL + '" font-size="7">JTAG</text>';
+  // RPi 5 with SSD Hat (left side)
+  svg += '<rect x="30" y="70" width="130" height="160" rx="5" fill="#0d1117" stroke="' + COPPER + '" stroke-width="1.5"/>';
+  for (var i = 0; i < 20; i++) {
+    svg += '<rect x="' + (33 + i * 6) + '" y="66" width="3" height="4" fill="' + COPPER + '"/>';
+  }
+  svg += '<text x="95" y="120" text-anchor="middle" fill="' + LABEL + '" font-size="11" font-weight="bold">RPi 5</text>';
+  svg += '<text x="95" y="138" text-anchor="middle" fill="' + SILK + '" font-size="7">SSD Hat</text>';
+  svg += '<text x="95" y="155" text-anchor="middle" fill="' + SILK + '" font-size="6">BTRFS RAID1</text>';
+  // UART link indicator (between RPi5 and AM2434)
+  svg += '<line x1="160" y1="150" x2="190" y2="150" stroke="' + COPPER + '" stroke-width="1.5" stroke-dasharray="4,2"/>';
+  var uartFill = !S.commLost && blinkOn ? LED_GREEN : LED_OFF;
+  svg += '<circle cx="175" cy="142" r="3.5" fill="' + uartFill + '" class="' + gc(uartFill) + '"/>';
+  svg += '<text x="175" y="138" text-anchor="middle" fill="' + SILK + '" font-size="4.5">UART</text>';
+  // AM2434 MCU (center)
+  svg += '<rect x="195" y="80" width="140" height="100" rx="4" fill="#1c2833" stroke="' + COPPER + '" stroke-width="1.5"/>';
+  for (var i = 0; i < 14; i++) {
+    svg += '<rect x="' + (198 + i * 9.5) + '" y="76" width="4" height="4" fill="' + COPPER + '"/>';
+    svg += '<rect x="' + (198 + i * 9.5) + '" y="180" width="4" height="4" fill="' + COPPER + '"/>';
+  }
+  for (var i = 0; i < 10; i++) {
+    svg += '<rect x="191" y="' + (84 + i * 9.5) + '" width="4" height="4" fill="' + COPPER + '"/>';
+    svg += '<rect x="335" y="' + (84 + i * 9.5) + '" width="4" height="4" fill="' + COPPER + '"/>';
+  }
+  svg += '<text x="265" y="118" text-anchor="middle" fill="' + LABEL + '" font-size="12" font-weight="bold">AM2434</text>';
+  svg += '<text x="265" y="136" text-anchor="middle" fill="' + SILK + '" font-size="7">v' + S.firmwareVersion + '</text>';
+  svg += '<text x="265" y="150" text-anchor="middle" fill="' + SILK + '" font-size="6">' + fmtUp(S.uptime) + '</text>';
+  var hbFill = S.commLost ? LED_RED : (blinkOn ? LED_GREEN : '#1a6b3c');
+  svg += '<circle cx="320" cy="92" r="4" fill="' + hbFill + '" class="' + gc(hbFill) + '"/>';
+  // CR2032 RTC (right side)
+  svg += '<circle cx="' + (W-55) + '" cy="110" r="28" fill="#2c3e50" stroke="' + COPPER + '" stroke-width="1.5"/>';
+  svg += '<circle cx="' + (W-55) + '" cy="110" r="22" fill="#1a252f" stroke="#555" stroke-width="0.5"/>';
+  svg += '<text x="' + (W-55) + '" y="107" text-anchor="middle" fill="' + LABEL + '" font-size="7" font-weight="bold">CR2032</text>';
+  svg += '<text x="' + (W-55) + '" y="118" text-anchor="middle" fill="' + SILK + '" font-size="6">RTC</text>';
+  // DC In/Out (right edge)
+  svg += '<rect x="' + (W-40) + '" y="155" width="30" height="60" rx="2" fill="' + CONNECTOR + '" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="' + (W-25) + '" y="178" text-anchor="middle" fill="' + LED_AMBER + '" font-size="6" font-weight="bold">DC</text>';
+  svg += '<text x="' + (W-25) + '" y="190" text-anchor="middle" fill="' + LED_AMBER + '" font-size="5">In/Out</text>';
+  // OSPI Firmware Store
+  svg += '<rect x="195" y="200" width="140" height="40" rx="3" fill="' + COMPONENT + '" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="265" y="218" text-anchor="middle" fill="' + SILK + '" font-size="6.5">OSPI Firmware Store</text>';
+  svg += '<text x="265" y="230" text-anchor="middle" fill="' + SILK + '" font-size="5">A/B Failover</text>';
+  // QSPI Settings Store
+  svg += '<rect x="195" y="248" width="140" height="35" rx="3" fill="' + COMPONENT + '" stroke="' + COPPER + '" stroke-width="1"/>';
+  svg += '<text x="265" y="264" text-anchor="middle" fill="' + SILK + '" font-size="6.5">QSPI Settings</text>';
+  svg += '<text x="265" y="275" text-anchor="middle" fill="' + SILK + '" font-size="5">Sector A/B + CRC32</text>';
+  // Footer
+  svg += '<text x="' + (W/2) + '" y="' + (H-12) + '" text-anchor="middle" fill="' + SILK + '" font-size="7" opacity="0.6">Constellation Nova \u2014 10.47.27.1</text>';
+  document.getElementById('nova-board').innerHTML = svg;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Enhanced I/O Panels
+// ═══════════════════════════════════════════════════════════════
+function renderEnhancedIO() {
+  // Digital Outputs
+  var doGrid = document.getElementById('do-grid-enhanced');
+  doGrid.innerHTML = S.digitalOutputs.map(function(v, i) {
+    var lbl = S.outputLabels[i] || '';
+    var displayLbl = lbl || '(unassigned)';
+    return '<div class="io-row ' + (v ? 'on' : 'off') + '">' +
+      '<span class="io-dot ' + (v ? 'on' : 'off') + '"></span>' +
+      '<span class="io-port">DO' + (i + 1) + '</span>' +
+      '<span class="io-label ' + (lbl ? 'has-label' : '') + '">' + displayLbl + '</span>' +
+      '<span class="io-state ' + (v ? 'on' : 'off') + '">' + (v ? 'ON' : 'OFF') + '</span>' +
+    '</div>';
+  }).join('');
+
+  // Digital Inputs
+  var diGrid = document.getElementById('di-grid-enhanced');
+  diGrid.innerHTML = S.digitalInputs.map(function(v, i) {
+    var lbl = S.inputLabels[i] || '';
+    var displayLbl = lbl || '(unassigned)';
+    return '<div class="io-row ' + (v ? 'on' : 'off') + '">' +
+      '<span class="io-dot ' + (v ? 'on' : 'off') + '"></span>' +
+      '<span class="io-port">DI' + (i + 1) + '</span>' +
+      '<span class="io-label ' + (lbl ? 'has-label' : '') + '">' + displayLbl + '</span>' +
+      '<button class="io-toggle ' + (!v ? 'active-off' : '') + '" onclick="setDI(' + i + ',false)">Open</button>' +
+      '<button class="io-toggle ' + (v ? 'active-on' : '') + '" onclick="setDI(' + i + ',true)">Closed</button>' +
+    '</div>';
+  }).join('');
+
+  // Analog Outputs
+  var aoEl = document.getElementById('ao-enhanced');
+  aoEl.innerHTML = S.analogOutputs.map(function(v, i) {
+    var maxV = S.aoModes[i] === 'voltage' ? 10000 : 20000;
+    var pct = Math.min(100, (v / maxV) * 100);
+    var valStr = S.aoModes[i] === 'voltage'
+      ? (v / 1000).toFixed(2) + ' V' : (v / 1000).toFixed(2) + ' mA';
+    var modeStr = S.aoModes[i] === 'voltage' ? '0-10V' : '4-20mA';
+    return '<div class="ao-row">' +
+      '<span class="ao-label">AO' + (i + 1) + '</span>' +
+      '<div class="ao-track"><div class="ao-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="ao-val">' + valStr + '</span>' +
+      '<span class="ao-mode">' + modeStr + '</span>' +
+    '</div>';
+  }).join('');
+
+  // DC 24V
+  var dc24v = document.getElementById('dc24v-grid');
+  dc24v.innerHTML = S.dc24vOutputs.map(function(v, i) {
+    return '<div class="dc24v-item ' + (v ? 'on' : '') + '">' +
+      '<div class="io-dot ' + (v ? 'on' : 'off') + '" style="margin:0 auto 4px"></div>' +
+      '<div style="font-size:13px;font-weight:600">' + (i + 5) + '</div>' +
+      '<div style="font-size:10px;color:' + (v ? 'var(--on)' : 'var(--off)') + '">' + (v ? 'ON' : 'OFF') + '</div>' +
+    '</div>';
+  }).join('');
+
+  // E-Stop
+  var eBtn = document.getElementById('estop-btn');
+  eBtn.className = 'estop-btn ' + (S.eStop ? 'on' : 'off');
+  document.getElementById('estop-label').textContent = S.eStop ? '\ud83d\uded1 ACTIVE \u2014 Click to release' : 'Click to activate';
+  document.getElementById('estop-label').style.color = S.eStop ? 'var(--err)' : 'var(--text2)';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Sensor Overview Cards
+// ═══════════════════════════════════════════════════════════════
+var TEMP_TYPES = [0, 3];
+var HUMID_TYPES = [1];
+var CO2_TYPES = [2];
+var PRESS_TYPES = [4];
+var MA_TYPES = [5];
+
+function isTemp(st) { return TEMP_TYPES.indexOf(st) !== -1; }
+function isHumid(st) { return HUMID_TYPES.indexOf(st) !== -1; }
+function isCo2(st) { return CO2_TYPES.indexOf(st) !== -1; }
+function isPress(st) { return PRESS_TYPES.indexOf(st) !== -1; }
+function isMa(st) { return MA_TYPES.indexOf(st) !== -1; }
+
+function renderSensorOverview() {
+  var el = document.getElementById('sensor-overview');
+  if (!S.analogBoards || !S.analogBoards.length) {
+    el.innerHTML = '<div style="grid-column:1/-1;color:var(--text2);font-size:13px;padding:8px">No sensor boards configured.</div>';
+    return;
+  }
+  var cards = [];
+  S.analogBoards.forEach(function(b) {
+    if (!b.present) return;
+    b.sensorValues.forEach(function(sv, si) {
+      var st = b.sensorTypes[si];
+      if (st === 0xF || st === 15) return;
+      var r = STYPE_RANGE[st];
+      if (!r) return;
+      var lbl = b.sensorLabels[si] || ('S' + (si + 1));
+      var valHtml;
+      if (isTemp(st)) {
+        var c = sv / r.div;
+        valHtml = '<div style="font-size:22px;font-weight:700;color:#4fc3f7;font-variant-numeric:tabular-nums">' + cToF(c) + '\u00b0F</div>' +
+                  '<div style="font-size:11px;color:var(--text2)">' + c.toFixed(1) + '\u00b0C</div>';
+      } else if (isHumid(st)) {
+        valHtml = '<div style="font-size:22px;font-weight:700;color:#81c784;font-variant-numeric:tabular-nums">' + (sv / r.div).toFixed(1) + '%</div>';
+      } else if (isCo2(st)) {
+        valHtml = '<div style="font-size:22px;font-weight:700;color:#fbbf24;font-variant-numeric:tabular-nums">' + Math.round(sv) + ' ppm</div>';
+      } else if (isPress(st)) {
+        valHtml = '<div style="font-size:22px;font-weight:700;color:#d8b4fe;font-variant-numeric:tabular-nums">' + (sv / r.div).toFixed(1) + ' psi</div>';
+      } else if (isMa(st)) {
+        valHtml = '<div style="font-size:22px;font-weight:700;color:#fdba74;font-variant-numeric:tabular-nums">' + (sv / r.div).toFixed(1) + ' %</div>';
+      } else {
+        valHtml = '<div style="font-size:22px;font-weight:700">' + (sv / r.div).toFixed(1) + '</div>';
+      }
+      cards.push('<div style="background:var(--bg3);border-radius:6px;padding:10px 14px;">' +
+        '<div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">' + lbl + '</div>' +
+        valHtml +
+        '<div style="font-size:9px;color:var(--text2)">Board ' + b.address + '</div>' +
+      '</div>');
+    });
+  });
+  el.innerHTML = cards.length ? cards.join('') : '<div style="grid-column:1/-1;color:var(--text2);font-size:13px;padding:8px">No sensors active.</div>';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Header / Status
+// ═══════════════════════════════════════════════════════════════
+function renderHeader() {
+  document.getElementById('h-id').textContent = S.id;
+  document.getElementById('h-ip').textContent = S.ipAddress;
+  var hConn = document.getElementById('h-conn');
+  hConn.textContent = connected ? 'Connected' : 'Disconnected';
+  hConn.style.color = connected ? 'var(--on)' : 'var(--err)';
+
+  var dot = document.getElementById('connDot');
+  dot.className = 'status-dot ' + (connected && !S.commLost ? 'ok' : 'err');
+  document.getElementById('connLabel').textContent = S.commLost ? 'Nova: COMM LOST' : 'Nova: OK';
+  document.getElementById('statFw').textContent = S.firmwareVersion;
+  document.getElementById('statUp').textContent = fmtUp(S.uptime);
+
+  var bar = document.getElementById('status-bar');
+  var items = [
+    'FW: ' + S.firmwareVersion,
+    'CPU: ' + S.cpuTemp + '\u00b0C',
+    'Uptime: ' + fmtUp(S.uptime),
+  ];
+  items.push(S.commLost
+    ? '<span class="err">Nova: COMM LOST</span>'
+    : '<span class="ok">Nova: OK</span>');
+  if (S.safeMode) items.push('<span class="warn">\u26a0 SAFE MODE</span>');
+  if (S.eStop) items.push('<span class="err">\ud83d\uded1 E-STOP ACTIVE</span>');
+  items.push('VFD: ' + (S.vfdActivity ? '\u26a1' : '\u2014'));
+  items.push('Sensor: ' + (S.sensorActivity ? '\u26a1' : '\u2014'));
+  bar.innerHTML = items.map(function(t) { return '<span>' + t + '</span>'; }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Sensor Boards
+// ═══════════════════════════════════════════════════════════════
+var STYPE_NAME = { 0: 'IR Temp', 1: 'Humidity', 2: 'CO\u2082', 3: 'Temp', 4: 'Pressure', 5: 'mA', 15: '\u2014' };
+var STYPE_RANGE = {
+  0: { min: -400, max: 2500, step: 1, div: 10 },
+  1: { min: 0, max: 1000, step: 1, div: 10 },
+  2: { min: 0, max: 10000, step: 10, div: 1 },
+  3: { min: -400, max: 830, step: 1, div: 10 },
+  4: { min: 0, max: 5000, step: 1, div: 10 },   // 0-500 PSI x10
+  5: { min: 0, max: 100, step: 1, div: 1 },     // 0-100% (raw demand)
+};
+var BTYPE_NAME = { 0: 'IR Temp Board', 1: 'Humidity Board', 2: 'CO\u2082 Board', 3: 'Temperature Board', 4: 'Pressure Board' };
+var BTYPE_DEFAULTS = {
+  3: { st: [3, 3, 3, 3], sv: [210, 215, 150, 190], sl: ['Plenum 1', 'Plenum 2', 'Outside', 'Return'] },
+  1: { st: [1, 1, 1, 2], sv: [450, 550, 400, 800], sl: ['Outside RH', 'Plenum RH', 'Return RH', 'CO\u2082'] },
+  2: { st: [2, 2, 2, 2], sv: [800, 800, 800, 800], sl: ['CO\u2082 1', 'CO\u2082 2', 'CO\u2082 3', 'CO\u2082 4'] },
+  0: { st: [0, 0, 0, 0], sv: [250, 250, 250, 250], sl: ['IR 1', 'IR 2', 'IR 3', 'IR 4'] },
+  4: { st: [4, 4, 4, 5], sv: [700, 1500, 550, 50], sl: ['Suction P', 'Discharge P', 'Oil P', 'Demand'] },
+};
+
+function fmtSV(type, raw) {
+  var r = STYPE_RANGE[type];
+  if (!r || raw === 0x7FFF) return '--';
+  if (isTemp(type)) {
+    var c = raw / r.div;
+    return cToF(c) + '\u00b0F';
+  }
+  if (isHumid(type)) return (raw / r.div).toFixed(1) + '%';
+  if (isCo2(type)) return Math.round(raw) + ' ppm';
+  if (isPress(type)) return (raw / r.div).toFixed(1) + ' psi';
+  if (isMa(type)) return (raw / r.div).toFixed(1) + ' %';
+  return (raw / r.div).toFixed(r.div > 1 ? 1 : 0);
+}
+
+function fmtSVsub(type, raw) {
+  var r = STYPE_RANGE[type];
+  if (!r || raw === 0x7FFF) return '';
+  if (isTemp(type)) return (raw / r.div).toFixed(1) + '\u00b0C';
+  return '';
+}
+
+function stBadge(t) { return t === 3 ? 't-temp' : t === 1 ? 't-hum' : t === 2 ? 't-co2' : t === 4 ? 't-press' : t === 5 ? 't-ma' : 't-ir'; }
+
+function renderSensorBoards() {
+  var el = document.getElementById('sensor-boards');
+  if (!S.analogBoards || !S.analogBoards.length) {
+    el.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:12px">No boards configured. Click + Add Board to simulate sensors.</div>';
+    return;
+  }
+  el.innerHTML = S.analogBoards.map(function(b, bi) {
+    return '<div class="sensor-card">' +
+      '<div class="sc-hdr">' +
+        '<select onchange="chBoardType(' + bi + ',+this.value)">' +
+          [3, 1, 2, 0, 4].map(function(t) { return '<option value="' + t + '"' + (b.type === t ? ' selected' : '') + '>' + BTYPE_NAME[t] + '</option>'; }).join('') +
+        '</select>' +
+        '<span class="addr-badge">Addr ' + b.address + '</span>' +
+        '<input type="text" value="' + b.label + '" placeholder="Label" style="width:7rem" onchange="chBoardLabel(' + bi + ',this.value)"/>' +
+        '<label style="font-size:0.7rem;color:var(--text2)"><input type="checkbox"' + (b.present ? ' checked' : '') + ' onchange="chBoardPresent(' + bi + ',this.checked)"/> Present</label>' +
+        '<div style="flex:1"></div>' +
+        '<button class="btn-xs danger" onclick="rmBoard(' + bi + ')">\u2717 Remove</button>' +
+      '</div>' +
+      b.sensorValues.map(function(sv, si) {
+        var st = b.sensorTypes[si]; if (st === 0xF || st === 15) return '';
+        var r = STYPE_RANGE[st] || { min: 0, max: 1000, step: 1, div: 10 };
+        var lbl = b.sensorLabels[si] || ('S' + (si + 1));
+        var sub = fmtSVsub(st, sv);
+        return '<div class="sr">' +
+          '<span class="sr-badge ' + stBadge(st) + '">' + STYPE_NAME[st] + '</span>' +
+          '<span class="sr-lbl" title="' + lbl + '">' + lbl + '</span>' +
+          '<input type="range" class="sr-slider" min="' + r.min + '" max="' + r.max + '" step="' + r.step + '" value="' + sv + '"' +
+          ' oninput="updSV(' + bi + ',' + si + ',+this.value)"/>' +
+          '<span class="sr-val" id="sv-' + bi + '-' + si + '">' + fmtSV(st, sv) + '</span>' +
+          '<span class="sr-sub" id="svsub-' + bi + '-' + si + '">' + sub + '</span>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }).join('');
+}
+
+function updSV(bi, si, v) {
+  S.analogBoards[bi].sensorValues[si] = v;
+  var st = S.analogBoards[bi].sensorTypes[si];
+  var el = document.getElementById('sv-' + bi + '-' + si);
+  if (el) el.textContent = fmtSV(st, v);
+  var sub = document.getElementById('svsub-' + bi + '-' + si);
+  if (sub) sub.textContent = fmtSVsub(st, v);
+  renderSensorOverview();
+  fetch(API + '/api/sensors/value', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boardIndex: bi, sensorIndex: si, value: v }),
+  }).catch(function() {});
+}
+
+function chBoardType(bi, t) {
+  var d = BTYPE_DEFAULTS[t] || BTYPE_DEFAULTS[3];
+  var b = S.analogBoards[bi];
+  b.type = t; b.sensorTypes = d.st.slice(); b.sensorValues = d.sv.slice(); b.sensorLabels = d.sl.slice();
+  pushSB().then(function() { renderSensorBoards(); });
+}
+function chBoardLabel(bi, l) { S.analogBoards[bi].label = l; pushSB(); }
+function chBoardPresent(bi, p) { S.analogBoards[bi].present = p; pushSB(); }
+
+function addBoard() {
+  var a = S.analogBoards.length, d = BTYPE_DEFAULTS[3];
+  S.analogBoards.push({
+    address: a, type: 3, present: true, label: 'Board ' + a,
+    sensorTypes: d.st.slice(), sensorValues: d.sv.slice(), sensorLabels: d.sl.slice(),
+  });
+  pushSB().then(function() { renderSensorBoards(); showToast('Board added at addr ' + a); });
+}
+
+function rmBoard(bi) {
+  if (!confirm('Remove board at address ' + S.analogBoards[bi].address + '?')) return;
+  S.analogBoards.splice(bi, 1);
+  pushSB().then(function() { renderSensorBoards(); showToast('Board removed'); });
+}
+
+function pushSB() {
+  return fetch(API + '/api/sensors', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boards: S.analogBoards }),
+  }).catch(function() {});
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VFD Drives
+// ═══════════════════════════════════════════════════════════════
+var vfdDrives = [];
+var _vfdInit = false;
+
+function fetchVfdDrives() {
+  fetch(API + '/api/vfd/drives').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) { vfdDrives = d.drives; renderVfdDrives(); }
+  }).catch(function() {});
+}
+
+function renderVfdDrives() {
+  var el = document.getElementById('vfd-drives');
+  if (!vfdDrives.length) {
+    el.innerHTML = '<div style="color:var(--text2);font-size:13px;padding:12px">No VFD drives configured. Click + Add Drive.</div>';
+    return;
+  }
+  el.innerHTML = vfdDrives.map(function(d) {
+    var stClass = d.faulted ? 'faulted' : d.running ? 'running' : 'stopped';
+    var stText = d.faulted ? 'FAULT' : d.running ? d.speedPercent + '% @ ' + d.freqHz + ' Hz' : 'Stopped';
+    return '<div class="vfd-card">' +
+      '<div class="vfd-id">U' + d.unitId + '</div>' +
+      '<div class="vfd-info">' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">' +
+          '<input type="text" value="' + d.label + '" onchange="updateVfdDrive(' + d.unitId + ',this.value,' + d.hp + ')" placeholder="Label"/>' +
+          '<input type="number" value="' + d.hp + '" min="1" max="200" onchange="updateVfdDrive(' + d.unitId + ',null,+this.value)" title="Horsepower"/> HP' +
+        '</div>' +
+      '</div>' +
+      '<div class="vfd-status"><span class="' + stClass + '">' + stText + '</span></div>' +
+      '<div class="vfd-actions">' +
+        (d.faulted
+          ? '<button class="btn-xs" style="background:var(--on)" onclick="resetVfdFault(' + d.unitId + ')" title="Reset fault">&#10003; Reset</button>'
+          : '<button class="btn-xs warn" onclick="faultVfd(' + d.unitId + ')" title="Inject fault">&#9888; Fault</button>') +
+        '<button class="btn-xs danger" onclick="rmVfdDrive(' + d.unitId + ')" title="Remove drive">&#10007;</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function addVfdDrive() {
+  // Pick next available unit ID
+  var used = vfdDrives.map(function(d) { return d.unitId; });
+  var uid = 1;
+  while (used.indexOf(uid) !== -1) uid++;
+  fetch(API + '/api/vfd/drives', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unitId: uid, label: 'VFD Unit ' + uid, hp: 20 }),
+  }).then(function() { fetchVfdDrives(); showToast('Drive unit ' + uid + ' added'); }).catch(function() {});
+}
+
+function updateVfdDrive(uid, label, hp) {
+  // Get existing drive data
+  var existing = vfdDrives.find(function(d) { return d.unitId === uid; });
+  if (!existing) return;
+  fetch(API + '/api/vfd/drives', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unitId: uid, label: label || existing.label, hp: hp || existing.hp }),
+  }).then(function() { fetchVfdDrives(); }).catch(function() {});
+}
+
+function rmVfdDrive(uid) {
+  if (!confirm('Remove VFD drive unit ' + uid + '?')) return;
+  fetch(API + '/api/vfd/drives/' + uid, { method: 'DELETE' })
+    .then(function() { fetchVfdDrives(); showToast('Drive unit ' + uid + ' removed'); }).catch(function() {});
+}
+
+function faultVfd(uid) {
+  fetch(API + '/api/vfd/fault', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unitId: uid, faultCode: 8001 }),
+  }).then(function() { fetchVfdDrives(); showToast('Fault injected on unit ' + uid); }).catch(function() {});
+}
+
+function resetVfdFault(uid) {
+  fetch(API + '/api/vfd/reset-fault', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unitId: uid }),
+  }).then(function() { fetchVfdDrives(); showToast('Fault cleared on unit ' + uid); }).catch(function() {});
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Main Render
+// ═══════════════════════════════════════════════════════════════
+function render() {
+  renderBoard();
+  renderNovaBoard();
+  renderHeader();
+  renderEnhancedIO();
+  renderSensorOverview();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Polling
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// Orbit Management
+// ═══════════════════════════════════════════════════════════════
+var MASTER_API = 'http://' + window.location.hostname + ':9005';
+var allOrbits = [];
+var currentOrbitId = S.id;
+
+function fetchOrbits() {
+  fetch(MASTER_API + '/api/orbits')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.orbits) { allOrbits = d.orbits; renderOrbitBar(); }
+    })
+    .catch(function() { /* Master API unreachable */ });
+}
+
+function renderOrbitBar() {
+  var el = document.getElementById('orbit-tabs');
+  if (!allOrbits.length) {
+    el.innerHTML = '<span style="color:var(--text2)">No orbits running</span>';
+    return;
+  }
+  el.innerHTML = allOrbits.map(function(o) {
+    var isCurrent = o.id === currentOrbitId;
+    var url = 'http://' + window.location.hostname + ':' + o.apiPort + '/';
+    var roleLabel = o.roleName ? ' (' + o.roleName + ')' : '';
+    return '<a class="orbit-tab' + (isCurrent ? ' current' : '') + '" href="' + url + '" title="' + (o.roleName || 'STORAGE') + ' - Modbus:' + o.tcpPort + ', API:' + o.apiPort + '">' +
+      'Orbit ' + o.id + roleLabel +
+      (isCurrent && allOrbits.length > 1 ? '<button class="orbit-remove" onclick="event.preventDefault();event.stopPropagation();removeOrbit(' + o.id + ')" title="Remove this orbit">&times;</button>' : '') +
+      '</a>';
+  }).join('');
+}
+
+function addOrbit() {
+  // Find next available orbit ID
+  var usedIds = allOrbits.map(function(o) { return o.id; });
+  var newId = 2;
+  while (usedIds.indexOf(newId) !== -1) newId++;
+  if (newId > 33) { showToast('Maximum 32 orbits reached'); return; }
+  
+  // Prompt for role selection
+  var roleChoice = prompt(
+    'Select Orbit Type for Orbit ' + newId + ':\n\n' +
+    '1 = STORAGE (Standard 10 DI/DO)\n' +
+    '2 = GDC (Door Controller - 5 actuators)\n' +
+    '3 = TRITON (Refrigeration control)\n' +
+    '4 = PULSAR (Advanced I/O)\n\n' +
+    'Enter number (1-4):',
+    '1'
+  );
+  if (roleChoice === null) return; // Cancelled
+  var role = parseInt(roleChoice, 10);
+  if (isNaN(role) || role < 1 || role > 4) {
+    showToast('Invalid role selection');
+    return;
+  }
+  var roleNames = ['', 'STORAGE', 'GDC', 'TRITON', 'PULSAR'];
+  
+  fetch(MASTER_API + '/api/orbits', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: newId, role: role })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      showToast('Orbit ' + newId + ' (' + roleNames[role] + ') added');
+      fetchOrbits();
+    } else {
+      showToast('Failed: ' + (d.error || 'Unknown error'));
+    }
+  })
+  .catch(function() { showToast('Failed to add orbit'); });
+}
+
+function removeOrbit(id) {
+  if (!confirm('Remove Orbit ' + id + '? This will stop its simulation.')) return;
+  fetch(MASTER_API + '/api/orbits/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        showToast('Orbit ' + id + ' removed');
+        fetchOrbits();
+        // If we removed the current orbit, redirect to another
+        if (id === currentOrbitId && allOrbits.length > 1) {
+          var other = allOrbits.find(function(o) { return o.id !== id; });
+          if (other) window.location.href = 'http://' + window.location.hostname + ':' + other.apiPort + '/';
+        }
+      }
+    })
+    .catch(function() { showToast('Failed to remove orbit'); });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Startup
+// ═══════════════════════════════════════════════════════════════
+fetchStatus();
+fetchOrbits();
+setInterval(fetchStatus, 500);
+setInterval(render, 500);
+setInterval(fetchVfdDrives, 2000);
+setInterval(fetchOrbits, 5000);
+</script>
+</body>
+</html>

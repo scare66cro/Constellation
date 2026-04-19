@@ -1,0 +1,28 @@
+{
+  "name": "agristarcloud",
+  "version": "1.0.8",
+  "description": "",
+  "scripts": {
+    "build": "npm run lint && tsc",
+    "lint": "eslint .",
+    "watch": "tsc -w",
+    "prestart": "npm run build",
+    "start": "func start",
+    "test": "echo \"No tests yet...\""
+  },
+  "dependencies": {
+    "azure-iothub": "^1.16.5",
+    "date-fns": "^3.6.0",
+    "pg": "^8.13.3",
+    "reflect-metadata": "^0.2.2",
+    "typeorm": "^0.3.20"
+  },
+  "devDependencies": {
+    "@azure/functions": "^4.6.1",
+    "@eslint/js": "^9.20.0",
+    "@types/eslint__js": "^8.42.3",
+    "@types/node": "^20.17.19",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.1"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "factoryLastLogin": "2026-04-17T20:40:26.186Z",
+  "factoryLoginCount": 2,
+  "slots": [
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    },
+    {
+      "role": "operator",
+      "lastLogin": null,
+      "lastLoginIp": null,
+      "loginCount": 0
+    }
+  ],
+  "cloudLinks": [
+    {
+      "cloudUserId": "6d5d4603-6095-42ca-b486-37071f392e20",
+      "username": "aaron@gellert.com",
+      "displayName": "aaron@gellert.com",
+      "role": "admin",
+      "linkToken": "816de916f0e6466ea5b8b0e57faf93b9b5f1c80472dd4d31",
+      "linkedAt": "2026-04-17T14:23:52.951891+00:00",
+      "slot": 2,
+      "lastRemoteLogin": null
+    },
+    {
+      "cloudUserId": "c7b5a519-8b91-43b0-ba52-c9bb3970f96a",
+      "username": "testcloud",
+      "displayName": "testcloud",
+      "role": "admin",
+      "linkToken": "2cd0047a93314ffbab1a87edff8b12ca157dc2fb176f45e8",
+      "linkedAt": "2026-04-17T14:36:01.111514+00:00",
+      "slot": null,
+      "lastRemoteLogin": "2026-04-17T16:05:48.251Z",
+      "passwordSalt": "a47e82bf96b534e7c076a87d6975947a",
+      "passwordHash": "b31520e4c373f0a99e080d63ae6d0ac5cf8bc9c81013dd562bc021a78f157133de894af6ba742850fd0c4cb73cc007e25b64547e7f8bd7b69f3ecc33f82f981a",
+      "passwordHashedAt": "2026-04-17T16:05:48.250Z"
+    }
+  ]
+}

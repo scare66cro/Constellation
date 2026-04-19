@@ -1,0 +1,36 @@
+# nanopb options for settings.proto
+agristar.ClimacellTimes.hourly_efficiency  max_count:48
+agristar.MiscSettings.values             max_count:32
+agristar.FailureSettings.extra_limits    max_count:12
+agristar.AlertSettings.alert_flags       max_count:32
+agristar.GraphFavoriteSettings.favorites max_count:16
+agristar.BayNameSettings.names           max_count:8, max_size:24
+agristar.RefrigSettings.stages           max_count:8
+agristar.AuxProgramSettings.rules        max_count:4
+agristar.PwmChannelSettings.channels     max_count:8
+agristar.PlenumSettings.burner_threshold max_size:16
+agristar.LoadMonitorSettings.bay1_label  max_size:24
+agristar.LoadMonitorSettings.bay2_label  max_size:24
+agristar.LoadMonitorSettings.units       max_size:8
+agristar.LoadMonitorSettings.pipe_label  max_size:24
+agristar.SensorConfig.label              max_size:16
+agristar.AnalogBoardSettings.label       max_size:16
+agristar.AnalogBoardSettings.sensors     max_count:4
+agristar.EmailSettings.server            max_size:48
+agristar.EmailSettings.port              max_size:8
+agristar.EmailSettings.username          max_size:32
+agristar.EmailSettings.password          max_size:32
+agristar.EmailSettings.from_addr         max_size:48
+agristar.EmailSettings.to_addr           max_size:48
+agristar.MasterSlaveSettings.master_ip   max_size:16
+agristar.DateTimeUpdate.date_str         max_size:16
+agristar.DateTimeUpdate.time_str         max_size:16
+agristar.BasicSetupUpdate.storage_name   max_size:32
+agristar.BasicSetupUpdate.home_page      max_size:16
+agristar.BasicSetupUpdate.master_ip      max_size:16
+agristar.BasicSetupUpdate.login_pw       max_size:32
+agristar.ServiceInfoUpdate.dealer_name   max_size:32
+agristar.ServiceInfoUpdate.dealer_phone  max_size:20
+agristar.ServiceInfoUpdate.dealer_email  max_size:48
+agristar.ServiceInfoUpdate.notes         max_size:64
+agristar.RuntimeSettings.entries         max_count:32

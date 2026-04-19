@@ -1,0 +1,31 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// sensors.proto — Remote sensor data and labels
+// Maps to: UI_SendSensorData, UI_SendSensorLabels
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── SensorData — all remote sensor readings ─────────────────────────────
+// Pushed periodically. Replaces PileTempsData + PileHumidsData.
+message SensorData {
+  repeated SensorReading temperatures = 1;
+  repeated SensorReading humidities   = 2;
+}
+
+message SensorReading {
+  uint32 index   = 1;   // Sensor index
+  float  value   = 2;   // Current reading (NaN if disconnected)
+  bool   valid   = 3;   // false if sensor disconnected or failed
+}
+
+// ─── SensorLabels — names for all remote sensors ─────────────────────────
+// Sent on connect. Replaces PileTempsLabels + PileHumidsLabels.
+message SensorLabels {
+  repeated SensorLabel temp_labels  = 1;
+  repeated SensorLabel humid_labels = 2;
+}
+
+message SensorLabel {
+  uint32 index = 1;
+  string label = 2;
+}

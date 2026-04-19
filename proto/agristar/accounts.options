@@ -1,0 +1,8 @@
+# nanopb options for accounts.proto
+agristar.AccountSettings.users           max_count:8
+agristar.UserAccount.user_id             max_size:16
+agristar.PasswordAuth.password           max_size:32
+agristar.NetworkNodeSettings.nodes       max_count:16
+agristar.NetworkNode.ip_addr             max_size:16
+agristar.NetworkNode.name                max_size:32
+agristar.NetworkNodeCmd.ip_addr          max_size:16

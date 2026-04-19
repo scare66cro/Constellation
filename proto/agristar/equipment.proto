@@ -1,0 +1,72 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// equipment.proto — Equipment status, commands, runtimes, humid modes
+// Maps to: UI_SendEquipStatus, UI_SendRuntimes, UI_SendFanDailyRun,
+//          UI_SendFanTotalRun, UI_SendHumidModes, UI_SendAuxSwitches,
+//          StoreRemoteOff, StoreRefrigDiag
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+import "agristar/common.proto";
+
+// ─── EquipmentStatus — all equipment states (UI_SendEquipStatus) ─────────
+// Pushed every 1s. Replaces the massive EquipStatus CSV string.
+message EquipmentStatus {
+  repeated EquipState items = 1;
+}
+
+message EquipState {
+  uint32         eq_index   = 1;  // Equipment index (from EQUIPMENT_IO enum)
+  bool           output_on  = 2;  // Physical output state
+  RemoteOffState remote_off = 3;  // Manual override state
+  AlarmSeverity  alarm      = 4;  // Current alarm level
+  string         label      = 5;  // Equipment name (e.g. "Fan/Green Light")
+}
+
+// ─── EquipmentCmd — toggle equipment (StoreRemoteOff) ────────────────────
+// Bridge → Firmware. Replaces fanBtn, aux1Btn, etc. POST tags.
+message EquipmentCmd {
+  uint32         eq_index  = 1;
+  RemoteOffState new_state = 2;
+}
+
+// ─── RefrigDiagCmd — refrigeration diagnostic control ────────────────────
+// Bridge → Firmware. Replaces refr1Btn..refr8Btn POST tags.
+message RefrigDiagCmd {
+  uint32 stage     = 1;   // Refrig stage index (0-7)
+  uint32 new_state = 2;   // Diagnostic state value
+}
+
+// ─── Runtimes (UI_SendRuntimes, tag "runTimes") ──────────────────────────
+message Runtimes {
+  repeated RuntimeEntry entries = 1;
+}
+
+message RuntimeEntry {
+  uint32 eq_index     = 1;
+  uint32 daily_hours  = 2;
+  uint32 daily_mins   = 3;
+  uint32 total_hours  = 4;
+  uint32 total_mins   = 5;
+}
+
+// ─── FanRuntime — daily/total fan counters ───────────────────────────────
+message FanRuntime {
+  uint32 daily_hours  = 1;
+  uint32 daily_mins   = 2;
+  uint32 total_hours  = 3;
+  uint32 total_mins   = 4;
+}
+
+// ─── HumidModes (UI_SendHumidModes, tag "HumidModes") ───────────────────
+message HumidModes {
+  uint32 humid1_head = 1;
+  uint32 humid1_pump = 2;
+  uint32 humid2_head = 3;
+  uint32 humid2_pump = 4;
+}
+
+// ─── AuxSwitches (UI_SendAuxSwitches) ────────────────────────────────────
+message AuxSwitches {
+  repeated uint32 switch_state = 1;  // Manual/Auto state per aux channel
+}

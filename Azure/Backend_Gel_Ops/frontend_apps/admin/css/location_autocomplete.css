@@ -1,0 +1,194 @@
+/* Location Autocomplete Styles for Django Admin */
+
+.location-autocomplete-container {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+    z-index: 1; /* Ensure container has stacking context */
+}
+
+/* Ensure parent elements don't clip the dropdown */
+.form-row .location-autocomplete-container,
+.field-location_choice .location-autocomplete-container {
+    overflow: visible !important;
+}
+
+.location-autocomplete {
+    width: 100%;
+    padding: 8px 40px 8px 12px; /* Add right padding for toggle button */
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.4;
+    box-sizing: border-box;
+}
+
+.location-autocomplete-toggle {
+    position: absolute;
+    right: 1px;
+    top: 1px;
+    bottom: 1px;
+    width: 30px;
+    background: #f8f9fa;
+    border: none;
+    border-left: 1px solid #ddd;
+    border-radius: 0 3px 3px 0;
+    cursor: pointer;
+    font-size: 12px;
+    color: #666;
+    transition: background-color 0.2s ease;
+}
+
+.location-autocomplete-toggle:hover {
+    background: #e9ecef;
+    color: #333;
+}
+
+.location-autocomplete-toggle:active {
+    background: #dee2e6;
+}
+
+.location-autocomplete:focus {
+    border-color: #79acc8;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(121, 172, 200, 0.2);
+}
+
+.location-autocomplete-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 1px solid #ddd;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    max-height: 300px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    z-index: 9999; /* Increased z-index to ensure it appears above Django admin elements */
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: none; /* Initially hidden */
+}
+
+.location-autocomplete-dropdown li {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #333;
+    transition: background-color 0.2s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 20px; /* Ensure consistent height */
+}
+
+.location-autocomplete-dropdown li:last-child {
+    border-bottom: none;
+}
+
+.location-autocomplete-dropdown li:hover,
+.location-autocomplete-dropdown li.highlighted {
+    background-color: #f8f9fa;
+}
+
+.location-autocomplete-dropdown li.selected {
+    background-color: #79acc8;
+    color: white;
+}
+
+/* Loading indicator */
+.location-autocomplete-loading {
+    position: relative;
+}
+
+.location-autocomplete-loading::after {
+    content: '';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    border: 2px solid #ddd;
+    border-top: 2px solid #79acc8;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: translateY(-50%) rotate(0deg); }
+    100% { transform: translateY(-50%) rotate(360deg); }
+}
+
+/* Error state */
+.location-autocomplete-error {
+    border-color: #dc3545;
+}
+
+.location-autocomplete-error:focus {
+    border-color: #dc3545;
+    box-shadow: 0 0 0 2px rgba(220, 53, 69, 0.2);
+}
+
+/* Validation error message */
+.validation-error {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    border-radius: 0 0 4px 4px;
+    padding: 6px 8px;
+    font-size: 11px;
+    z-index: 1001;
+    display: none;
+}
+
+/* Empty state */
+.location-autocomplete-dropdown .empty-message {
+    padding: 12px;
+    color: #666;
+    font-style: italic;
+    text-align: center;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .location-autocomplete-dropdown {
+        max-height: 200px;
+    }
+    
+    .location-autocomplete-dropdown li {
+        padding: 12px;
+    }
+}
+
+/* Django admin specific overrides */
+.form-row {
+    overflow: visible !important;
+}
+
+.field-location_choice {
+    overflow: visible !important;
+}
+
+/* Ensure the dropdown appears above Django admin navigation and other elements */
+.admin-inlines .location-autocomplete-dropdown,
+.inline-group .location-autocomplete-dropdown {
+    z-index: 10000 !important;
+}
+
+/* Ensure proper spacing for the dropdown */
+.location-autocomplete-container .location-autocomplete-dropdown {
+    margin-top: 0;
+    width: 100%;
+    min-width: 200px;
+}

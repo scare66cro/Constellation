@@ -1,0 +1,207 @@
+{
+  "folders": [
+    {
+      "name": "Backend (Django)",
+      "path": "Backend_Gel_Ops"
+    },
+    {
+      "name": "Frontend (React)",
+      "path": "frontend_storage_pwa"
+    },
+    {
+      "name": "Azure Functions",
+      "path": "AgristarCloud"
+    }
+  ],
+  "settings": {
+    "azurite.location": "${workspaceFolder}/.azurite",
+    "azurite.blobHost": "127.0.0.1",
+    "azurite.queueHost": "127.0.0.1",
+    "azurite.tableHost": "127.0.0.1",
+    "azurite.silent": false,
+    "azurite.skipApiVersionCheck": true,
+    "python.defaultInterpreterPath": "${workspaceFolder}/Backend_Gel_Ops/venv/Scripts/python.exe",
+    "python.envFile": "${workspaceFolder}/.env"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "1. Start PostgreSQL (Docker)",
+        "type": "shell",
+        "command": "docker start agristar-postgres 2>$null; if (-not $?) { docker run -d --name agristar-postgres -e POSTGRES_DB=agristar_local -e POSTGRES_USER=agristar -e POSTGRES_PASSWORD=localdevpassword -p 5432:5432 postgres:15-alpine }",
+        "windows": {
+          "command": "docker start agristar-postgres 2>$null; if (-not $?) { docker run -d --name agristar-postgres -e POSTGRES_DB=agristar_local -e POSTGRES_USER=agristar -e POSTGRES_PASSWORD=localdevpassword -p 5432:5432 postgres:15-alpine }"
+        },
+        "problemMatcher": [],
+        "presentation": {
+          "reveal": "silent",
+          "panel": "shared"
+        }
+      },
+      {
+        "label": "2. Start Azurite",
+        "type": "shell",
+        "command": "echo 'Use Command Palette: Azurite: Start' or click the Azurite status bar button",
+        "problemMatcher": [],
+        "presentation": {
+          "reveal": "always"
+        }
+      },
+      {
+        "label": "3. Django Migrate",
+        "type": "shell",
+        "command": "python",
+        "args": ["manage.py", "migrate"],
+        "options": {
+          "cwd": "${workspaceFolder}/Backend_Gel_Ops",
+          "env": {
+            "DJANGO_ENV": "development",
+            "PGHOST": "localhost",
+            "PGDATABASE": "agristar_local",
+            "PGUSER": "agristar",
+            "PGPASSWORD": "localdevpassword"
+          }
+        },
+        "problemMatcher": [],
+        "dependsOn": ["1. Start PostgreSQL (Docker)"]
+      },
+      {
+        "label": "4. Start Django Backend",
+        "type": "shell",
+        "command": "python",
+        "args": ["manage.py", "runserver", "8000"],
+        "options": {
+          "cwd": "${workspaceFolder}/Backend_Gel_Ops",
+          "env": {
+            "DJANGO_ENV": "development",
+            "PGHOST": "localhost",
+            "PGDATABASE": "agristar_local",
+            "PGUSER": "agristar",
+            "PGPASSWORD": "localdevpassword"
+          }
+        },
+        "isBackground": true,
+        "problemMatcher": {
+          "pattern": {
+            "regexp": "^.*$",
+            "file": 1,
+            "location": 2,
+            "message": 3
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^Watching for file changes",
+            "endsPattern": "^Quit the server"
+          }
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "dedicated",
+          "group": "servers"
+        }
+      },
+      {
+        "label": "5. Start React Frontend",
+        "type": "shell",
+        "command": "npm",
+        "args": ["start"],
+        "options": {
+          "cwd": "${workspaceFolder}/frontend_storage_pwa",
+          "env": {
+            "REACT_APP_API_URL": "http://localhost:8000",
+            "REACT_APP_DISABLE_AUTH": "true",
+            "BROWSER": "none"
+          }
+        },
+        "isBackground": true,
+        "problemMatcher": {
+          "pattern": {
+            "regexp": "^.*$"
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^Starting",
+            "endsPattern": "^Compiled"
+          }
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "dedicated",
+          "group": "servers"
+        }
+      },
+      {
+        "label": "6. Start Azure Functions",
+        "type": "shell",
+        "command": "func",
+        "args": ["start"],
+        "options": {
+          "cwd": "${workspaceFolder}/AgristarCloud"
+        },
+        "isBackground": true,
+        "problemMatcher": "$func-node-watch",
+        "presentation": {
+          "reveal": "always",
+          "panel": "dedicated",
+          "group": "servers"
+        }
+      },
+      {
+        "label": "🚀 Start Full Stack",
+        "dependsOn": [
+          "1. Start PostgreSQL (Docker)",
+          "3. Django Migrate",
+          "4. Start Django Backend",
+          "5. Start React Frontend"
+        ],
+        "dependsOrder": "sequence",
+        "problemMatcher": [],
+        "presentation": {
+          "reveal": "always"
+        }
+      },
+      {
+        "label": "🛑 Stop PostgreSQL",
+        "type": "shell",
+        "command": "docker stop agristar-postgres",
+        "problemMatcher": []
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Django: Backend",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/Backend_Gel_Ops/manage.py",
+        "args": ["runserver", "8000"],
+        "django": true,
+        "env": {
+          "DJANGO_ENV": "development",
+          "PGHOST": "localhost",
+          "PGDATABASE": "agristar_local",
+          "PGUSER": "agristar",
+          "PGPASSWORD": "localdevpassword"
+        }
+      },
+      {
+        "name": "Azure Functions",
+        "type": "node",
+        "request": "attach",
+        "port": 9229,
+        "preLaunchTask": "6. Start Azure Functions"
+      }
+    ],
+    "compounds": [
+      {
+        "name": "Full Stack (Debug)",
+        "configurations": ["Django: Backend"],
+        "preLaunchTask": "1. Start PostgreSQL (Docker)",
+        "stopAll": true
+      }
+    ]
+  }
+}

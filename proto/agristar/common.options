@@ -1,0 +1,2 @@
+# nanopb options for common.proto
+agristar.SystemCmd.str_param             max_size:64

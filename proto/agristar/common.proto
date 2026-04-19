@@ -1,0 +1,99 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// common.proto — Shared enums and base types for the Constellation protocol
+// ═══════════════════════════════════════════════════════════════════════════
+// This is the source of truth for all firmware ↔ bridge communication.
+// Do NOT edit generated files — edit this .proto and re-run generate.
+//
+// Codegen:
+//   nanopb  → Constellation/generated/c/   (firmware)
+//   ts-proto → Constellation/generated/ts/  (bridge)
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── System enumerations ─────────────────────────────────────────────────
+
+enum SystemMode {
+  SYSTEM_MODE_UNKNOWN  = 0;
+  SYSTEM_MODE_POTATO   = 1;
+  SYSTEM_MODE_ONION    = 2;
+}
+
+enum OperatingMode {
+  OP_MODE_STANDBY      = 0;
+  OP_MODE_COOL         = 1;
+  OP_MODE_HEAT         = 2;
+  OP_MODE_DRY          = 3;
+  OP_MODE_CURE         = 4;
+  OP_MODE_OUTSIDE_AIR  = 5;
+  OP_MODE_RECIRC       = 6;
+  OP_MODE_DEFROST      = 7;
+}
+
+enum RemoteOffState {
+  REMOTE_AUTO   = 0;   // Normal automatic control
+  REMOTE_OFF    = 1;   // Manually forced off
+  REMOTE_MANUAL = 2;   // Manually forced on
+  REMOTE_SYSSTOP = 3;  // System stop (emergency)
+}
+
+enum TempUnit {
+  TEMP_FAHRENHEIT = 0;
+  TEMP_CELSIUS    = 1;
+}
+
+enum AlarmSeverity {
+  ALARM_NONE     = 0;
+  ALARM_WARNING  = 1;
+  ALARM_CRITICAL = 2;
+  ALARM_SHUTDOWN = 3;
+}
+
+// ─── Acknowledge status codes ────────────────────────────────────────────
+
+enum AckStatus {
+  ACK_OK               = 0;
+  ACK_INVALID_PARAM    = 1;
+  ACK_ALARM_BLOCK      = 2;
+  ACK_BUSY             = 3;
+  ACK_VERSION_MISMATCH = 4;
+  ACK_UNKNOWN_CMD      = 5;
+}
+
+// ─── Protocol control messages ───────────────────────────────────────────
+
+message Ack {
+  uint32    ref_seq = 1;   // Sequence number of the message being acknowledged
+  AckStatus status  = 2;
+}
+
+message Heartbeat {
+  uint32 uptime_sec    = 1;   // Firmware uptime in seconds
+  uint32 free_heap     = 2;   // Bytes of free heap (diagnostic)
+  uint32 msg_tx_count  = 3;   // Total messages sent since boot
+  uint32 msg_rx_count  = 4;   // Total messages received since boot
+}
+
+message DataRequest {
+  DataRequestType request_type = 1;
+  uint32          param        = 2;   // Request-specific parameter
+}
+
+enum DataRequestType {
+  REQ_ALL_SETTINGS     = 0;   // Full settings dump (after connect)
+  REQ_SYSTEM_STATUS    = 1;
+  REQ_EQUIPMENT_STATUS = 2;
+  REQ_IO_CONFIG        = 3;
+  REQ_SENSOR_DATA      = 4;
+  REQ_VERSIONS         = 5;
+  REQ_ANALOG_BOARD     = 6;   // param = board index
+  REQ_AUX_PROGRAM      = 7;   // param = aux index
+  REQ_ACCOUNTS         = 8;
+}
+
+// ─── Data load status (handshake completion) ─────────────────────────────
+
+message DataLoadStatus {
+  bool   ready      = 1;
+  uint32 session_id = 2;
+}

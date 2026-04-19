@@ -1,0 +1,86 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// logs.proto — Log data messages
+//
+// Architecture: The RPi5 bridge owns all log storage (SQLite). The firmware
+// pushes LogRecord at the configured interval and ActivityEvent on state
+// changes. There is no SD card — the bridge is the single source of truth.
+//
+// Legacy LogChunk/LogQuery are retained for potential file-download use
+// but the primary data flow is push-based.
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── LogChunk — chunked data transfer (retained for file downloads) ──────
+message LogChunk {
+  LogType log_type     = 1;
+  uint32  chunk_index  = 2;   // 0-based
+  uint32  total_chunks = 3;
+  bytes   data         = 4;   // Up to ~3500 bytes per chunk
+  string  metadata     = 5;   // First chunk: column headers, dates, etc.
+}
+
+enum LogType {
+  LOG_USER_GRAPH    = 0;
+  LOG_USER_TABLE    = 1;
+  LOG_SYSTEM        = 2;
+  LOG_PID           = 3;
+  LOG_LOAD          = 4;
+  LOG_IO_DEFINITION = 5;
+  LOG_VERSIONS      = 6;
+}
+
+// ─── LogQuery — request a log download (bridge → firmware) ───────────────
+message LogQuery {
+  LogType log_type   = 1;
+  string  start_date = 2;  // "MM/DD/YYYY"
+  string  end_date   = 3;
+  uint32  mode       = 4;  // 0=graph, 1=table, 2=file
+}
+
+// ─── LogRecord — periodic data snapshot pushed by firmware ───────────────
+// Firmware sends this at Settings.Log.User.Interval (default 15 min).
+// The bridge stores each record in SQLite for the UI's graph/table views.
+message LogRecord {
+  string  date             = 1;   // "MM/DD/YYYY"
+  string  time             = 2;   // "HH:MM:SS"
+  float   plenum_temp_sp   = 3;
+  float   plenum_temp      = 4;
+  float   cool_avl_temp    = 5;
+  float   plenum_humid_sp  = 6;
+  uint32  mode             = 7;
+  uint32  fan_speed        = 8;
+  uint32  cool_output      = 9;
+  uint32  refrig_output    = 10;
+  uint32  burner_output    = 11;
+  float   calc_humid       = 12;
+  uint32  fan_runtime_min  = 13;
+  float   co2_level        = 14;
+  repeated SensorValue temps  = 15;   // Temp sensor readings
+  repeated SensorValue humids = 16;   // Humid sensor readings
+  uint32  sequence           = 17;   // Monotonic counter — lets bridge detect gaps
+}
+
+message SensorValue {
+  uint32 sensor_id = 1;
+  float  value     = 2;
+}
+
+// ─── ActivityEvent — pushed on equipment/warning state changes ───────────
+message ActivityEvent {
+  string    date        = 1;   // "MM/DD/YYYY"
+  string    time        = 2;   // "HH:MM:SS"
+  EventType event_type  = 3;
+  uint32    eq_index    = 4;   // Equipment index (for EQUIP_CHANGE)
+  string    description = 5;   // Human-readable text
+  uint32    new_state   = 6;   // New state value (0=off, 1=on, etc.)
+  uint32    mode        = 7;   // Current operating mode at event time
+}
+
+enum EventType {
+  EVENT_EQUIP_CHANGE = 0;   // Equipment turned on/off
+  EVENT_WARNING_ON   = 1;   // Warning/alarm activated
+  EVENT_WARNING_OFF  = 2;   // Warning/alarm cleared
+  EVENT_MODE_CHANGE  = 3;   // Operating mode changed
+  EVENT_REMOTE_CMD   = 4;   // Remote command received
+}

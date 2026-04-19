@@ -1,0 +1,68 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// io.proto — I/O configuration, definitions, analog boards, available IO
+// Maps to: UI_SendIoConfig, UI_SendIoDefinition, UI_SendAnalogBoard,
+//          UI_SendAvailableIo, StoreIoConfig, StoreIoName
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+// ─── IoConfig — pin → equipment mapping (UI_SendIoConfig) ────────────────
+// output_map[i] = equipment index assigned to output pin i
+// input_map[i]  = equipment index assigned to input pin i
+//
+// PID formula: PID = board * 12 + pin + 1  (board 0-based, pin 0-based)
+// Legacy: boards 0-2 (36 PIDs). Multi-orbit: boards 0-15 (192 PIDs).
+// The array length implicitly encodes the board count.
+message IoConfig {
+  repeated uint32 output_map = 1;
+  repeated uint32 input_map  = 2;
+  uint32 board_count         = 3;  // Number of boards (0 = legacy 3-board default)
+}
+
+// ─── IoDefinition — full I/O definition list (UI_SendIoDefinition) ───────
+// Replaces the MultiMsg-based IoNames system with a single message.
+// With 4096-byte max message, all IO entries fit in one shot.
+message IoDefinition {
+  repeated IoEntry entries = 1;
+}
+
+message IoEntry {
+  uint32 index       = 1;  // Equipment/IO index
+  string name        = 2;  // Human-readable name
+  uint32 mode        = 3;  // IO mode (output, input, PWM, etc.)
+  uint32 io_pin      = 4;  // Physical pin assignment
+  bool   renamable   = 5;  // Whether user can rename this
+  bool   visible     = 6;  // Whether shown in UI
+}
+
+// ─── IoNameUpdate — rename a single I/O (StoreIoName, tag "ioRename") ────
+message IoNameUpdate {
+  uint32 index    = 1;
+  string new_name = 2;
+}
+
+// ─── AnalogBoard — sensor board status (UI_SendAnalogBoard) ──────────────
+// One per board, sent when browsing boards (NextBoard/PrevBoard).
+message AnalogBoard {
+  uint32 address   = 1;
+  uint32 type      = 2;
+  string label     = 3;
+  string version   = 4;
+  bool   disabled  = 5;
+  repeated AnalogSensor sensors = 6;  // Up to 4 sensors per board
+}
+
+message AnalogSensor {
+  uint32 slot      = 1;   // 0-3
+  uint32 type      = 2;   // Sensor type code
+  string label     = 3;
+  float  offset    = 4;   // Calibration offset
+  bool   disabled  = 5;
+  float  value     = 6;   // Current reading
+}
+
+// ─── AvailableIo — list of unassigned I/O pins (UI_SendAvailableIo) ──────
+message AvailableIo {
+  repeated uint32 output_pins = 1;
+  repeated uint32 input_pins  = 2;
+}

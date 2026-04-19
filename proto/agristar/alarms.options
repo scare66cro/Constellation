@@ -1,0 +1,3 @@
+# nanopb options for alarms.proto
+agristar.Warning.message                 max_size:64
+agristar.WarningReport.warnings          max_count:20

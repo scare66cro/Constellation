@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orbit Simulator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  .page { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
+  .header h1 { font-size: 1.5rem; font-weight: 700; }
+  .header .sub { font-size: 0.8rem; color: #94a3b8; margin-top: 2px; }
+  .connected { color: #4ade80; }
+  .disconnected { color: #f87171; }
+  .btn { padding: 0.4rem 1rem; border: 1px solid #334155; border-radius: 6px; background: #1e293b; color: #e2e8f0; cursor: pointer; font-size: 0.8rem; }
+  .btn:hover { background: #334155; }
+  .board-card { background: #1e293b; border-radius: 12px; padding: 1rem; margin-bottom: 1.5rem; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .orbit-board { width: 100%; max-width: 700px; margin: 0 auto; display: block; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.4)); }
+  .clickable { cursor: pointer; }
+  .clickable:hover { filter: brightness(1.3); }
+  .panels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+  @media (max-width: 768px) { .panels { grid-template-columns: 1fr; } }
+  .panel { background: #1e293b; border-radius: 8px; padding: 1rem; }
+  .panel h3 { font-size: 0.8rem; font-weight: 600; color: #94a3b8; margin-bottom: 0.5rem; }
+  .io-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.4rem; }
+  .io-btn { padding: 0.3rem 0; text-align: center; border-radius: 4px; font-size: 0.7rem; font-family: monospace; border: 1px solid transparent; cursor: pointer; }
+  .io-on { background: rgba(74,222,128,0.2); color: #4ade80; border-color: #4ade80; }
+  .io-off { background: #334155; color: #94a3b8; }
+  .io-ro { cursor: default; }
+  .ao-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+  .ao-label { font-size: 0.75rem; color: #94a3b8; width: 2.5rem; }
+  .ao-track { flex: 1; height: 1rem; background: #334155; border-radius: 999px; overflow: hidden; }
+  .ao-fill { height: 100%; background: #3b82f6; border-radius: 999px; transition: width 0.3s; }
+  .ao-val { font-size: 0.7rem; color: #cbd5e1; width: 5rem; text-align: right; font-family: monospace; }
+  .status-bar { background: #1e293b; border-radius: 8px; padding: 0.75rem 1rem; display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.75rem; color: #94a3b8; }
+  .status-bar .warn { color: #fbbf24; font-weight: 700; }
+  .status-bar .err { color: #f87171; font-weight: 700; }
+  .status-bar .ok { color: #4ade80; }
+  /* SVG glow effects */
+  .glow-green { filter: drop-shadow(0 0 4px #2ecc71); }
+  .glow-red   { filter: drop-shadow(0 0 4px #e74c3c); }
+  .glow-amber { filter: drop-shadow(0 0 3px #f39c12); }
+  .glow-blue  { filter: drop-shadow(0 0 3px #3498db); }
+  /* Sensor Boards */
+  .sensor-section { margin-bottom: 1.5rem; }
+  .section-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+  .section-hdr h2 { font-size: 1rem; font-weight: 600; color: #e2e8f0; }
+  .sensor-card { background: #1e293b; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.6rem; border: 1px solid #334155; }
+  .sc-hdr { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .sc-hdr select, .sc-hdr input[type=text] { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; padding: 0.2rem 0.4rem; font-size: 0.75rem; }
+  .sr { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+  .sr-badge { font-size: 0.6rem; padding: 0.1rem 0.35rem; border-radius: 3px; width: 3.5rem; text-align: center; flex-shrink: 0; }
+  .sr-badge.t-temp { background: #b91c1c33; color: #fca5a5; }
+  .sr-badge.t-hum { background: #1d4ed833; color: #93c5fd; }
+  .sr-badge.t-co2 { background: #065f4633; color: #6ee7b7; }
+  .sr-badge.t-ir { background: #92400e33; color: #fcd34d; }
+  .sr-lbl { font-size: 0.7rem; color: #94a3b8; width: 5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+  .sr-slider { flex: 1; accent-color: #3b82f6; height: 6px; }
+  .sr-val { font-size: 0.75rem; color: #cbd5e1; width: 5.5rem; text-align: right; font-family: monospace; flex-shrink: 0; }
+  .addr-badge { background: #334155; color: #cbd5e1; font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-family: monospace; }
+  .btn-xs { padding: 0.15rem 0.4rem; font-size: 0.65rem; }
+  .btn-red { border-color: #dc2626; color: #fca5a5; }
+  .btn-red:hover { background: #dc262633; }
+</style>
+</head>
+<body>
+<div class="page">
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1>Orbit I/O Simulator</h1>
+      <div class="sub">
+        Board #<span id="h-id">2</span> — <span id="h-ip">10.47.27.2</span> —
+        <span id="h-conn" class="disconnected">Connecting…</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:0.5rem;">
+      <button class="btn" onclick="resetBoard()">Reset Board</button>
+    </div>
+  </div>
+
+  <!-- SVG Board -->
+  <div class="board-card">
+    <svg id="board" viewBox="0 0 550 450" xmlns="http://www.w3.org/2000/svg" class="orbit-board"></svg>
+  </div>
+
+  <!-- Status Panels -->
+  <div class="panels">
+    <div class="panel">
+      <h3>Digital Inputs</h3>
+      <div class="io-grid" id="di-grid"></div>
+    </div>
+    <div class="panel">
+      <h3>Digital Outputs</h3>
+      <div class="io-grid" id="do-grid"></div>
+    </div>
+    <div class="panel">
+      <h3>Analog Outputs</h3>
+      <div id="ao-panel"></div>
+    </div>
+  </div>
+
+  <!-- Sensor Boards -->
+  <div class="sensor-section">
+    <div class="section-hdr">
+      <h2>Analog Sensor Boards</h2>
+      <button class="btn btn-xs" onclick="addBoard()">+ Add Board</button>
+    </div>
+    <div id="sensor-boards"></div>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="status-bar" id="status-bar"></div>
+</div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────
+let S = {
+  id: 2, ipAddress: '10.47.27.2', firmwareVersion: '1.0.0',
+  uptime: 0, cpuTemp: 42, commLost: true, safeMode: false, eStop: false,
+  digitalInputs: Array(10).fill(false),
+  digitalOutputs: Array(10).fill(false),
+  dc24vOutputs: Array(4).fill(false),
+  analogOutputs: [0, 0],
+  aoModes: ['voltage', 'voltage'],
+  vfdActivity: false, sensorActivity: false,
+  outputLabels: Array(10).fill(''),
+  inputLabels: Array(10).fill(''),
+  analogBoards: [],
+};
+let connected = false;
+let blinkOn = true;
+setInterval(() => { blinkOn = !blinkOn; }, 500);
+
+// ─── API ────────────────────────────────────────────────────────────────
+const API = location.origin;
+
+let _sbInit = false;
+async function fetchStatus() {
+  try {
+    const r = await fetch(API + '/api/status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    Object.assign(S, d);
+    connected = true;
+    if (!_sbInit && S.analogBoards) { renderSensorBoards(); _sbInit = true; }
+  } catch { connected = false; }
+  render();
+}
+
+async function toggleDI(i) {
+  try {
+    await fetch(API + '/api/di', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ index: i, value: !S.digitalInputs[i] }),
+    });
+    S.digitalInputs[i] = !S.digitalInputs[i];
+  } catch {}
+  render();
+}
+
+async function toggleEStop() {
+  try {
+    await fetch(API + '/api/estop', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ active: !S.eStop }),
+    });
+    S.eStop = !S.eStop;
+  } catch {}
+  render();
+}
+
+async function resetBoard() {
+  try { await fetch(API + '/api/reset', { method: 'POST' }); } catch {}
+  await fetchStatus();
+}
+
+// ─── Colors ─────────────────────────────────────────────────────────────
+const PCB='#1a5276', PCB_EDGE='#0e3650', COPPER='#c59d5f';
+const LED_OFF='#2c3e50', LED_GREEN='#2ecc71', LED_RED='#e74c3c';
+const LED_AMBER='#f39c12', LED_BLUE='#3498db';
+const CONNECTOR='#1c2833', LABEL='#ecf0f1', SILK='#d5dbdb';
+const COMPONENT='#34495e', FUSE_OK='#27ae60';
+
+// ─── SVG Board ──────────────────────────────────────────────────────────
+function renderBoard() {
+  const W=550, H=450;
+  const ds = [0,1,2,3,4].map(i => (S.id >> i) & 1);
+
+  // Helper to create glow class
+  function gc(fill) {
+    if (fill===LED_GREEN) return 'glow-green';
+    if (fill===LED_RED||fill==='#ff4444') return 'glow-red';
+    if (fill===LED_AMBER) return 'glow-amber';
+    if (fill===LED_BLUE) return 'glow-blue';
+    return '';
+  }
+
+  let svg = `
+    <rect x="0" y="0" width="${W}" height="${H}" rx="8" ry="8" fill="${PCB}" stroke="${PCB_EDGE}" stroke-width="3"/>
+    <!-- Mounting holes -->
+    ${[[18,18],[W-18,18],[18,H-18],[W-18,H-18]].map(([cx,cy])=>`
+      <circle cx="${cx}" cy="${cy}" r="8" fill="none" stroke="${COPPER}" stroke-width="2"/>
+      <circle cx="${cx}" cy="${cy}" r="3" fill="${PCB_EDGE}"/>`).join('')}
+
+    <!-- RJ45 #1 (left) -->
+    <rect x="40" y="5" width="55" height="35" rx="3" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+    <text x="67" y="25" text-anchor="middle" fill="${LABEL}" font-size="7" font-family="monospace">RJ45</text>
+    <text x="67" y="50" text-anchor="middle" fill="${SILK}" font-size="6">TCP/IP</text>
+    <circle cx="50" cy="14" r="3" fill="${S.commLost?LED_OFF:LED_GREEN}" class="${gc(S.commLost?LED_OFF:LED_GREEN)}"/>
+    <circle cx="83" cy="14" r="3" fill="${!S.commLost&&blinkOn?LED_AMBER:LED_OFF}" class="${gc(!S.commLost&&blinkOn?LED_AMBER:LED_OFF)}"/>
+
+    <!-- 24V DC Outputs 5-8 -->
+    ${[0,1,2,3].map(i => {
+      const x = 160 + i*55;
+      const f = S.dc24vOutputs[i]?LED_GREEN:LED_OFF;
+      return `
+        <rect x="${x}" y="8" width="42" height="28" rx="2" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+        <text x="${x+21}" y="26" text-anchor="middle" fill="${LABEL}" font-size="8" font-weight="bold">${i+5}</text>
+        <circle cx="${x+21}" cy="42" r="4" fill="${f}" class="${gc(f)}"/>`;
+    }).join('')}
+    <text x="270" y="55" text-anchor="middle" fill="${SILK}" font-size="6">24V DC 1A Outputs</text>
+
+    <!-- RJ45 #2 (right) -->
+    <rect x="${W-95}" y="5" width="55" height="35" rx="3" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+    <text x="${W-67}" y="25" text-anchor="middle" fill="${LABEL}" font-size="7" font-family="monospace">RJ45</text>
+    <text x="${W-67}" y="50" text-anchor="middle" fill="${SILK}" font-size="6">TCP/IP</text>
+    <circle cx="${W-85}" cy="14" r="3" fill="${S.commLost?LED_OFF:LED_GREEN}" class="${gc(S.commLost?LED_OFF:LED_GREEN)}"/>
+    <circle cx="${W-52}" cy="14" r="3" fill="${!S.commLost&&blinkOn?LED_AMBER:LED_OFF}" class="${gc(!S.commLost&&blinkOn?LED_AMBER:LED_OFF)}"/>
+
+    <!-- 24V DC In -->
+    <rect x="${W-40}" y="55" width="30" height="50" rx="2" fill="${CONNECTOR}" stroke="${COPPER}" stroke-width="1"/>
+    <text x="${W-25}" y="78" text-anchor="middle" fill="${LED_AMBER}" font-size="6" font-weight="bold">24V</text>
+    <text x="${W-25}" y="88" text-anchor="middle" fill="${LED_AMBER}" font-size="5">DC in</text>
+
+    <!-- DO 1-10 (left side) -->
+    <text x="8" y="78" fill="${SILK}" font-size="7" font-weight="bold">DO</text>
+    ${Array.from({length:10},(_,i)=>{
+      const y = 85 + i*33;
+      const f = S.digitalOutputs[i]?LED_GREEN:LED_OFF;
+      const lbl = S.outputLabels[i] || '';
+      return `
+        <rect x="8" y="${y}" width="30" height="22" rx="2" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+        <text x="23" y="${y+15}" text-anchor="middle" fill="${LABEL}" font-size="8" font-weight="bold">${i+1}</text>
+        <circle cx="48" cy="${y+11}" r="5" fill="${f}" stroke="#333" stroke-width="1" class="${gc(f)}"/>
+        <rect x="56" y="${y+6}" width="12" height="10" rx="1" fill="${FUSE_OK}" stroke="#333" stroke-width="0.5"/>
+        <text x="62" y="${y+14}" text-anchor="middle" fill="#fff" font-size="5">F</text>
+        ${lbl ? `<text x="74" y="${y+15}" fill="${S.digitalOutputs[i]?'#4ade80':'#94a3b8'}" font-size="6.5" font-weight="${S.digitalOutputs[i]?'bold':'normal'}">${lbl}</text>` : ''}`;
+    }).join('')}
+
+    <!-- E-Stop -->
+    <g class="clickable" onclick="toggleEStop()">
+      <circle cx="${W-25}" cy="125" r="18" fill="${S.eStop?LED_RED:'#7b241c'}" stroke="#222" stroke-width="2" class="${S.eStop?'glow-red':''}"/>
+      <circle cx="${W-25}" cy="125" r="12" fill="${S.eStop?'#ff4444':'#922b21'}" stroke="#333" stroke-width="1"/>
+      <text x="${W-25}" y="121" text-anchor="middle" fill="#fff" font-size="6" font-weight="bold">E</text>
+      <text x="${W-25}" y="131" text-anchor="middle" fill="#fff" font-size="5">STOP</text>
+    </g>
+    ${S.eStop?`<text x="${W-25}" y="152" text-anchor="middle" fill="${LED_RED}" font-size="6" font-weight="bold" class="glow-red">ACTIVE</text>`:''}
+
+    <!-- DI 1-10 (right side) -->
+    <text x="${W-8}" y="168" text-anchor="end" fill="${SILK}" font-size="7" font-weight="bold">DI</text>
+    ${Array.from({length:10},(_,i)=>{
+      const y = 175 + i*25;
+      const on = S.digitalInputs[i];
+      const f = on?LED_GREEN:LED_OFF;
+      const lbl = S.inputLabels[i] || '';
+      return `
+        ${lbl ? `<text x="${W-56}" y="${y+13}" text-anchor="end" fill="${on?'#4ade80':'#94a3b8'}" font-size="6.5" font-weight="${on?'bold':'normal'}">${lbl}</text>` : ''}
+        <g class="clickable" onclick="toggleDI(${i})">
+          <rect x="${W-38}" y="${y}" width="30" height="18" rx="2"
+                fill="${on?'#1a6b3c':CONNECTOR}" stroke="${on?LED_GREEN:'#555'}" stroke-width="1.5"/>
+          <text x="${W-23}" y="${y+13}" text-anchor="middle" fill="${LABEL}" font-size="8" font-weight="bold">${i+1}</text>
+        </g>
+        <circle cx="${W-48}" cy="${y+9}" r="4" fill="${f}" stroke="#333" stroke-width="0.5" class="${gc(f)}"/>`;
+    }).join('')}
+
+    <!-- Dipswitches -->
+    <rect x="175" y="68" width="120" height="28" rx="3" fill="#2c3e50" stroke="${COPPER}" stroke-width="1"/>
+    <text x="235" y="83" text-anchor="middle" fill="${SILK}" font-size="6">DIPSWITCHES</text>
+    ${ds.map((sw,i)=>{
+      const sx = 188 + i*22;
+      return `
+        <rect x="${sx}" y="72" width="10" height="20" rx="1" fill="#1a252f" stroke="#555" stroke-width="0.5"/>
+        <rect x="${sx+1}" y="${sw?73:83}" width="8" height="8" rx="1" fill="${sw?LED_AMBER:'#555'}"/>
+        <text x="${sx+5}" y="99" text-anchor="middle" fill="${SILK}" font-size="5">${i+1}</text>`;
+    }).join('')}
+    <text x="235" y="108" text-anchor="middle" fill="${SILK}" font-size="5.5">IP: ${S.ipAddress}</text>
+
+    <!-- AM2432 MCU -->
+    <rect x="160" y="130" width="150" height="90" rx="4" fill="#1c2833" stroke="${COPPER}" stroke-width="1.5"/>
+    ${Array.from({length:16},(_,i)=>`<rect x="${163+i*9}" y="126" width="4" height="4" fill="${COPPER}"/><rect x="${163+i*9}" y="220" width="4" height="4" fill="${COPPER}"/>`).join('')}
+    ${Array.from({length:10},(_,i)=>`<rect x="156" y="${134+i*8}" width="4" height="4" fill="${COPPER}"/><rect x="310" y="${134+i*8}" width="4" height="4" fill="${COPPER}"/>`).join('')}
+    <text x="235" y="160" text-anchor="middle" fill="${LABEL}" font-size="10" font-weight="bold">AM2432</text>
+    <text x="235" y="175" text-anchor="middle" fill="${SILK}" font-size="7">${S.safeMode?'SAFE MODE':'v'+S.firmwareVersion}</text>
+    <text x="235" y="188" text-anchor="middle" fill="${SILK}" font-size="6">${S.cpuTemp}°C | ${fmtUp(S.uptime)}</text>
+    ${(()=>{
+      const f = S.commLost?(blinkOn?LED_RED:LED_OFF):S.safeMode?LED_AMBER:LED_GREEN;
+      return `<circle cx="295" cy="145" r="5" fill="${f}" class="${gc(f)}"/>`;
+    })()}
+
+    <!-- Analog Hard Connection -->
+    <rect x="160" y="240" width="150" height="45" rx="3" fill="${COMPONENT}" stroke="${COPPER}" stroke-width="1" stroke-dasharray="4,2"/>
+    <text x="235" y="260" text-anchor="middle" fill="${SILK}" font-size="7">Analog Hard Connection</text>
+    <text x="235" y="273" text-anchor="middle" fill="${SILK}" font-size="5.5">Stackable</text>
+
+    <!-- RS-485 Port 1 — VFD -->
+    <rect x="80" y="${H-65}" width="70" height="35" rx="3" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+    <text x="115" y="${H-44}" text-anchor="middle" fill="${LABEL}" font-size="7" font-weight="bold">1</text>
+    <text x="115" y="${H-24}" text-anchor="middle" fill="${SILK}" font-size="5.5">VFD RTU</text>
+    <circle cx="138" cy="${H-53}" r="3" fill="${S.vfdActivity&&blinkOn?LED_BLUE:LED_OFF}" class="${gc(S.vfdActivity&&blinkOn?LED_BLUE:LED_OFF)}"/>
+
+    <!-- RS-485 Port 2 — Sensor -->
+    <rect x="170" y="${H-65}" width="70" height="35" rx="3" fill="${CONNECTOR}" stroke="#555" stroke-width="1"/>
+    <text x="205" y="${H-44}" text-anchor="middle" fill="${LABEL}" font-size="7" font-weight="bold">2</text>
+    <text x="205" y="${H-24}" text-anchor="middle" fill="${SILK}" font-size="5.5">Sensor RTU</text>
+    <circle cx="228" cy="${H-53}" r="3" fill="${S.sensorActivity&&blinkOn?LED_BLUE:LED_OFF}" class="${gc(S.sensorActivity&&blinkOn?LED_BLUE:LED_OFF)}"/>
+
+    <!-- Analog Outputs -->
+    ${[0,1].map(ch=>{
+      const ax = 320 + ch*95;
+      const maxV = S.aoModes[ch]==='voltage'?10000:20000;
+      const pct = Math.min(100, (S.analogOutputs[ch]/maxV)*100);
+      const valStr = S.aoModes[ch]==='voltage'
+        ? (S.analogOutputs[ch]/1000).toFixed(1)+'V'
+        : (S.analogOutputs[ch]/1000).toFixed(1)+'mA';
+      const modeStr = S.aoModes[ch]==='voltage'?'0-10V':'4-20mA';
+      return `
+        <rect x="${ax}" y="${H-70}" width="80" height="45" rx="3" fill="${COMPONENT}" stroke="${COPPER}" stroke-width="1"/>
+        <text x="${ax+40}" y="${H-52}" text-anchor="middle" fill="${LABEL}" font-size="7" font-weight="bold">AO ${ch+1}</text>
+        <rect x="${ax+5}" y="${H-44}" width="70" height="8" rx="2" fill="#0d1117"/>
+        <rect x="${ax+5}" y="${H-44}" width="${Math.max(0,70*pct/100)}" height="8" rx="2" fill="${LED_GREEN}"/>
+        <text x="${ax+40}" y="${H-28}" text-anchor="middle" fill="${SILK}" font-size="6">${valStr} (${modeStr})</text>`;
+    }).join('')}
+
+    <!-- Silkscreen footer -->
+    <text x="${W/2}" y="${H-8}" text-anchor="middle" fill="${SILK}" font-size="6" opacity="0.6">Constellation Orbit — ${S.ipAddress}</text>
+  `;
+
+  document.getElementById('board').innerHTML = svg;
+}
+
+// ─── Status Panels ──────────────────────────────────────────────────────
+function renderPanels() {
+  // DI grid
+  const diGrid = document.getElementById('di-grid');
+  diGrid.innerHTML = S.digitalInputs.map((v,i) => {
+    const lbl = S.inputLabels[i] || `DI${i+1}`;
+    return `<div class="io-btn ${v?'io-on':'io-off'}" onclick="toggleDI(${i})" title="${lbl}">${lbl}</div>`;
+  }).join('');
+
+  // DO grid
+  const doGrid = document.getElementById('do-grid');
+  doGrid.innerHTML = S.digitalOutputs.map((v,i) => {
+    const lbl = S.outputLabels[i] || `DO${i+1}`;
+    return `<div class="io-btn io-ro ${v?'io-on':'io-off'}" title="${lbl}">${lbl}</div>`;
+  }).join('');
+
+  // AO panel
+  const aoPanel = document.getElementById('ao-panel');
+  aoPanel.innerHTML = S.analogOutputs.map((v,i) => {
+    const maxV = S.aoModes[i]==='voltage'?10000:20000;
+    const pct = Math.min(100,(v/maxV)*100);
+    const valStr = S.aoModes[i]==='voltage'
+      ? (v/1000).toFixed(1)+'V' : (v/1000).toFixed(1)+'mA';
+    return `<div class="ao-row">
+      <span class="ao-label">AO${i+1}</span>
+      <div class="ao-track"><div class="ao-fill" style="width:${pct}%"></div></div>
+      <span class="ao-val">${valStr}</span>
+    </div>`;
+  }).join('');
+
+  // Header
+  document.getElementById('h-id').textContent = S.id;
+  document.getElementById('h-ip').textContent = S.ipAddress;
+  const hConn = document.getElementById('h-conn');
+  hConn.textContent = connected ? 'Connected' : 'Disconnected';
+  hConn.className = connected ? 'connected' : 'disconnected';
+
+  // Status bar
+  const bar = document.getElementById('status-bar');
+  let items = [
+    `FW: ${S.firmwareVersion}`,
+    `CPU: ${S.cpuTemp}°C`,
+    `Uptime: ${fmtUp(S.uptime)}`,
+  ];
+  items.push(S.commLost
+    ? '<span class="err">Nova: COMM LOST</span>'
+    : '<span class="ok">Nova: OK</span>');
+  if (S.safeMode) items.push('<span class="warn">⚠ SAFE MODE</span>');
+  if (S.eStop) items.push('<span class="err" style="animation:pulse 1s infinite">🛑 E-STOP ACTIVE</span>');
+  items.push(`VFD: ${S.vfdActivity?'⚡':'—'}`);
+  items.push(`Sensor: ${S.sensorActivity?'⚡':'—'}`);
+  bar.innerHTML = items.map(t => `<span>${t}</span>`).join('');
+}
+
+function fmtUp(s) {
+  const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60);
+  return h+'h '+m+'m';
+}
+
+function render() {
+  renderBoard();
+  renderPanels();
+}
+// ─── Sensor Board Simulator ─────────────────────────────────────────────
+const STYPE_NAME = {0:'IR Temp',1:'Humidity',2:'CO\u2082',3:'Temp',15:'\u2014'};
+const STYPE_UNIT = {0:'\u00b0C',1:'%',2:'ppm',3:'\u00b0C'};
+const STYPE_RANGE = {
+  0:{min:-400,max:2500,step:1,div:10},
+  1:{min:0,max:1000,step:1,div:10},
+  2:{min:0,max:10000,step:10,div:1},
+  3:{min:-400,max:830,step:1,div:10},
+};
+const BTYPE_NAME = {0:'IR Temp Board',1:'Humidity Board',2:'CO\u2082 Board',3:'Temperature Board'};
+const BTYPE_DEFAULTS = {
+  3:{st:[3,3,3,3],sv:[210,215,150,190],sl:['Plenum 1','Plenum 2','Outside','Return']},
+  1:{st:[1,1,1,2],sv:[450,550,400,800],sl:['Outside RH','Plenum RH','Return RH','CO\u2082']},
+  2:{st:[2,2,2,2],sv:[800,800,800,800],sl:['CO\u2082 1','CO\u2082 2','CO\u2082 3','CO\u2082 4']},
+  0:{st:[0,0,0,0],sv:[250,250,250,250],sl:['IR 1','IR 2','IR 3','IR 4']},
+};
+function fmtSV(type,raw){const r=STYPE_RANGE[type]; if(!r||raw===0x7FFF) return '--'; return (raw/r.div).toFixed(r.div>1?1:0)+' '+STYPE_UNIT[type];}
+function stBadge(t){return t===3?'t-temp':t===1?'t-hum':t===2?'t-co2':'t-ir';}
+
+function renderSensorBoards(){
+  const el=document.getElementById('sensor-boards');
+  if(!S.analogBoards||!S.analogBoards.length){
+    el.innerHTML='<p style="color:#64748b;font-size:0.8rem">No analog boards. Click + Add Board to simulate sensors.</p>';
+    return;
+  }
+  el.innerHTML=S.analogBoards.map((b,bi)=>`
+    <div class="sensor-card">
+      <div class="sc-hdr">
+        <select onchange="chBoardType(${bi},+this.value)">
+          ${[3,1,2,0].map(t=>`<option value="${t}"${b.type===t?' selected':''}>${BTYPE_NAME[t]}</option>`).join('')}
+        </select>
+        <span class="addr-badge">Addr ${b.address}</span>
+        <input type="text" value="${b.label}" placeholder="Label" style="width:7rem" onchange="chBoardLabel(${bi},this.value)"/>
+        <label style="font-size:0.7rem;color:#94a3b8"><input type="checkbox"${b.present?' checked':''} onchange="chBoardPresent(${bi},this.checked)"/> Present</label>
+        <div style="flex:1"></div>
+        <button class="btn btn-xs btn-red" onclick="rmBoard(${bi})">Remove</button>
+      </div>
+      ${b.sensorValues.map((sv,si)=>{
+        const st=b.sensorTypes[si]; if(st===0xF) return '';
+        const r=STYPE_RANGE[st]||{min:0,max:1000,step:1,div:10};
+        const lbl=b.sensorLabels[si]||('S'+(si+1));
+        return `<div class="sr">
+          <span class="sr-badge ${stBadge(st)}">${STYPE_NAME[st]}</span>
+          <span class="sr-lbl" title="${lbl}">${lbl}</span>
+          <input type="range" class="sr-slider" min="${r.min}" max="${r.max}" step="${r.step}" value="${sv}"
+            oninput="updSV(${bi},${si},+this.value)"/>
+          <span class="sr-val" id="sv-${bi}-${si}">${fmtSV(st,sv)}</span>
+        </div>`;
+      }).join('')}
+    </div>`).join('');
+}
+
+function updSV(bi,si,v){
+  S.analogBoards[bi].sensorValues[si]=v;
+  const el=document.getElementById('sv-'+bi+'-'+si);
+  if(el) el.textContent=fmtSV(S.analogBoards[bi].sensorTypes[si],v);
+  fetch(API+'/api/sensors/value',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({boardIndex:bi,sensorIndex:si,value:v})}).catch(()=>{});
+}
+async function chBoardType(bi,t){
+  const b=S.analogBoards[bi],d=BTYPE_DEFAULTS[t]||BTYPE_DEFAULTS[3];
+  b.type=t; b.sensorTypes=[...d.st]; b.sensorValues=[...d.sv]; b.sensorLabels=[...d.sl];
+  await pushSB(); renderSensorBoards();
+}
+async function chBoardLabel(bi,l){ S.analogBoards[bi].label=l; await pushSB(); }
+async function chBoardPresent(bi,p){ S.analogBoards[bi].present=p; await pushSB(); }
+async function addBoard(){
+  const a=S.analogBoards.length, d=BTYPE_DEFAULTS[3];
+  S.analogBoards.push({address:a,type:3,present:true,label:'Board '+a,
+    sensorTypes:[...d.st],sensorValues:[...d.sv],sensorLabels:[...d.sl]});
+  await pushSB(); renderSensorBoards();
+}
+async function rmBoard(bi){
+  S.analogBoards.splice(bi,1);
+  await pushSB(); renderSensorBoards();
+}
+async function pushSB(){
+  try{await fetch(API+'/api/sensors',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({boards:S.analogBoards})})}catch{}
+}
+// ─── Polling ────────────────────────────────────────────────────────────
+fetchStatus();
+setInterval(fetchStatus, 500);
+// Blink re-render (so activity LEDs blink even without data change)
+setInterval(render, 500);
+</script>
+</body>
+</html>

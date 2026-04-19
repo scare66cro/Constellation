@@ -1,0 +1,83 @@
+# Local Development Stack for Agristar Azure Services
+# Usage: docker-compose -f docker-compose.local.yml up -d
+#
+# This runs the full Azure stack locally without any cloud dependencies:
+#   - PostgreSQL database (port 5432)
+#   - Django backend API (port 8000)
+#   - React frontend PWA (port 3000)
+
+services:
+  # ═══════════════════════════════════════════════════════════════════
+  # PostgreSQL Database
+  # ═══════════════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:15-alpine
+    container_name: agristar-postgres
+    environment:
+      POSTGRES_DB: agristar_local
+      POSTGRES_USER: agristar
+      POSTGRES_PASSWORD: localdevpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agristar -d agristar_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Django Backend API
+  # ═══════════════════════════════════════════════════════════════════
+  backend:
+    build:
+      context: ./Backend_Gel_Ops
+      dockerfile: Dockerfile
+    container_name: agristar-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_ENV=development
+      - SERVER_HOST=localhost
+      - SERVER_PORT=8000
+      - SERVER_SCHEME=http
+      - DATABASE_URL=postgres://agristar:localdevpassword@postgres:5432/agristar_local
+      # Local dev - disable SSL requirement
+      - DB_SSL_MODE=disable
+    volumes:
+      - ./Backend_Gel_Ops:/home/site/wwwroot
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        python manage.py migrate --noinput &&
+        python manage.py runserver 0.0.0.0:8000
+      "
+
+  # ═══════════════════════════════════════════════════════════════════
+  # React Frontend PWA
+  # ═══════════════════════════════════════════════════════════════════
+  frontend:
+    build:
+      context: ./frontend_storage_pwa
+      dockerfile: Dockerfile.local
+    container_name: agristar-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_DISABLE_AUTH=true
+    volumes:
+      - ./frontend_storage_pwa/src:/app/src
+      - ./frontend_storage_pwa/public:/app/public
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+
+networks:
+  default:
+    name: agristar-local

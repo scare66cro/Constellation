@@ -1,0 +1,1685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <title>Page not found at /api/iotclients/</title>
+  <meta name="robots" content="NONE,NOARCHIVE">
+  <style type="text/css">
+    html * { padding:0; margin:0; }
+    body * { padding:10px 20px; }
+    body * * { padding:0; }
+    body { font:small sans-serif; background:#eee; color:#000; }
+    body>div { border-bottom:1px solid #ddd; }
+    h1 { font-weight:normal; margin-bottom:.4em; }
+    h1 span { font-size:60%; color:#666; font-weight:normal; }
+    table { border:none; border-collapse: collapse; width:100%; }
+    td, th { vertical-align:top; padding:2px 3px; }
+    th { width:12em; text-align:right; color:#666; padding-right:.5em; }
+    #info { background:#f6f6f6; }
+    #info ol { margin: 0.5em 4em; }
+    #info ol li { font-family: monospace; }
+    #summary { background: #ffc; }
+    #explanation { background:#eee; border-bottom: 0px none; }
+    pre.exception_value { font-family: sans-serif; color: #575757; font-size: 1.5em; margin: 10px 0 10px 0; }
+  </style>
+</head>
+<body>
+  <div id="summary">
+    <h1>Page not found <span>(404)</span></h1>
+    
+    <table class="meta">
+      <tr>
+        <th>Request Method:</th>
+        <td>GET</td>
+      </tr>
+      <tr>
+        <th>Request URL:</th>
+        <td>http://localhost:8000/api/iotclients/</td>
+      </tr>
+      
+    </table>
+  </div>
+  <div id="info">
+    
+      <p>
+      Using the URLconf defined in <code>gellert_project.urls</code>,
+      Django tried these URL patterns, in this order:
+      </p>
+      <ol>
+        
+          <li>
+            
+                health-check
+                [name='health-check']
+            
+          </li>
+        
+          <li>
+            
+                
+                [name='keep-alive']
+            
+          </li>
+        
+          <li>
+            
+                storage-app/
+                
+            
+          </li>
+        
+          <li>
+            
+                saml/
+                
+            
+          </li>
+        
+          <li>
+            
+                admin/
+                
+            
+          </li>
+        
+          <li>
+            
+                login/
+                [name='login']
+            
+          </li>
+        
+          <li>
+            
+                logout/
+                [name='logout']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/$
+                [name='useraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/delete_users/$
+                [name='useraccount-delete-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/delete_users\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-delete-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/save_users/$
+                [name='useraccount-save-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/save_users\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-save-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)/$
+                [name='useraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)/change_password/$
+                [name='useraccount-change-password']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)/change_password\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-change-password']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)/managed_users/$
+                [name='useraccount-managed-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^user-accounts/(?P&lt;pk&gt;[^/.]+)/managed_users\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='useraccount-managed-users']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^corporate-accounts/$
+                [name='corporateaccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^corporate-accounts\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='corporateaccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^corporate-accounts/(?P&lt;pk&gt;[^/.]+)/$
+                [name='corporateaccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^corporate-accounts/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='corporateaccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^dealer-accounts/$
+                [name='dealeraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^dealer-accounts\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='dealeraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^dealer-accounts/(?P&lt;pk&gt;[^/.]+)/$
+                [name='dealeraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^dealer-accounts/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='dealeraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/$
+                [name='customeraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='customeraccount-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/my_customers/$
+                [name='customeraccount-my-customers']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/my_customers\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='customeraccount-my-customers']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/new_customer/$
+                [name='customeraccount-new-customer']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/new_customer\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='customeraccount-new-customer']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/(?P&lt;pk&gt;[^/.]+)/$
+                [name='customeraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^customer-accounts/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='customeraccount-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites/$
+                [name='site-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='site-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites/new_site/$
+                [name='site-new-site']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites/new_site\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='site-new-site']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites/(?P&lt;pk&gt;[^/.]+)/$
+                [name='site-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^sites/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='site-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-groups/$
+                [name='sitegroup-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-groups\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='sitegroup-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-groups/(?P&lt;pk&gt;[^/.]+)/$
+                [name='sitegroup-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-groups/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='sitegroup-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/$
+                [name='iotclient-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/new_panel/$
+                [name='iotclient-new-panel']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/new_panel\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-new-panel']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/$
+                [name='iotclient-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/active_state/$
+                [name='iotclient-active-state']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/active_state\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-active-state']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action/$
+                [name='iotclient-agristar2-action']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-agristar2-action']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action_level1/$
+                [name='iotclient-agristar2-action-level1']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action_level1\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-agristar2-action-level1']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action_level2/$
+                [name='iotclient-agristar2-action-level2']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_action_level2\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-agristar2-action-level2']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_data/$
+                [name='iotclient-agristar2-data']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/agristar2_data\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-agristar2-data']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/check_message/$
+                [name='iotclient-check-message']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/check_message\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-check-message']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/front_matter/$
+                [name='iotclient-front-matter']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/front_matter\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-front-matter']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/reset_token/$
+                [name='iotclient-reset-token']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/reset_token\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-reset-token']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/token_info/$
+                [name='iotclient-token-info']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-clients/(?P&lt;pk&gt;[^/.]+)/token_info\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotclient-token-info']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-logs/$
+                [name='iotlog-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-logs\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotlog-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-logs/(?P&lt;pk&gt;[^/.]+)/$
+                [name='iotlog-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^iot-logs/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='iotlog-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-events/$
+                [name='siteevent-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-events\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='siteevent-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-events/(?P&lt;pk&gt;[^/.]+)/$
+                [name='siteevent-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^site-events/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='siteevent-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/$
+                [name='upgrade-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='upgrade-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)/$
+                [name='upgrade-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='upgrade-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)/upgrade_action/$
+                [name='upgrade-upgrade-action']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)/upgrade_action\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='upgrade-upgrade-action']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)/upgrade_data/$
+                [name='upgrade-upgrade-data']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^upgrades/(?P&lt;pk&gt;[^/.]+)/upgrade_data\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='upgrade-upgrade-data']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^organizations/$
+                [name='organization-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^organizations\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='organization-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^organizations/(?P&lt;pk&gt;[^/.]+)/$
+                [name='organization-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^organizations/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='organization-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/$
+                [name='usersites-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='usersites-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/my_sites/$
+                [name='usersites-my-sites']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/my_sites\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='usersites-my-sites']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/(?P&lt;pk&gt;[^/.]+)/$
+                [name='usersites-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/(?P&lt;pk&gt;[^/.]+)\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='usersites-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/(?P&lt;pk&gt;[^/.]+)/assigned_sites/$
+                [name='usersites-assigned-sites']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^usersites/(?P&lt;pk&gt;[^/.]+)/assigned_sites\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='usersites-assigned-sites']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/$
+                [name='location-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/all_locations/$
+                [name='location-all-locations']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/all_locations\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-all-locations']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/api_status/$
+                [name='location-api-status']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/api_status\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-api-status']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/location_ids/$
+                [name='location-location-ids']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/location_ids\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-location-ids']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/location_names/$
+                [name='location-location-names']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/location_names\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-location-names']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/search/$
+                [name='location-search']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/search\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-search']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/(?P&lt;pk&gt;[^/.]+)/location_detail/$
+                [name='location-location-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^locations/(?P&lt;pk&gt;[^/.]+)/location_detail\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='location-location-detail']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^$
+                [name='api-root']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                
+                
+            
+                ^\.(?P&lt;format&gt;[a-z0-9]+)/?$
+                [name='api-root']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                iot-clients/connection-string
+                [name='GetIoTHubConnectionString']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                iot-clients/httpdata
+                [name='httpdata']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                msg-queue/&lt;int:pk&gt;/validation/
+                [name='validation']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                msg-queue/query/
+                [name='query']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/sync/
+                [name='bridge-sync']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/commands/
+                [name='bridge-commands']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/verify/
+                [name='bridge-verify']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/register/
+                [name='bridge-register']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/command-ack/
+                [name='bridge-command-ack']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/data/&lt;uuid:iot_client_id&gt;/
+                [name='bridge-data']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/upgrade/latest/
+                [name='bridge-upgrade-info']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/upgrade/&lt;str:version&gt;/payload/
+                [name='bridge-upgrade-payload']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/device-link/create/
+                [name='device-link-create']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/device-link/list/
+                [name='device-link-list']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/device-link/delete/
+                [name='device-link-delete']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/device-link/remote-login/
+                [name='device-remote-login']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/device-link/password-login/
+                [name='device-password-login']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                bridge/audit/
+                [name='bridge-audit']
+            
+          </li>
+        
+          <li>
+            
+                api/
+                
+            
+                iot-audit/
+                [name='iot-audit']
+            
+          </li>
+        
+      </ol>
+      <p>
+        
+          The current path, <code>api/iotclients/</code>,
+        
+        didn’t match any of these.
+      </p>
+    
+  </div>
+
+  <div id="explanation">
+    <p>
+      You’re seeing this error because you have <code>DEBUG = True</code> in
+      your Django settings file. Change that to <code>False</code>, and Django
+      will display a standard 404 page.
+    </p>
+  </div>
+</body>
+</html>

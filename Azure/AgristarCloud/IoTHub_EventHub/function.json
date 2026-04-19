@@ -1,0 +1,14 @@
+{
+  "bindings": [
+    {
+      "type": "eventHubTrigger",
+      "name": "IoTHubMessages",
+      "direction": "in",
+      "eventHubName": "iothubgellert",
+      "connection": "AzureEventHubConnectionString",
+      "cardinality": "many",
+      "consumerGroup": "$Default"
+    }
+  ],
+  "scriptFile": "../dist/IoTHub_EventHub/index.js"
+}

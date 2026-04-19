@@ -1,0 +1,47 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Edge",
+      "request": "launch",
+      "url": "http://10.1.2.104",
+      "type": "msedge",
+      "webRoot": "${workspaceFolder}/src",
+      "sourceMapPathOverrides": {
+        "webpack:///src/*": "${webRoot}/*",
+      },
+    },
+    {
+      "name": "Attach to Remote SvelteKit Node App",
+      "type": "node",
+      "request": "attach",
+      "address": "localhost",
+      "port": 9228,
+      "localRoot": "${workspaceFolder}",
+      "remoteRoot": "/home/gellert/Gellert/ui-svelte",
+      "restart": true,
+      "sourceMaps": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Launch server",
+      "request": "launch",
+      "runtimeArgs": ["run-script", "dev"],
+      "runtimeExecutable": "npm",
+      "skipFiles": ["<node_internals>/**"],
+      "type": "node",
+      "console": "integratedTerminal",
+      "sourceMaps": true
+    },
+    {
+      "type": "msedge",
+      "request": "launch",
+      "name": "Launch Edge",
+      "url": "http://127.0.0.1:5173",
+      "webRoot": "${workspaceFolder}",
+    }
+  ]
+}

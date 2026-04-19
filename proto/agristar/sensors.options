@@ -1,0 +1,6 @@
+# nanopb options for sensors.proto
+agristar.SensorData.temperatures         max_count:32
+agristar.SensorData.humidities           max_count:16
+agristar.SensorLabels.temp_labels        max_count:32
+agristar.SensorLabels.humid_labels       max_count:16
+agristar.SensorLabel.label               max_size:16

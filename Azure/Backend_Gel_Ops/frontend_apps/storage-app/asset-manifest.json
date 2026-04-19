@@ -1,0 +1,30 @@
+{
+  "files": {
+    "main.css": "/storage-app/static/css/main.354192e3.css",
+    "main.js": "/storage-app/static/js/main.a3cd6873.js",
+    "static/js/453.7f3d2e88.chunk.js": "/storage-app/static/js/453.7f3d2e88.chunk.js",
+    "index.html": "/storage-app/index.html",
+    "static/media/agristar-fan.svg": "/storage-app/static/media/agristar-fan.4eadda4285113a5b3c96bcd5ff633e69.svg",
+    "static/media/gellert_logo_full_en.png": "/storage-app/static/media/gellert_logo_full_en.b7cbd1c13a00d86a4253.png",
+    "static/media/mode-co2-purge-outer.svg": "/storage-app/static/media/mode-co2-purge-outer.a8948b59f8a8572831100d6f895f3804.svg",
+    "static/media/google_logo.svg": "/storage-app/static/media/google_logo.130f80b3bc839aca4b29238cb0905aa1.svg",
+    "static/media/map-demo.JPG": "/storage-app/static/media/map-demo.87d3ba3ad91b33553e59.JPG",
+    "static/media/flag-ukraine.svg": "/storage-app/static/media/flag-ukraine.16fe7b6c1fbfd224499f51befcdb3207.svg",
+    "static/media/flag-russia.svg": "/storage-app/static/media/flag-russia.81f5ede8e71f3f5594158c05f7052271.svg",
+    "static/media/flag-usa.svg": "/storage-app/static/media/flag-usa.c658db22862e4a7c6db991725d68460c.svg",
+    "static/media/storage-site-icon.svg": "/storage-app/static/media/storage-site-icon.c98e627491de588da450c0014f4dab12.svg",
+    "static/media/mode-co2-purge-inner.svg": "/storage-app/static/media/mode-co2-purge-inner.0c3194216a43451f828ff016d4349541.svg",
+    "static/media/mode-cooling.svg": "/storage-app/static/media/mode-cooling.a7927519b06f1c9070f9acdab5b631e1.svg",
+    "static/media/Microsoft_logo.svg": "/storage-app/static/media/Microsoft_logo.f5dde0c075778bc0ed45c672929bcf51.svg",
+    "static/media/events-icon.svg": "/storage-app/static/media/events-icon.57fd8c910c9a31d76edd16988fddb4d1.svg",
+    "static/media/equipment-climacell.svg": "/storage-app/static/media/equipment-climacell.c3c2a32f43499608951668ef15133ed2.svg",
+    "static/media/flag-china.svg": "/storage-app/static/media/flag-china.39e7b7f931b995f402b4438c71f3efe0.svg",
+    "main.354192e3.css.map": "/storage-app/static/css/main.354192e3.css.map",
+    "main.a3cd6873.js.map": "/storage-app/static/js/main.a3cd6873.js.map",
+    "453.7f3d2e88.chunk.js.map": "/storage-app/static/js/453.7f3d2e88.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.354192e3.css",
+    "static/js/main.a3cd6873.js"
+  ]
+}

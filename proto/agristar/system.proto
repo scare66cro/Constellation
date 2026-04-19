@@ -1,0 +1,81 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// system.proto — System status, mode, datetime, basic setup, versions
+// Maps to: UI_SendMain, UI_SendMode, UI_SendDateTime, UI_SendBasicSetup,
+//          UI_SendVersions, UI_SendService
+// ═══════════════════════════════════════════════════════════════════════════
+syntax = "proto3";
+package agristar;
+
+import "agristar/common.proto";
+
+// ─── SystemStatus — the live dashboard (UI_SendMain, tag "main") ─────────
+// Pushed every 1s or on change. This is the primary real-time message.
+message SystemStatus {
+  float  plenum_temp     = 1;   // Current plenum temperature
+  float  plenum_humid    = 2;   // Current plenum humidity %
+  float  outside_temp    = 3;   // Outside temperature
+  float  remote_temp     = 4;   // Remote sensor temperature
+  float  outside_humid   = 5;   // Outside humidity %
+  float  remote_humid    = 6;   // Remote sensor humidity %
+  float  start_temp      = 7;   // Starting/target temperature
+  float  return_humid    = 8;   // Return humidity %
+  float  return_temp     = 9;   // Return temperature
+  float  co2_level       = 10;  // CO2 ppm
+  string fan_speed       = 11;  // Fan speed (% or "Manual"/"Off")
+  string cool_output     = 12;  // Cooling output description
+  string cool_label      = 13;  // Cooling label
+  string burner_output   = 14;  // Burner output description
+  float  calc_humid      = 15;  // Calculated humidity
+  OperatingMode current_mode = 16;
+  uint32 cure_state      = 17;  // Burner-cure substate (legacy CureState global,
+                                //   CS_OFF=0, CS_AIR=1, CS_MANUAL=2, CS_BURNER=3,
+                                //   CS_DEHUMID=4, CS_MOD_DOOR=5, CS_MOD_BURNER=6,
+                                //   CS_MOD_BURNER_DOOR_LOCK=7,
+                                //   CS_MOD_BURNER_DOOR_UNLOCK=8,
+                                //   CS_HOLD_BURNER_MOD_DOOR=9).
+                                //   Onion mode only; 0 in potato/standby.
+}
+
+// ─── DateTime (UI_SendDateTime, tag "Date") ──────────────────────────────
+message DateTime {
+  string date_str  = 1;   // "MM/DD/YYYY" or "DD/MM/YYYY"
+  string time_str  = 2;   // "HH:MM:SS"
+  uint32 am_pm     = 3;   // 0=24h, 1=AM, 2=PM
+}
+
+// ─── BasicSetup (UI_SendBasicSetup, tag "StorageName") ───────────────────
+// General system configuration. Sent on connect and after changes.
+message BasicSetup {
+  string     storage_name  = 1;   // User-defined panel name
+  TempUnit   temp_type     = 2;   // Fahrenheit or Celsius
+  uint32     mode          = 3;   // Control mode index
+  string     home_page     = 4;   // Default home page
+  SystemMode system_mode   = 5;   // Potato vs Onion
+  uint32     language       = 6;
+  string     master_ip     = 7;   // Master panel IP (multi-panel)
+  uint32     multi_view    = 8;   // Multi-view enabled
+  string     login_pw      = 9;   // Login password hash
+  uint32     local_login   = 10;  // Require local login
+  uint32     animations    = 11;  // UI animations enabled
+}
+
+// ─── Version information (UI_SendVersions, tag "SysVersions") ────────────
+message VersionInfo {
+  string arm_version          = 1;   // Main firmware version
+  string bootloader_version   = 2;   // Bootloader version
+  repeated BoardVersion boards = 3;  // Connected board versions
+}
+
+message BoardVersion {
+  uint32 address = 1;
+  string version = 2;
+  uint32 type    = 3;
+}
+
+// ─── Service/dealer info (UI_SendService, tag "dealerName") ──────────────
+message ServiceInfo {
+  string dealer_name  = 1;
+  string dealer_phone = 2;
+  string dealer_email = 3;
+  string notes        = 4;
+}

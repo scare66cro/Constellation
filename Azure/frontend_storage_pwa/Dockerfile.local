@@ -1,0 +1,17 @@
+# Local development Dockerfile for React frontend
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy source (volumes will override in docker-compose)
+COPY . .
+
+# Expose port
+EXPOSE 3000
+
+# Start dev server
+CMD ["npm", "start"]
