@@ -23,7 +23,11 @@ SIZE    = $(PREFIX)size
 
 # Directories
 PROJ       = .
-APP_DIR    = ../../Mini_IO/Application
+# Mini_IO lives in the legacy AgriStar2Testing tree.  Override on the
+# command line or via env if it lives somewhere else, e.g.
+#   make MINI_IO_DIR=/path/to/Mini_IO
+MINI_IO_DIR ?= /mnt/f/Agristar/Agristar/Mini_IO
+APP_DIR    = $(MINI_IO_DIR)/Application
 PLATFORM   = Platform
 BUILD      = build
 TARGET     = nova_firmware

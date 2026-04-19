@@ -105,7 +105,7 @@ When the firmware encodes a setting *back* to the bridge (e.g. `NovaMsg_SendRefr
 
 ```powershell
 # Firmware build (WSL)
-wsl bash -c "cd /mnt/f/Agristar/Agristar/Constellation/Nova_Firmware && make 2>&1 | grep -E 'error:|nova_firmware.bin' | tail -5"
+wsl bash -c "cd /mnt/f/Constellation/Nova_Firmware && make 2>&1 | grep -E 'error:|nova_firmware.bin' | tail -5"
 
 # Restart the whole stack
 powershell -ExecutionPolicy Bypass -File .\Start-Constellation.ps1 -Restart

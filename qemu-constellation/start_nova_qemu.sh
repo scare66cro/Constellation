@@ -12,7 +12,7 @@
 # This script handles ONLY QEMU.
 ###############################################################################
 
-NOVA_DIR="/mnt/f/Agristar/Agristar/Constellation/Nova_Firmware"
+NOVA_DIR="/mnt/f/Constellation/Nova_Firmware"
 NOVA_FW="$NOVA_DIR/build/nova_firmware.bin"
 NOVA_COMMS="$NOVA_DIR/build/nova_comms.bin"
 NOVA_WDG="$NOVA_DIR/build/nova_watchdog.bin"

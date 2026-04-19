@@ -14,7 +14,7 @@
 # Stop:  Ctrl+C
 ###############################################################################
 
-BASE="/mnt/f/Agristar/Agristar/Constellation"
+BASE="/mnt/f/Constellation"
 NOVA_DIR="$BASE/Nova_Firmware"
 NOVA_FW="$NOVA_DIR/build/nova_firmware.bin"
 SERVER_DIR="$BASE/constellation-ui/server"

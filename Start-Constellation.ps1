@@ -22,7 +22,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$BASE = "F:\Agristar\Agristar\Constellation"
+# Locate the workspace from this script's directory so the launcher works
+# regardless of where the project is cloned/moved to.
+$BASE = $PSScriptRoot
 $AZURE = "$BASE\Azure"
 $WIN_IP = "172.21.16.1"
 $PID_FILE = "$BASE\.constellation-pids"
@@ -139,7 +141,7 @@ Start-Sleep -Seconds 3
 
 # -- 3. Nova QEMU ----------------------------------------------------------
 Write-Host "[4/8] Starting Nova QEMU in WSL (UART1 :9000)..." -ForegroundColor Cyan
-$qemu = Start-Process "wsl.exe" -ArgumentList "-d Ubuntu-24.04 -u scare66cro -e bash /mnt/f/Agristar/Agristar/Constellation/qemu-constellation/start_nova_qemu.sh" `
+$qemu = Start-Process "wsl.exe" -ArgumentList "-d Ubuntu-24.04 -u scare66cro -e bash /mnt/f/Constellation/qemu-constellation/start_nova_qemu.sh" `
     -WindowStyle Hidden -PassThru
 
 Write-Host "   Waiting for QEMU port 9000..." -ForegroundColor DarkGray
