@@ -127,8 +127,7 @@ uint16_t hal_adc_read(uint8_t channel);
  *     (so "PWM_PERIOD - Output" inversion in legacy code still produces
  *      the correct equipment-side duty through the opto-isolator)
  *
- * On QEMU: all functions are no-ops (no EPWM peripheral modelled).
- * On AM2434: programs EPWM0..EPWM3 as TM4C PWM_GEN_0..PWM_GEN_3 equivalents.
+ * Programs EPWM0..EPWM3 as TM4C PWM_GEN_0..PWM_GEN_3 equivalents.
  */
 #define LEGACY_PWM_TICK_HZ      3750000U   /* TM4C PWM clock: 120 MHz / 32 */
 #define LEGACY_PWM_PERIOD_HZ    10000U     /* Target carrier: 10 kHz */
@@ -149,6 +148,23 @@ int     hal_flash_read(uint32_t addr, uint8_t *buf, uint32_t len);
 int     hal_flash_write(uint32_t addr, const uint8_t *buf, uint32_t len);
 int     hal_flash_erase_sector(uint32_t addr);
 
+/* DAC-mode Page Program for runtime OTA writes. Bypasses the SDK's
+ * broken INDIRECT_WRITE_XFER subsystem (see
+ * `memories/repo/lp-am2434-ota-dac-mode-fix.md`). Writes `len` bytes
+ * from `src` to OSPI flash at `addr`. `len` and `addr` MUST be
+ * 256-byte page aligned. Wraps the entire loop in `vTaskSuspendAll`
+ * so the CPSW PHY-poll task can't preempt mid-write.
+ * Returns 0 on success, negative on first failed page. */
+int     hal_flash_write_dac(uint32_t addr, const uint8_t *src, uint32_t len);
+
+/* Defensive: clear any stuck INDIRECT_WRITE_XFER state in the OSPI
+ * controller (CANCEL + W1C on OPS_DONE). Idempotent; safe no-op when
+ * the register is already clean. Call this before invoking the SDK
+ * Flash driver (erase / read) on a runtime path that may follow
+ * earlier failed write attempts — empirically, the SDK's Flash_eraseBlk
+ * can hang if the controller is left mid-INDIRECT-transfer. */
+void    hal_flash_clear_indirect_state(void);
+
 /* ======================== I2C (RTC) ======================== */
 
 void     hal_i2c_init(void);
@@ -163,7 +179,6 @@ void debug_printf(const char *fmt, ...);
  * TivaWare compatibility -- shim functions are in Platform driverlib
  * and inc shim headers, not as macros here.
  */
-/* UARTStdioConfig shim is in Platform/utils/uartstdio.h */
 
 /* ======================== Pin Setup ======================== */
 
