@@ -165,6 +165,58 @@ int     hal_flash_write_dac(uint32_t addr, const uint8_t *src, uint32_t len);
  * can hang if the controller is left mid-INDIRECT-transfer. */
 void    hal_flash_clear_indirect_state(void);
 
+/* Issue Cypress software reset (RSTEN 0x66 + RST 0x99 via STIG) to
+ * clear the chip's volatile config registers and return it to factory
+ * single-line SDR mode. Call before a warm-reset so the next SBL boot
+ * can issue its setup commands single-line — without this, the chip
+ * stays in 4S-4D-4D DTR mode from the previous Flash_open and SBL's
+ * single-line setup is ignored, leading to garbage reads + boot fail.
+ * Returns 0 on success, -1 on STIG timeout. */
+int     hal_flash_chip_soft_reset(void);
+
+/* Issue Cypress CLPEF (Clear Program/Erase Failure flags, cmd 0x30)
+ * via STIG. The chip latches PRGERR / ERSERR in CR1V[6] / CR1V[5]
+ * after any PP / erase that hit an internal error condition — and
+ * subsequent PPs are SILENTLY REJECTED until CLPEF clears the flag.
+ * Empirical: 0.A.173 per-iter retry hit "WIP stuck after PP" on the
+ * second write to the same region; the chip had PRGERR set from the
+ * first attempt's partial-write fault. Call between retry attempts
+ * so the next write isn't silently dropped. Returns 0 on success. */
+int     hal_flash_clpef(void);
+
+/* Bare-metal 256 KB block erase via STIG (cmd 0xDC). Bypasses the SDK's
+ * `Flash_eraseBlk` which hangs in `Flash_norOspiWaitReady` when CPSW is
+ * active. Use this in runtime paths where Enet is still running (e.g.,
+ * streaming OTA's BEGIN). `addr` MUST be 256 KB block-aligned.
+ * Returns 0 on success, negative on chip rejection / WIP timeout. */
+int     hal_flash_erase_block_dac(uint32_t addr);
+
+/* Bare-metal flash read via XIP / DAC mode. Bypasses the SDK's
+ * `Flash_read` which has the same `Flash_norOspiWaitReady` hang
+ * pattern when called repeatedly with CPSW active (0.A.150 evidence:
+ * FINALIZE readback loop wedged). Enables DAC mode, memcpy from
+ * `0x60000000 + addr`, cache invalidate, restore previous DAC state.
+ * Safe to call while CPSW + lwIP are active; doesn't suspend the
+ * scheduler. Returns 0 on success, -1 on bad address/length.
+ *
+ * NB: empirically unstable when called repeatedly alongside DAC writes
+ * — XIP memcpy hangs on alternation. Prefer `hal_flash_read_stig` for
+ * mixed-mode runtime paths (stage-copy etc.). */
+int     hal_flash_read_dac(uint32_t addr, uint8_t *buf, uint32_t len);
+
+/* Bare-metal flash read via STIG (FLASH_CMD_CTRL_REG path). Issues one
+ * READ4B (0x13) STIG command per 8 bytes — fully synchronous, no
+ * INDIRECT_READ_XFER state, no DAC mode toggling. The right tool for
+ * runtime paths that alternate read/write (e.g. OTA stage-copy Bank B
+ * → Bank A) because the alternation between SDK `Flash_read` and
+ * `hal_flash_write_dac` wedges the OSPI controller after ~50 iters.
+ * STIG reads can't accumulate state.
+ *
+ * ~315 ms for a 494 KB read (vs ~50 ms for SDK Flash_read) but never
+ * hangs. Returns 0 on success, -1 on bad address/length or STIG
+ * timeout. */
+int     hal_flash_read_stig(uint32_t addr, uint8_t *buf, uint32_t len);
+
 /* ======================== I2C (RTC) ======================== */
 
 void     hal_i2c_init(void);

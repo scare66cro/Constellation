@@ -637,17 +637,37 @@ int hal_flash_erase_sector(uint32_t addr)
 #define HAL_OSPI_IND_AHB_ADDR_TRIGGER        (HAL_OSPI_BASE + 0x1C)
 #define HAL_OSPI_INDIRECT_WR_CTRL            (HAL_OSPI_BASE + 0x70)
 #define HAL_OSPI_FLASH_CMD_CTRL              (HAL_OSPI_BASE + 0x90)
+#define HAL_OSPI_FLASH_CMD_ADDR              (HAL_OSPI_BASE + 0x94)
 #define HAL_OSPI_FLASH_RD_DATA_LOWER         (HAL_OSPI_BASE + 0xA0)
 
 #define HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT    (1U << 7)
 #define HAL_OSPI_CONFIG_IDLE_BIT             (1U << 31)
 #define HAL_STIG_CMD_EXEC                    (1U << 0)
 #define HAL_STIG_CMD_EXEC_STATUS             (1U << 1)
+#define HAL_STIG_CMD_ENB_COMD_ADDR           (1U << 19)
 #define HAL_STIG_CMD_ENB_READ_DATA           (1U << 23)
 #define HAL_INDWR_CANCEL                     (1U << 1)
 #define HAL_INDWR_OPS_DONE                   (1U << 5)
 
 #define HAL_FLASH_PAGE_SIZE                  256U
+#define HAL_FLASH_BLOCK_SIZE                 (256U * 1024U)  /* 4-byte block-erase: 0xDC */
+#define HAL_FLASH_BLOCK_ERASE_CMD            0xDCU
+
+/* 0.A.172: BACK to 32 B sub-PP. 0.A.171 dropped to 16 B and the chip
+ * wedged on the FIRST CHUNK PP — "WIP stuck after PP" + subsequent
+ * erases also failing. 16 B is a PARTIAL cache line (R5F line = 32 B),
+ * and writing < line causes the cache controller's write-allocate to
+ * READ-then-WRITE the line, which during DAC mode triggers a read of
+ * the OSPI region in the middle of an in-progress PP cycle. That
+ * read confuses both the controller's pipeline and the chip's WIP
+ * state. So 32 B = 1 cache line is the FLOOR — anything smaller
+ * triggers cache-allocate hazards. With HwiP_disable now added in
+ * the stage-copy iter loop (0.A.171 lp_ota_task.c change kept), the
+ * 8 residual mismatches from 0.A.170's 32 B run may finally clear. */
+#define HAL_FLASH_DAC_SUB_PP                 32U
+/* SRAM_PARTITION_REG (offset 0x18) — diagnostic, lets us read what
+ * the SDK Cypress driver set for the read/write split. */
+#define HAL_OSPI_SRAM_PARTITION_REG          (HAL_OSPI_BASE + 0x18)
 
 static inline uint32_t hal_rd32(uint32_t addr)            { return *(volatile uint32_t *)(uintptr_t)addr; }
 static inline void     hal_wr32(uint32_t addr, uint32_t v){ *(volatile uint32_t *)(uintptr_t)addr = v; }
@@ -707,14 +727,29 @@ static int32_t hal_wait_wip_clear(uint32_t max_polls)
     return -1;
 }
 
-/* Single-page DAC-mode Page Program. SILENT on success (caller wraps the
- * loop in `vTaskSuspendAll` to prevent CPSW preemption; logging inside
- * a suspended scheduler deadlocks). Return codes:
- *   0  success
- *  -1  WIP/STIG timeout or WREN didn't set WEL
- *  -3  chip WIP stuck after PP
- *  -4  WEL stuck (PP rejected by chip) */
-static int hal_flash_dac_pp(uint32_t addr, const uint8_t *src, uint32_t len)
+/* Single sub-page DAC-mode Page Program. Programs up to
+ * HAL_FLASH_DAC_SUB_PP bytes from `src` to flash `addr`. Each call is
+ * one full PP cycle (WREN + DAC write + WIP poll).
+ *
+ * ─── LOAD-BEARING INVARIANT (see docs/lp-am2434-ospi-dac-writes.md) ──
+ * Do NOT disable the DAC bit (CONFIG_REG[7]) or clear
+ * IND_AHB_ADDR_TRIGGER_REG at the end of this function. The SDK's
+ * `OSPI_lld_writeDirect` (drivers/ospi/v0/lld/ospi_v0_lld.c:1615)
+ * leaves both enabled across calls — and that's load-bearing.
+ *
+ * If you toggle the DAC bit OFF between sub-PPs, the AM2434 OSPI
+ * controller silently drops all AHB writes past the first 5 32-bit
+ * words (20 bytes) of every sub-PP from the second onward. The chip
+ * still sees PP cmd + addr (WIP cycles "normally") but receives zero
+ * data — the just-erased page stays at 0xFF except for the first
+ * sub-PP's first 20 bytes. Three days of debugging (0.A.166-0.A.185)
+ * found this by adding per-chunk verify with byte-dump diagnostic.
+ *
+ * Enable DAC lazily on the first call (`if cfg_pre & DAC_BIT == 0`);
+ * leave it on for the rest of the write campaign. Toggle off only
+ * after ALL writes are done and you need INDIRECT mode for the next
+ * op (rare in practice). */
+static int hal_flash_dac_pp_one(uint32_t addr, const uint8_t *src, uint32_t len)
 {
     /* Wait for chip idle (no prior write/erase in progress). */
     int32_t sr1_pre = hal_wait_wip_clear(50000U);
@@ -726,19 +761,36 @@ static int hal_flash_dac_pp(uint32_t addr, const uint8_t *src, uint32_t len)
     if (sr1_post_wren < 0) return -1;
     if ((((uint8_t)sr1_post_wren) & 0x02U) == 0U) return -1;
 
-    /* Enable DAC, memcpy page, FLUSH CACHE, restore indirect-mode default.
-     * The CacheP_wbInv is **load-bearing**: OSPI data region is mapped
-     * Normal Cacheable; without flush, CPU dirty cache lines never reach
-     * the controller and the chip sees nothing. SDK does this in
-     * `OSPI_writeDirect` (`ospi_v0.c:994`). */
+    /* Lazy DAC enable — see big comment above. NEVER disable at end. */
     uint32_t cfg_pre = hal_rd32(HAL_OSPI_CONFIG_REG);
-    hal_wr32(HAL_OSPI_CONFIG_REG, cfg_pre | HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
-    hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0x04000000U);
+    if ((cfg_pre & HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT) == 0U) {
+        hal_wr32(HAL_OSPI_CONFIG_REG, cfg_pre | HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
+        hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0x04000000U);
+    }
     void *dst = (void *)(uintptr_t)(HAL_OSPI_DATA_BASE + addr);
-    memcpy(dst, src, len);
+    {
+        volatile uint32_t *d32 = (volatile uint32_t *)dst;
+        const uint8_t *s8 = src;
+        uint32_t words = len / 4U;
+        for (uint32_t w = 0; w < words; w++) {
+            uint32_t v = ((uint32_t)s8[4U * w + 0])
+                       | ((uint32_t)s8[4U * w + 1] << 8)
+                       | ((uint32_t)s8[4U * w + 2] << 16)
+                       | ((uint32_t)s8[4U * w + 3] << 24);
+            d32[w] = v;
+        }
+        uint32_t tail = len - words * 4U;
+        if (tail > 0U) {
+            volatile uint8_t *d8 = (volatile uint8_t *)dst;
+            for (uint32_t b = 0; b < tail; b++) {
+                d8[words * 4U + b] = s8[words * 4U + b];
+            }
+        }
+    }
+    __asm__ volatile("dsb sy" : : : "memory");
     CacheP_wbInv(dst, len, CacheP_TYPE_ALL);
-    hal_wr32(HAL_OSPI_CONFIG_REG, cfg_pre & ~HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
-    hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0U);
+    __asm__ volatile("dsb sy" : : : "memory");
+    /* DAC + IND_AHB_ADDR_TRIGGER stay enabled — see big comment above. */
 
     /* Wait for chip's PP to complete (WIP=0). */
     int32_t sr1_after = hal_wait_wip_clear(50000U);
@@ -746,6 +798,29 @@ static int hal_flash_dac_pp(uint32_t addr, const uint8_t *src, uint32_t len)
     /* WEL should now be 0 (the PP consumed it). */
     if (((uint8_t)sr1_after) & 0x02U) return -4;
 
+    return 0;
+}
+
+/* Page-level DAC PP. Splits a 256-byte page into TWO 128-byte sub-PPs
+ * to fit within the OSPI controller's SRAM write partition. 0.A.166/167
+ * bench showed corruption at byte 216 of every affected page — the
+ * SRAM write partition is ~54 32-bit words (~216 bytes), and DAC writes
+ * past that boundary get silently dropped. Splitting into 128-byte
+ * sub-PPs keeps each below the limit. Functionally equivalent to one
+ * 256-byte PP since Cypress S25HL512T supports 1-256 byte PPs that
+ * each program contiguous bytes from the given address.
+ *
+ * Return codes match hal_flash_dac_pp_one. */
+static int hal_flash_dac_pp(uint32_t addr, const uint8_t *src, uint32_t len)
+{
+    uint32_t off = 0;
+    while (off < len) {
+        uint32_t sub_len = (len - off > HAL_FLASH_DAC_SUB_PP)
+                           ? HAL_FLASH_DAC_SUB_PP : (len - off);
+        int rc = hal_flash_dac_pp_one(addr + off, src + off, sub_len);
+        if (rc != 0) return rc;
+        off += sub_len;
+    }
     return 0;
 }
 
@@ -762,10 +837,316 @@ static void hal_flash_cancel_stuck_indirect_write(void)
  * OSPI controller's INDIRECT_WRITE_XFER state machine is mid-transfer.
  * The 0.A.140 OTA flow had this write inline in `lp_ota_task.c` and it
  * was load-bearing for erase reliability. Exposed as a HAL API so the
- * OTA activate handler can call it without owning the register defs. */
+ * OTA activate handler can call it without owning the register defs.
+ *
+ * 0.A.158: now also clears INDIRECT_READ_XFER_CTRL_REG (offset 0x60).
+ * The stage-copy alternation pattern (SDK Flash_read → DAC write → ...)
+ * was hanging after ~50 iters; the read side was leaving DONE_STATUS
+ * latched between calls, which can interact badly with a DAC-mode
+ * write that comes next. Cancel + W1C the read CTRL too. Same write-1
+ * semantics as the write path. */
+#define HAL_OSPI_INDIRECT_RD_CTRL            (HAL_OSPI_BASE + 0x60)
+#define HAL_INDRD_START                      (1U << 0)
+#define HAL_INDRD_CANCEL                     (1U << 1)
+#define HAL_INDRD_OPS_DONE                   (1U << 5)
+
 void hal_flash_clear_indirect_state(void)
 {
     hal_flash_cancel_stuck_indirect_write();
+    hal_wr32(HAL_OSPI_INDIRECT_RD_CTRL, HAL_INDRD_CANCEL | HAL_INDRD_OPS_DONE);
+}
+
+/* Cypress S25HL512T software reset — clears volatile config and returns
+ * chip to power-on factory state (single-line SDR). Required before
+ * a warm-reset on the AM2434 LP so the next SBL boot can talk to the
+ * chip using its single-line setup commands. Without this, the chip
+ * stays in QPI+DTR from the prior `Flash_open` and SBL's reads return
+ * garbage (boot fail with "Some tests have failed!!").
+ *
+ * 0.A.164: dual-protocol attempt. The STIG path follows the controller's
+ * DEV_INSTR_RD_CONFIG protocol. After `Flash_open`, that's 4-line DTR
+ * for the Cypress in QPI+DTR mode. We:
+ *   1. Send RSTEN+RST in the current (4-line DTR) protocol — catches
+ *      the chip-still-in-QPI-DTR case (the common case).
+ *   2. Switch DEV_INSTR_RD_CONFIG to single-line SDR, then send
+ *      RSTEN+RST again — catches the chip-already-in-1S-SDR case
+ *      (in case attempt 1 somehow already reset it).
+ *   3. Bump the post-reset wait to 10 ms (>> tRPH max for Cypress).
+ *
+ * One of the two attempts is guaranteed to match the chip's current
+ * mode and trigger the reset. After return, the chip is in
+ * single-line SDR mode, ready for SBL's fresh setup. */
+#define HAL_OSPI_DEV_INSTR_RD_CFG_REG  (HAL_OSPI_BASE + 0x04)
+#define HAL_OSPI_DEV_INSTR_WR_CFG_REG  (HAL_OSPI_BASE + 0x08)
+
+/* Cypress CLPEF (Clear Program/Erase Failure flags). Cmd 0x30.
+ * Clears CR1V[6:5] (PRGERR/ERSERR). Required between retry attempts of
+ * the same PP — after a partial-write fault, the chip latches PRGERR
+ * and silently rejects subsequent PPs (manifests as WIP-stuck on the
+ * second attempt) until CLPEF runs.
+ *
+ * 0.A.179: uses SDK `OSPI_writeCmd` instead of our raw STIG. The SDK
+ * version goes through the proper protocol-aware command path that's
+ * known to work with the chip in QPI+DTR mode. Our raw STIG cmd may
+ * have been sent in wrong protocol and silently ignored. */
+int hal_flash_clpef(void)
+{
+    Flash_Handle h = flash_handle();
+    if (h == NULL) return -1;
+    Flash_Config *cfg = (Flash_Config *)h;
+    Flash_NorOspiObject *obj = (Flash_NorOspiObject *)cfg->object;
+    if (obj == NULL || obj->ospiHandle == NULL) return -1;
+
+    OSPI_WriteCmdParams p;
+    OSPI_WriteCmdParams_init(&p);
+    p.cmd          = 0x30;
+    p.cmdAddr      = OSPI_CMD_INVALID_ADDR;
+    p.numAddrBytes = 0;
+    p.txDataBuf    = NULL;
+    p.txDataLen    = 0;
+    int32_t st = OSPI_writeCmd(obj->ospiHandle, &p);
+    /* Read SR1 back so we can log whether PRGERR / ERSERR actually
+     * cleared. CR1V[6] = PRGERR, CR1V[5] = ERSERR. SR1 is a different
+     * register — but reading something forces a settling pause and
+     * helps diagnose. */
+    uint8_t sr1 = hal_flash_read_sr1(h);
+    debug_printf("[Flash] CLPEF st=%ld sr1=0x%02X\r\n", (long)st, sr1);
+    return (st == SystemP_SUCCESS) ? 0 : -1;
+}
+
+int hal_flash_chip_soft_reset(void)
+{
+    /* Clear any stale STIG state. */
+    if (hal_stig_wait() != 0) return -1;
+
+    /* ── Attempt 1: send reset in current protocol (4-line DTR) ── */
+    (void)hal_stig_cmd(0x04);   /* WRDI — best-effort, ignore status */
+    (void)hal_stig_cmd(0x66);   /* RSTEN */
+    (void)hal_stig_cmd(0x99);   /* RST */
+
+    /* Short wait — let the chip's tRPH complete before next attempt. */
+    {
+        volatile uint32_t spin = 1200000U;
+        while (spin--) { /* ~1.5 ms */ }
+    }
+
+    /* ── Attempt 2: switch controller to single-line SDR, retry reset ── */
+    uint32_t rd_cfg_saved = hal_rd32(HAL_OSPI_DEV_INSTR_RD_CFG_REG);
+    /* Build a clean single-line SDR read config:
+     *   [7:0]   RD_OPCODE        = 0x03 (READ — works in any mode)
+     *   [9:8]   INSTR_TYPE       = 0   (single-line)
+     *   [10]    DDR_EN           = 0   (SDR)
+     *   [13:12] ADDR_XFER_TYPE   = 0
+     *   [17:16] DATA_XFER_TYPE   = 0
+     *   [28:24] DUMMY_RD_CYCLES  = 0   (no dummies for cmd 0x03)
+     * Rest of bits stay 0. */
+    hal_wr32(HAL_OSPI_DEV_INSTR_RD_CFG_REG, 0x00000003U);
+
+    (void)hal_stig_cmd(0x04);   /* WRDI in 1S SDR */
+    (void)hal_stig_cmd(0x66);   /* RSTEN in 1S SDR */
+    (void)hal_stig_cmd(0x99);   /* RST in 1S SDR */
+
+    /* Long wait — make sure chip has fully recovered before warm-reset
+     * triggers ROM to start poking it. tRPH max is conservatively
+     * 100 ms after a program/erase, but we did WRDI so we should be
+     * well under that. 10 ms is comfortable margin. */
+    {
+        volatile uint32_t spin = 8000000U;
+        while (spin--) { /* ~10 ms */ }
+    }
+
+    /* Restore the read config for any caller that might do more ops
+     * (though the OTA path warm-resets immediately after). */
+    hal_wr32(HAL_OSPI_DEV_INSTR_RD_CFG_REG, rd_cfg_saved);
+
+    /* Clear OSPI controller state too — leave it as close to power-on
+     * as we can manage so the post-reset SBL doesn't inherit weird
+     * state. (Sciclient_pmDeviceReset should reset the peripheral
+     * registers, but this is belt-and-suspenders.) */
+    uint32_t cfg = hal_rd32(HAL_OSPI_CONFIG_REG);
+    hal_wr32(HAL_OSPI_CONFIG_REG, cfg & ~HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
+    hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0U);
+    hal_wr32(HAL_OSPI_INDIRECT_WR_CTRL, HAL_INDWR_CANCEL | HAL_INDWR_OPS_DONE);
+    hal_wr32(HAL_OSPI_INDIRECT_RD_CTRL, HAL_INDRD_CANCEL | HAL_INDRD_OPS_DONE);
+
+    return 0;
+}
+
+/* Bare-metal flash read via STIG (Stig = Single Transaction Instruction
+ * Generator). Bypasses INDIRECT_READ_XFER entirely. Stage-copy from
+ * 0.A.154-0.A.157 saw repeated hangs alternating SDK `Flash_read`
+ * (INDIRECT_READ_XFER) with `hal_flash_write_dac` (DAC mode). The
+ * controller accumulates state between mode switches that wedges around
+ * iter 9 (256 B chunks) or iter 48 (4 KB chunks).
+ *
+ * STIG uses FLASH_CMD_CTRL_REG (offset 0x90) — completely separate code
+ * path from INDIRECT_READ_XFER. STIG reads complete entirely within a
+ * single MMIO write, so they can't leave any "in-progress" state for the
+ * next call to trip on. Per-STIG payload is 1-8 bytes (FLASH_RD_DATA_LOWER
+ * = 4 bytes + FLASH_RD_DATA_UPPER = 4 more bytes).
+ *
+ * Throughput: ~5 µs per STIG × 8 bytes = ~1.6 MB/s. A 494 KB stage-copy
+ * source read takes ~315 ms — slower than SDK Flash_read but never wedges.
+ *
+ * Opcode 0x13 is the Cypress S25HL512T's READ4B (single-line SDR fast
+ * read with 4-byte address, 8 dummy cycles). The chip accepts this even
+ * when in 4S-4D-4D DTR mode for its READ command — but the STIG path
+ * uses the controller's configured STIG protocol (which the SDK leaves
+ * matching the chip's response mode). Empirically RDSR via STIG works
+ * for us already (cmd 0x05 in `hal_stig_read`), so opcode 0x13 should
+ * work via the same path. */
+#define HAL_OSPI_FLASH_RD_DATA_UPPER         (HAL_OSPI_BASE + 0xA4)
+#define HAL_STIG_CMD_OPCODE_READ4B           0x13U
+
+static int32_t hal_stig_read_n(uint8_t opcode, uint32_t addr,
+                               uint8_t n_dummy_cycles, uint8_t n_bytes,
+                               uint8_t *out)
+{
+    if (n_bytes == 0U || n_bytes > 8U || out == NULL) return -1;
+
+    hal_wr32(HAL_OSPI_FLASH_CMD_ADDR, addr);
+
+    uint32_t ctrl = ((uint32_t)opcode << 24)
+                  | HAL_STIG_CMD_ENB_READ_DATA
+                  | (((n_bytes - 1U) & 0x7U) << 20)
+                  | HAL_STIG_CMD_ENB_COMD_ADDR
+                  | (((4U - 1U) & 0x3U) << 16)   /* 4-byte address */
+                  | (((uint32_t)n_dummy_cycles & 0x1FU) << 7)
+                  | HAL_STIG_CMD_EXEC;
+
+    hal_wr32(HAL_OSPI_FLASH_CMD_CTRL, ctrl);
+    if (hal_stig_wait() != 0) return -1;
+
+    uint32_t lo = hal_rd32(HAL_OSPI_FLASH_RD_DATA_LOWER);
+    uint32_t hi = (n_bytes > 4U) ? hal_rd32(HAL_OSPI_FLASH_RD_DATA_UPPER) : 0U;
+
+    for (uint32_t i = 0; i < n_bytes; i++) {
+        if (i < 4U) out[i] = (uint8_t)(lo >> (8U * i));
+        else        out[i] = (uint8_t)(hi >> (8U * (i - 4U)));
+    }
+    return 0;
+}
+
+int hal_flash_read_stig(uint32_t addr, uint8_t *buf, uint32_t len)
+{
+    if (buf == NULL) return -1;
+    if (len == 0U) return 0;
+    if ((addr + len) > OSPI_FLASH_SIZE) return -1;
+
+    /* Defensive: clear any stale INDIRECT state before issuing STIG reads.
+     * The chip should be idle, but other ops may have left flags set. */
+    hal_flash_clear_indirect_state();
+
+    uint32_t off = 0;
+    while (off < len) {
+        uint32_t chunk = (len - off > 8U) ? 8U : (len - off);
+        if (hal_stig_read_n(HAL_STIG_CMD_OPCODE_READ4B,
+                            addr + off,
+                            8U,    /* 8 dummy cycles for fast-read */
+                            (uint8_t)chunk,
+                            buf + off) != 0) {
+            return -1;
+        }
+        off += chunk;
+    }
+    return 0;
+}
+
+/* Bare-metal 256 KB block erase via STIG. Bypasses the SDK's
+ * `Flash_eraseBlk` which hangs inside `Flash_norOspiWaitReady` (the
+ * `||` vs `&&` bug we documented) when called with CPSW + lwIP
+ * running. Our STIG helpers use bounded poll counts so they can't
+ * infinite-loop. This is the erase equivalent of `hal_flash_write_dac`
+ * — the streaming OTA path uses it to pre-erase Bank B at BEGIN time
+ * without closing Enet.
+ *
+ * Returns:
+ *   0  success — block erased, chip clean
+ *   -1 WIP/STIG timeout pre-erase, or WREN didn't set WEL
+ *   -3 WIP stuck after erase (chip didn't finish)
+ *   -4 WEL stuck (chip rejected the erase command)
+ *
+ * `addr` MUST be block-aligned (multiple of 256 KB). */
+int hal_flash_read_dac(uint32_t addr, uint8_t *buf, uint32_t len)
+{
+    if (buf == NULL) return -1;
+    if (len == 0U) return 0;
+    if ((addr + len) > OSPI_FLASH_SIZE) return -1;
+
+    /* Enable DAC mode (XIP read window) if it's currently disabled.
+     * The OSPI controller's DEV_INSTR_RD_CONFIG was already set up
+     * by Flash_open's protocol-enable sequence (4S-4D-4D DTR) so
+     * reads via the data window return real chip bytes. */
+    uint32_t cfg_pre = hal_rd32(HAL_OSPI_CONFIG_REG);
+    bool dac_was_off = ((cfg_pre & HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT) == 0);
+    if (dac_was_off) {
+        hal_wr32(HAL_OSPI_CONFIG_REG, cfg_pre | HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
+        hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0x04000000U);
+    }
+
+    /* Invalidate the cache range we're about to read so we get fresh
+     * bytes from flash (not stale cached values from prior reads). */
+    void *src = (void *)(uintptr_t)(HAL_OSPI_DATA_BASE + addr);
+    CacheP_wbInv(src, len, CacheP_TYPE_ALL);
+
+    memcpy(buf, src, len);
+
+    if (dac_was_off) {
+        hal_wr32(HAL_OSPI_CONFIG_REG, cfg_pre);
+        hal_wr32(HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0U);
+    }
+    return 0;
+}
+
+int hal_flash_erase_block_dac(uint32_t addr)
+{
+    if ((addr % HAL_FLASH_BLOCK_SIZE) != 0U) return -1;
+    if (addr >= OSPI_FLASH_SIZE) return -1;
+
+    /* Unlike hal_flash_write_dac, we do NOT `vTaskSuspendAll` here.
+     * A block erase takes 150 ms typical / 2.7 s max, and the
+     * streaming OTA path runs this WITH CPSW + lwIP active — if we
+     * suspend the scheduler for 900 ms, the bridge's TCP connection
+     * times out and gets reset (0.A.145 bench evidence: ECONNRESET
+     * 21 s after BEGIN, no chunks received). The bounded STIG poll
+     * loops are safe to be preempted; STIG operations are atomic at
+     * the controller register level (each is a single MMIO write).
+     * The only real hazard would be another task issuing a flash op
+     * concurrently, but no other runtime path does that on the LP. */
+
+    hal_flash_cancel_stuck_indirect_write();
+
+    /* Wait for chip idle (no prior op in progress). */
+    int32_t sr1_pre = hal_wait_wip_clear(50000U);
+    if (sr1_pre < 0) return -1;
+
+    /* WREN STIG; verify WEL set. */
+    if (hal_stig_cmd(0x06) != 0) return -1;
+    int32_t sr1_wel = hal_stig_read(0x05, 1U);
+    if (sr1_wel < 0) return -1;
+    if ((((uint8_t)sr1_wel) & 0x02U) == 0U) return -1;
+
+    /* Issue block-erase command 0xDC with 4-byte address.
+     * FLASH_CMD_ADDR_REG holds the target address; FLASH_CMD_CTRL_REG
+     * gets opcode + addr-bytes count (4-1=3 in [17:16]) + ENB_COMD_ADDR
+     * + EXEC. The chip's WIP goes 1 immediately, drops to 0 when
+     * the block erase finishes (~150 ms typ / 2.7 s max). */
+    hal_wr32(HAL_OSPI_FLASH_CMD_ADDR, addr);
+    uint32_t ctrl = ((uint32_t)HAL_FLASH_BLOCK_ERASE_CMD << 24)
+                  | HAL_STIG_CMD_ENB_COMD_ADDR
+                  | (((4U - 1U) & 0x3U) << 16)
+                  | HAL_STIG_CMD_EXEC;
+    hal_wr32(HAL_OSPI_FLASH_CMD_CTRL, ctrl);
+    if (hal_stig_wait() != 0) return -1;
+
+    /* Wait for chip's erase to complete. Bounded poll count caps the
+     * wait at ~25 s worst case — but the call is preemptible so
+     * lwIP / CPSW / scheduler tick continue running during the wait. */
+    int32_t sr1_after = hal_wait_wip_clear(5000000U);
+
+    if (sr1_after < 0) return -3;
+    if (((uint8_t)sr1_after) & 0x02U) return -4;
+    return 0;
 }
 
 int hal_flash_write_dac(uint32_t addr, const uint8_t *src, uint32_t len)

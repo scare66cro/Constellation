@@ -35,6 +35,8 @@
 #include <task.h>
 #include <kernel/dpl/ClockP.h>
 #include <kernel/dpl/DebugP.h>
+#include <kernel/dpl/HwiP.h>
+#include <kernel/dpl/CacheP.h>
 #include <drivers/ospi.h>
 #include <board/flash.h>
 #include "lwip/sockets.h"
@@ -44,46 +46,93 @@
 #include <string.h>
 #include <errno.h>
 
-/* === Option 1 OTA: receive-then-flash via MSRAM buffer (2026-05-12) ======
+/* === Streaming OTA path (2026-05-13, 0.A.144+) =========================
  *
- * Runtime `Flash_write` does not work in our nova_lp FreeRTOS context
- * (see `memories/repo/lp-am2434-runtime-flashwrite-unresolved.md` —
- * 4-day investigation, software-debug exhausted). The auto-flasher in
- * NoRTOS context writes successfully to the same chip / address. The
- * suspected difference is that initializing Enet/CPSW + lwIP changes
- * some peripheral state that breaks the OSPI controller's INDIRECT_WRITE
- * state machine.
- *
- * This implementation tests whether closing Enet at OTA-activate time
- * restores `Flash_write` to a working state — replicating the
- * auto-flasher's "OSPI only" environment. If the chunks-to-buffer +
- * close-Enet + drain-buffer-to-Flash sequence succeeds, we have a
- * shippable network OTA path.
+ * Each CHUNK is written directly to Bank B flash via `hal_flash_write_dac`
+ * as it arrives — no MSRAM image buffer required. Supports arbitrary-size
+ * firmware (limited only by the Bank B region size, currently 1 MB).
  *
  * Flow:
- *   Begin    → init buffer; return ok (no OSPI ops)
- *   Chunk N  → copy chunk to buffer; return ok (no OSPI ops)
- *   Finalize → verify image CRC against buffer; return ok (no OSPI ops)
- *   Activate → close Enet via EnetApp_driverClose; erase OSPI live
- *              region; flash buffer to live region; warm-reset
+ *   Begin    → clear stuck OSPI state; erase Bank B region; reset counters
+ *   Chunk N  → verify per-chunk CRC; pad last partial page with 0xFF;
+ *              `hal_flash_write_dac` directly into Bank B at chunk offset
+ *   Finalize → readback Bank B [0..total_size); recompute CRC32; compare
+ *              against expected; push status
+ *   Activate → if reboot=1: copy Bank B → Bank A + warm-reset
+ *              if reboot=0: bench POC, no action (Bank B holds image)
  *
- * Buffer sized at 64 KB for the bench POC — verifies whether
- * closing Enet restores `Flash_write`. MSRAM has ~67 KB contiguous
- * free (per linker report after BSS + stacks), so 64 KB fits today;
- * full customer images (~485 KB) need DDR before this is
- * production-ready. If the POC validates the close-Enet theory, the
- * next step is to plumb a DDR region and bump this to 1 MB. If it
- * doesn't validate, we go to Option 2 and this allocation goes away. */
+ * Critical assumptions:
+ *  - Chunks arrive in monotonically-increasing offset order (current
+ *    bridge implementation in `orbitOtaPush.ts` guarantees this).
+ *  - Chunk offsets are 256-byte page-aligned (the chip's PP unit).
+ *    Bridge chunk size = 1024 bytes (= 4 pages) which satisfies this.
+ *  - Total image size may not itself be page-aligned (real firmware
+ *    images aren't); the last chunk handles the partial-page pad.
+ *
+ * Net memory savings vs the prior 64 KB-buffered design: 64 KB MSRAM
+ * freed (the `s_image_buf` array is gone). */
 
-#define LP_OTA_IMAGE_BUF_SIZE   (64U * 1024U)
+#define LP_OTA_FLASH_PAGE_SIZE  256U
+#define LP_OTA_BANK_B_SIZE      (1024U * 1024U)  /* see LP_OTA_MAIN_MAX_BYTES */
 
-static uint8_t  s_image_buf[LP_OTA_IMAGE_BUF_SIZE]
-    __attribute__((aligned(64), section(".bss.s_image_buf")));
-static uint32_t s_image_bytes_buffered = 0;
 static uint32_t s_image_total_size     = 0;
+static uint32_t s_image_bytes_written  = 0;  /* bytes successfully written to Bank B */
 static uint32_t s_image_expected_crc   = 0;
-static bool     s_image_buffer_active  = false;
+static bool     s_image_active         = false;
 static char     s_image_staged_version[32] = {0};
+
+/* 0.A.183 Option 2: per-chunk scratch-region remap. Each entry records
+ * a chunk's logical position (offset within the image) and its actual
+ * physical location in scratch (the original Bank B write was corrupt).
+ * FINALIZE CRC + stage-copy iter both consult this table to read the
+ * "correct" bytes for each chunk. */
+typedef struct {
+    uint32_t image_offset;   /* logical offset within the OTA image */
+    uint32_t length;         /* bytes (== k.data_len for that chunk) */
+    uint32_t scratch_offset; /* offset within LP_OTA_SCRATCH_OFFSET region */
+} ota_remap_entry_t;
+
+static ota_remap_entry_t s_remap[LP_OTA_REMAP_MAX];
+static uint32_t s_remap_count    = 0;
+/* Next free scratch page offset (within scratch region). Always page-
+ * aligned; chunks may span multiple pages so we allocate ceil-to-page. */
+static uint32_t s_scratch_next   = 0;
+
+/* Look up the physical chip address from which to read byte `image_off`
+ * within the OTA image. Returns:
+ *   true  with `*chip_addr_out` set to the chip address to read from
+ *         (Bank B + image_off OR scratch + offset)
+ *   false on lookup failure (shouldn't happen for in-range image_off)
+ *
+ * Linear scan of s_remap is O(N) per byte; for the FINALIZE CRC walk
+ * over 500 KB this is up to ~32M ops worst case, but s_remap_count is
+ * normally <16 so it's fine. */
+static inline uint32_t resolved_chip_addr(uint32_t image_off)
+{
+    for (uint32_t i = 0; i < s_remap_count; i++) {
+        const ota_remap_entry_t *e = &s_remap[i];
+        if (image_off >= e->image_offset &&
+            image_off <  e->image_offset + e->length) {
+            return LP_OTA_SCRATCH_OFFSET + e->scratch_offset
+                 + (image_off - e->image_offset);
+        }
+    }
+    return FW_BANK_B_OFFSET + image_off;
+}
+
+/* Scratch buffer for one OSPI page (256 B). Used only by the
+ * partial-last-page fixup in CHUNK + FINALIZE; doesn't hold the whole
+ * image. */
+static uint8_t  s_page_pad[LP_OTA_FLASH_PAGE_SIZE]
+    __attribute__((aligned(64), section(".bss.s_page_pad")));
+
+/* Readback verify buffer is unused since 0.A.152 (FINALIZE readback
+ * skipped pending a working bare-metal read implementation). Reserve
+ * `[[maybe_unused]]` via an `__attribute__` to keep the symbol around
+ * for when we add STIG-based readback back in. */
+__attribute__((unused))
+static uint8_t  s_verify_buf[LP_OTA_FLASH_PAGE_SIZE]
+    __attribute__((aligned(64), section(".bss.s_verify_buf")));
 
 /* CRC-32 (IEEE 802.3 polynomial) over the buffered image — matches the
  * crc used elsewhere in nova_fw_update.c. Bytewise so we don't need a
@@ -98,6 +147,21 @@ static uint32_t lp_ota_crc32(const uint8_t *data, uint32_t len)
         }
     }
     return ~crc;
+}
+
+/* Incremental CRC32 update — same polynomial as lp_ota_crc32 above.
+ * Caller seeds with `0xFFFFFFFFu`, feeds N chunks, then bit-inverts the
+ * final state. Used by FINALIZE's readback verification (we can't fit
+ * the full image in RAM to compute the CRC in one shot). */
+static uint32_t lp_ota_crc32_update(uint32_t crc, const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= (uint32_t)data[i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+        }
+    }
+    return crc;
 }
 
 
@@ -461,44 +525,327 @@ static int lp_ota_stage_copy_b_to_a(uint32_t image_size)
     if (image_size == 0) return -1;
     if (image_size > LP_OTA_MAIN_MAX_BYTES) return -1;
 
-    /* Erase A in 4 KB sectors, capped at LP_OTA_MAIN_MAX_BYTES. We
-     * intentionally erase the FULL 1 MB, not just the image span,
-     * to wipe any straggler bytes from previous larger images. */
-    for (uint32_t off = 0; off < LP_OTA_MAIN_MAX_BYTES; off += 4096U) {
-        if (hal_flash_erase_sector(LP_OTA_MAIN_LIVE_OFFSET + off) != 0) {
+    /* Erase Bank A using the bare-metal STIG block-erase. Each block is
+     * 256 KB so we only need ceil(image_size / 256 KB) blocks. The old
+     * loop called hal_flash_erase_sector 256 times (for 4 KB "sectors")
+     * but the SDK actually aligns each call to a 256 KB block boundary,
+     * so it erased the same block 64 times — taking minutes per OTA
+     * activate. Block-erase covers the full image span with N calls. */
+    uint32_t blocks_needed = (image_size + 0x3FFFFu) / 0x40000u;
+    if (blocks_needed == 0) blocks_needed = 1;
+    DebugP_log("[OTA] stage-copy erasing %lu Bank-A block(s) (%lu KB)\r\n",
+               (unsigned long)blocks_needed,
+               (unsigned long)(blocks_needed * 256));
+    for (uint32_t i = 0; i < blocks_needed; i++) {
+        uint32_t blk_addr = LP_OTA_MAIN_LIVE_OFFSET + (i * 0x40000u);
+        int rc = hal_flash_erase_block_dac(blk_addr);
+        DebugP_log("[OTA] stage-copy erased Bank-A block @0x%06lX rc=%d\r\n",
+                   (unsigned long)blk_addr, rc);
+        if (rc != 0) {
             return -1;
         }
-        /* Yield occasionally so the watchdog task can feed. 256 sectors
-         * total at ~50 ms each = ~13 s; without yields the OTA task
-         * starves every other equal-priority task. */
-        if ((off & 0x7FFFU) == 0) vTaskDelay(1);
+        vTaskDelay(1);
+    }
+    DebugP_log("[OTA] stage-copy erase done, starting B->A copy\r\n");
+
+    /* SRAM + write-completion diagnostic. SRAM_PARTITION_REG @0x18
+     * shows the read/write split of the controller's 1024 B SRAM.
+     * WRITE_COMPLETION_CTRL_REG @0x38 controls auto-polling AND the
+     * opcode the controller sends to the chip to poll WIP. */
+    {
+        volatile uint32_t *sram_part_p = (volatile uint32_t *)(uintptr_t)(0x0FC40000U + 0x18U);
+        volatile uint32_t *wcc_p       = (volatile uint32_t *)(uintptr_t)(0x0FC40000U + 0x38U);
+        uint32_t sram_part = *sram_part_p;
+        uint32_t wcc_before = *wcc_p;
+        uint32_t rd_words  = sram_part & 0xFFU;
+        uint32_t wr_words  = 256U - rd_words;
+        DebugP_log("[OTA] SRAM_PARTITION_REG = 0x%08lX (rd=%lu words/%lu B, wr=%lu words/%lu B)\r\n",
+                   (unsigned long)sram_part,
+                   (unsigned long)rd_words, (unsigned long)(rd_words * 4U),
+                   (unsigned long)wr_words, (unsigned long)(wr_words * 4U));
+        DebugP_log("[OTA] WRITE_COMPLETION_CTRL_REG before = 0x%08lX (poll_opcode=0x%02lX)\r\n",
+                   (unsigned long)wcc_before, (unsigned long)(wcc_before & 0xFFU));
+
+        /* 0.A.174 attempted to set bit 14 to disable auto-polling, but
+         * bench showed bit 14 was ALREADY set (0x40 byte in 0x000340FF
+         * is bit 14). So bit 14 must be ENABLE, not DISABLE. 0.A.175:
+         * write WCC = 0 (everything off), then read back to see which
+         * bits stick. The dangerous opcode 0xFF in low byte (= Cypress
+         * "Reset to Default I/O Mode") needs to go regardless of which
+         * bit controls polling. */
+        *wcc_p = 0x00000000U;
+        uint32_t wcc_after = *wcc_p;
+        DebugP_log("[OTA] WRITE_COMPLETION_CTRL_REG after  = 0x%08lX  (wrote 0, read back)\r\n",
+                   (unsigned long)wcc_after);
     }
 
-    /* Copy B -> A in 256-byte page-sized chunks. Source is read via
-     * `hal_flash_read` (XIP path, always works). Destination is written
-     * via `hal_flash_write_dac` (DAC mode, the only runtime write path
-     * that actually programs the chip — see
-     * `memories/repo/lp-am2434-ota-dac-mode-fix.md`). The legacy
-     * `hal_flash_write` SDK call returns success without actually
-     * programming the chip in our FreeRTOS context. */
-    static uint8_t s_copy_buf[256] __attribute__((aligned(64)));
+    /* 0.A.175: CRC Bank B vs expected. If CHUNK writes were also
+     * corrupted by the 0xFF auto-poll (this is the same chip + same
+     * controller path as stage-copy), Bank B itself has garbage and
+     * stage-copy can't possibly produce a correct Bank A. Knowing
+     * Bank B's CRC tells us where the corruption actually lives. */
+    {
+        volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)0x0FC40000U;
+        *cfg_p = (*cfg_p) | (1U << 7);   /* ensure DAC enabled for XIP read */
+
+        uint32_t crc = 0xFFFFFFFFu;
+        const volatile uint8_t *xip_b =
+            (const volatile uint8_t *)(uintptr_t)(0x60000000U + FW_BANK_B_OFFSET);
+        for (uint32_t i = 0; i < image_size; i++) {
+            uint8_t byte = xip_b[i];
+            crc ^= (uint32_t)byte;
+            for (int b = 0; b < 8; b++) {
+                crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+            }
+        }
+        uint32_t crc_b = ~crc;
+        DebugP_log("[OTA] Bank-B full CRC32 = 0x%08lX  expected = 0x%08lX  %s\r\n",
+                   (unsigned long)crc_b,
+                   (unsigned long)s_image_expected_crc,
+                   (crc_b == s_image_expected_crc) ? "MATCH (Bank B is clean)"
+                                                    : "MISMATCH (Bank B is corrupt — CHUNK writes were affected too)");
+    }
+
+    /* DAC mode state diagnostic — the LP build leaves DAC OFF by default
+     * (syscfg config: "indirect mode" — see hal_flash.c comment), so
+     * accesses to 0x60000000+ hang until we enable DAC bit. Enable it
+     * BEFORE the xip read, verify it stuck, then read. */
+    {
+        #define HAL_OSPI_CFG    0x0FC40000U
+        volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)HAL_OSPI_CFG;
+        uint32_t cfg_pre = *cfg_p;
+        DebugP_log("[OTA] OSPI CONFIG_REG pre-enable  = 0x%08lX (DAC bit %s)\r\n",
+                   (unsigned long)cfg_pre,
+                   (cfg_pre & (1U << 7)) ? "ON" : "OFF");
+        *cfg_p = cfg_pre | (1U << 7);
+        uint32_t cfg_post = *cfg_p;
+        DebugP_log("[OTA] OSPI CONFIG_REG post-enable = 0x%08lX (DAC bit %s)\r\n",
+                   (unsigned long)cfg_post,
+                   (cfg_post & (1U << 7)) ? "ON" : "OFF");
+
+        uint8_t dac_buf[16] = {0};
+        const volatile uint8_t *xip = (const volatile uint8_t *)
+                                      (uintptr_t)(0x60000000U + FW_BANK_B_OFFSET);
+        for (int k = 0; k < 16; k++) dac_buf[k] = xip[k];
+        DebugP_log("[OTA] diag DAC xip: %02X %02X %02X %02X %02X %02X %02X %02X "
+                   "%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                   dac_buf[0], dac_buf[1], dac_buf[2], dac_buf[3],
+                   dac_buf[4], dac_buf[5], dac_buf[6], dac_buf[7],
+                   dac_buf[8], dac_buf[9], dac_buf[10], dac_buf[11],
+                   dac_buf[12], dac_buf[13], dac_buf[14], dac_buf[15]);
+    }
+
+    /* Copy B -> A using direct DAC memcpy for reads and `hal_flash_write_dac`
+     * for writes. The 0.A.159 bench showed SDK `Flash_read` for 16 bytes
+     * works but 8 KB hangs (probably the SDK's INDIRECT_READ_XFER FIFO-
+     * burst loop wedges on multi-cycle reads after a DAC write). Bypassing
+     * the SDK entirely — pure memcpy from 0x60000000 + addr through the
+     * XIP read window — gives us the same hardware path the diagnostic
+     * `diag DAC xip` proved works.
+     *
+     * DAC writes (hal_flash_write_dac) toggle the DAC bit OFF on exit.
+     * We re-enable it at the top of each iter before the read memcpy. */
+    static uint8_t s_copy_buf[8192] __attribute__((aligned(64)));
     uint32_t remaining = image_size;
     uint32_t off = 0;
+    uint32_t iter = 0;
+    uint32_t total_iters = (image_size + sizeof(s_copy_buf) - 1U) / sizeof(s_copy_buf);
+    DebugP_log("[OTA] stage-copy starting (%lu iters of %u B, DAC-memcpy-read + DAC-write)\r\n",
+               (unsigned long)total_iters, (unsigned)sizeof(s_copy_buf));
+
+    #define DAC_CFG_REG_ADDR     0x0FC40000U
+    #define DAC_BIT              (1U << 7)
+
     while (remaining > 0) {
         uint32_t n = (remaining > sizeof(s_copy_buf)) ? sizeof(s_copy_buf)
                                                        : remaining;
-        /* hal_flash_write_dac requires page-aligned len; pad the tail
-         * with 0xFF (erased state) if the last chunk is short. */
         if (n < sizeof(s_copy_buf)) {
-            memset(s_copy_buf, 0xFF, sizeof(s_copy_buf));
+            memset(s_copy_buf + n, 0xFF, sizeof(s_copy_buf) - n);
         }
-        if (hal_flash_read(FW_BANK_B_OFFSET + off, s_copy_buf, n) != 0) return -1;
-        if (hal_flash_write_dac(LP_OTA_MAIN_LIVE_OFFSET + off, s_copy_buf,
-                                sizeof(s_copy_buf)) != 0) return -1;
+        uint32_t write_len = (n + 255U) & ~255U;
+        if (write_len > sizeof(s_copy_buf)) write_len = sizeof(s_copy_buf);
+
+        bool verbose = (iter < 4U) || ((iter & 0x7U) == 0U) || (iter + 1U == total_iters);
+        if (verbose) {
+            DebugP_log("[OTA] stage-copy iter %lu/%lu: r@0x%06lX w@0x%06lX len=%lu\r\n",
+                       (unsigned long)iter, (unsigned long)total_iters,
+                       (unsigned long)(FW_BANK_B_OFFSET + off),
+                       (unsigned long)(LP_OTA_MAIN_LIVE_OFFSET + off),
+                       (unsigned long)write_len);
+        }
+
+        /* Ensure DAC is enabled. hal_flash_write_dac always clears it on
+         * exit, so we re-enable here. Reads through 0x60000000+ only
+         * work when DAC bit is set. */
+        {
+            volatile uint32_t *cfg = (volatile uint32_t *)(uintptr_t)DAC_CFG_REG_ADDR;
+            *cfg = (*cfg) | DAC_BIT;
+        }
+
+        /* 0.A.183: read each byte via resolved_chip_addr() so redirected
+         * chunks in scratch get pulled from the correct location. Falls
+         * back to plain Bank-B reads when remap is empty (common case).
+         * Byte-at-a-time read with remap lookup is slow; do the lookup
+         * once per byte but skip ahead within an unmapped contiguous
+         * range. Most bytes are unmapped; the inner-loop check is cheap
+         * when s_remap_count is small. */
+        if (s_remap_count == 0U) {
+            /* Fast path: no redirects, plain Bank-B read. */
+            const volatile uint8_t *xip =
+                (const volatile uint8_t *)(uintptr_t)(0x60000000U + FW_BANK_B_OFFSET + off);
+            uint32_t *dst32 = (uint32_t *)s_copy_buf;
+            const volatile uint32_t *src32 = (const volatile uint32_t *)xip;
+            uint32_t words = n / 4U;
+            for (uint32_t w = 0; w < words; w++) dst32[w] = src32[w];
+            uint32_t tail = n - (words * 4U);
+            for (uint32_t b = 0; b < tail; b++) {
+                s_copy_buf[words * 4U + b] = xip[words * 4U + b];
+            }
+        } else {
+            /* Slow path: at least one chunk was redirected. Read byte-at-
+             * a-time via resolved_chip_addr. */
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t chip_addr = resolved_chip_addr(off + i);
+                s_copy_buf[i] = *(const volatile uint8_t *)
+                                (uintptr_t)(0x60000000U + chip_addr);
+            }
+        }
+
+        if (iter == 0U) {
+            DebugP_log("[OTA] iter0 source [0..15]: %02X %02X %02X %02X %02X %02X %02X %02X "
+                       "%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                       s_copy_buf[0], s_copy_buf[1], s_copy_buf[2], s_copy_buf[3],
+                       s_copy_buf[4], s_copy_buf[5], s_copy_buf[6], s_copy_buf[7],
+                       s_copy_buf[8], s_copy_buf[9], s_copy_buf[10], s_copy_buf[11],
+                       s_copy_buf[12], s_copy_buf[13], s_copy_buf[14], s_copy_buf[15]);
+            bool all_ff_or_zero = true;
+            for (int k = 0; k < 16; k++) {
+                if (s_copy_buf[k] != 0xFF && s_copy_buf[k] != 0x00) {
+                    all_ff_or_zero = false;
+                    break;
+                }
+            }
+            if (all_ff_or_zero) {
+                DebugP_log("[OTA] iter0 source is ALL 0x00/0xFF — aborting stage-copy "
+                           "(would brick Bank A)\r\n");
+                return -1;
+            }
+        }
+
+        /* 0.A.187: switch back to hal_flash_write_dac (DAC mode). 0.A.186
+         * bench: stage-copy via SDK `hal_flash_write` (INDIRECT_WRITE_XFER)
+         * fails with the historical CPSW-broken signature (`sdk=-1 sr1=0x02
+         * ctrl_post=0x60 verify=FF`) even though CPSW is closed at this
+         * point — INDIRECT_WRITE_XFER is broken in our runtime context
+         * regardless of CPSW state (see lp-am2434-runtime-flashwrite-
+         * unresolved.md). DAC writes via hal_flash_write_dac (with the
+         * 0.A.186 "keep DAC enabled" fix) now reliably program full
+         * data — proven by Bank B CHUNK writes hitting clean CRC. */
+        int wr_rc = hal_flash_write_dac(LP_OTA_MAIN_LIVE_OFFSET + off, s_copy_buf,
+                                    write_len);
+        if (wr_rc != 0) {
+            DebugP_log("[OTA] stage-copy iter %lu WRITE FAIL rc=%d\r\n",
+                       (unsigned long)iter, wr_rc);
+            return -1;
+        }
         off       += n;
         remaining -= n;
-        if ((off & 0x3FFFU) == 0) vTaskDelay(1);
+        iter++;
     }
+
+    /* Post-copy verification: full CRC32 of Bank A vs the expected
+     * CRC from FwBeginUpdate. If CRC matches, the ENTIRE image is
+     * bit-exact (a single-byte error anywhere would shift the CRC).
+     * Also do a 3-point spot-check to localize where any mismatch
+     * lives if CRC fails. */
+    {
+        /* Re-enable DAC (write_dac disabled it on exit). */
+        volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)0x0FC40000U;
+        *cfg_p = (*cfg_p) | (1U << 7);
+
+        /* Full CRC32 of Bank A from offset 0 to image_size. */
+        uint32_t crc = 0xFFFFFFFFu;
+        const volatile uint8_t *xip_a =
+            (const volatile uint8_t *)(uintptr_t)(0x60000000U + LP_OTA_MAIN_LIVE_OFFSET);
+        for (uint32_t i = 0; i < image_size; i++) {
+            uint8_t byte = xip_a[i];
+            crc ^= (uint32_t)byte;
+            for (int b = 0; b < 8; b++) {
+                crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+            }
+        }
+        uint32_t crc_a = ~crc;
+        bool crc_ok = (crc_a == s_image_expected_crc);
+        DebugP_log("[OTA] Bank-A full CRC32 = 0x%08lX  expected = 0x%08lX  %s\r\n",
+                   (unsigned long)crc_a,
+                   (unsigned long)s_image_expected_crc,
+                   crc_ok ? "MATCH (image bit-exact)" : "MISMATCH");
+
+        if (!crc_ok) {
+            /* Byte-by-byte A vs B scan — find first differing byte, count
+             * total mismatches, log the surrounding context. Tells us
+             * whether corruption is at a page boundary (256), iter
+             * boundary (8 KB), or scattered. */
+            const volatile uint8_t *xip_b =
+                (const volatile uint8_t *)(uintptr_t)(0x60000000U + FW_BANK_B_OFFSET);
+            int64_t first_diff = -1;
+            uint32_t total_diff = 0;
+            for (uint32_t i = 0; i < image_size; i++) {
+                if (xip_a[i] != xip_b[i]) {
+                    if (first_diff < 0) first_diff = (int64_t)i;
+                    total_diff++;
+                }
+            }
+            DebugP_log("[OTA] mismatch count = %lu of %lu bytes  first_diff @ image[+%ld] (chipA @0x%06lX)\r\n",
+                       (unsigned long)total_diff,
+                       (unsigned long)image_size,
+                       (long)first_diff,
+                       (long)(LP_OTA_MAIN_LIVE_OFFSET + (uint32_t)first_diff));
+            if (first_diff >= 0) {
+                /* Context: 16 bytes before + 16 bytes at/after the diff,
+                 * from both A and B. Use a safe start that avoids
+                 * negative indexing. */
+                uint32_t ctx_start = ((uint32_t)first_diff >= 8U)
+                                     ? ((uint32_t)first_diff - 8U) : 0U;
+                if (ctx_start + 16U > image_size) ctx_start = image_size - 16U;
+                uint8_t a16[16], b16[16];
+                for (int k = 0; k < 16; k++) {
+                    a16[k] = xip_a[ctx_start + k];
+                    b16[k] = xip_b[ctx_start + k];
+                }
+                DebugP_log("[OTA] A[+%lu..+%lu]: %02X %02X %02X %02X %02X %02X %02X %02X "
+                           "%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                           (unsigned long)ctx_start, (unsigned long)(ctx_start + 15U),
+                           a16[0], a16[1], a16[2], a16[3], a16[4], a16[5], a16[6], a16[7],
+                           a16[8], a16[9], a16[10], a16[11], a16[12], a16[13], a16[14], a16[15]);
+                DebugP_log("[OTA] B[+%lu..+%lu]: %02X %02X %02X %02X %02X %02X %02X %02X "
+                           "%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                           (unsigned long)ctx_start, (unsigned long)(ctx_start + 15U),
+                           b16[0], b16[1], b16[2], b16[3], b16[4], b16[5], b16[6], b16[7],
+                           b16[8], b16[9], b16[10], b16[11], b16[12], b16[13], b16[14], b16[15]);
+                /* Diagnose boundary alignment of first_diff. */
+                uint32_t fd = (uint32_t)first_diff;
+                const char *bnd =
+                    (fd % 8192U == 0U) ? "8 KB iter boundary"   :
+                    (fd % 4096U == 0U) ? "4 KB boundary"        :
+                    (fd % 1024U == 0U) ? "1 KB chunk boundary"  :
+                    (fd %  256U == 0U) ? "256 B page boundary"  :
+                    (fd %   64U == 0U) ? "64 B cache-line boundary" :
+                                          "non-aligned (mid-page)";
+                DebugP_log("[OTA] first_diff alignment: %s\r\n", bnd);
+            }
+            /* Don't trigger warm-reset on bad image — that's how we've
+             * been bricking Bank A. Return -1 so the caller aborts. */
+            return -1;
+        }
+    }
+    {
+        volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)0x0FC40000U;
+        *cfg_p = (*cfg_p) | (1U << 7);  /* re-enable DAC (write_dac disabled it) */
+
+    }
+    DebugP_log("[OTA] stage-copy completed (%lu iter, %lu B)\r\n",
+               (unsigned long)iter, (unsigned long)off);
     return 0;
 }
 
@@ -552,7 +899,10 @@ static void push_status_progress(int fd)
 {
     uint8_t body[64];
     uint16_t n = encode_status_progress(body, sizeof(body));
-    (void)send_frame(fd, LP_OTA_TAG_STATUS, body, n);
+    int rc = send_frame(fd, LP_OTA_TAG_STATUS, body, n);
+    if (rc != 0) {
+        DebugP_log("[OTA] push_status_progress send_frame FAIL rc=%d (TCP backpressure / closed?)\r\n", rc);
+    }
 }
 
 /* ─── Per-connection state ──────────────────────────────────────────────── */
@@ -588,54 +938,99 @@ static bool service_conn(ota_conn_t *c)
 
         switch (tag) {
             case LP_OTA_TAG_BEGIN: {
-                /* Option 1: buffer all chunks in MSRAM. No OSPI ops
-                 * happen until Activate (when Enet is closed first). */
+                /* Streaming OTA: erase Bank B up-front so each subsequent
+                 * Chunk can be written directly via hal_flash_write_dac.
+                 * No MSRAM image buffer required. */
                 fw_begin_t b;
                 if (decode_begin(body, bodylen, &b) != 0) {
                     push_status_error(c->fd, LP_OTA_ERR_DECODE, "FwBegin decode");
                     break;
                 }
-                if (b.total_size == 0 || b.total_size > LP_OTA_IMAGE_BUF_SIZE) {
+                if (b.total_size == 0 || b.total_size > LP_OTA_BANK_B_SIZE) {
                     DebugP_log("[OTA] BEGIN rejected size=%lu (max %u)\r\n",
                                (unsigned long)b.total_size,
-                               (unsigned)LP_OTA_IMAGE_BUF_SIZE);
+                               (unsigned)LP_OTA_BANK_B_SIZE);
                     push_status_error(c->fd, LP_OTA_ERR_TOO_BIG,
-                                      "image > LP_OTA_IMAGE_BUF_SIZE");
+                                      "image > LP_OTA_BANK_B_SIZE");
                     break;
                 }
-                DebugP_log("[OTA] BEGIN (buffered) size=%lu crc=0x%08lx ver=%s\r\n",
+                DebugP_log("[OTA] BEGIN (streaming) size=%lu crc=0x%08lx ver=%s\r\n",
                            (unsigned long)b.total_size,
                            (unsigned long)b.crc32, b.version);
-                /* Reset buffer state. No OSPI access — Begin used to
-                 * lazy-erase Bank B but that path is dead post-pivot. */
-                s_image_bytes_buffered = 0;
-                s_image_total_size     = b.total_size;
-                s_image_expected_crc   = b.crc32;
-                s_image_buffer_active  = true;
-                /* b.version is a 32-byte char array, always non-null;
-                 * decode_begin null-terminates it on success. */
+                s_image_bytes_written = 0;
+                s_image_total_size    = b.total_size;
+                s_image_expected_crc  = b.crc32;
+                s_image_active        = true;
+                /* 0.A.183: reset scratch remap state per BEGIN. */
+                s_remap_count         = 0;
+                s_scratch_next        = 0;
                 strncpy(s_image_staged_version, b.version,
                         sizeof(s_image_staged_version) - 1);
                 s_image_staged_version[sizeof(s_image_staged_version) - 1] = '\0';
-                /* Optional zero-fill of the receive region so a partial
-                 * image followed by Activate doesn't carry stale bytes
-                 * from a prior run. Cheap relative to TCP round-trips. */
-                memset(s_image_buf, 0xFF, b.total_size);
+
+                /* Erase Bank B using the bare-metal STIG path so it
+                 * works while CPSW + lwIP are still running. The SDK's
+                 * `hal_flash_erase_sector` (Flash_eraseBlk) hangs in
+                 * this context (0.A.144 bench evidence: BEGIN erase
+                 * with CPSW active never returned).
+                 *
+                 * Block-erase granularity is 256 KB. Erase enough
+                 * blocks to cover the full image size, rounded up. */
+                uint32_t blocks_needed = (b.total_size + 0x3FFFFu) / 0x40000u;  /* ceil(size / 256KB) */
+                if (blocks_needed == 0) blocks_needed = 1;
+                DebugP_log("[OTA] BEGIN erasing %lu Bank-B block(s) + 1 scratch block (%lu KB)\r\n",
+                           (unsigned long)blocks_needed,
+                           (unsigned long)((blocks_needed + 1) * 256));
+                uint32_t erase_start_us = ClockP_getTimeUsec();
+                for (uint32_t i = 0; i < blocks_needed; i++) {
+                    uint32_t blk_addr = FW_BANK_B_OFFSET + (i * 0x40000u);
+                    int rc = hal_flash_erase_block_dac(blk_addr);
+                    if (rc != 0) {
+                        DebugP_log("[OTA] BEGIN erase fail @0x%06lX rc=%d\r\n",
+                                   (unsigned long)blk_addr, rc);
+                        s_image_active = false;
+                        push_status_error(c->fd, LP_OTA_ERR_FINALIZE,
+                                          "Bank B erase failed");
+                        break;
+                    }
+                }
+                if (!s_image_active) break;
+                /* Also erase the scratch block at LP_OTA_SCRATCH_OFFSET so
+                 * any chunk redirected here lands on fresh 0xFF pages. */
+                {
+                    int rc = hal_flash_erase_block_dac(LP_OTA_SCRATCH_OFFSET);
+                    if (rc != 0) {
+                        DebugP_log("[OTA] BEGIN scratch erase fail @0x%06lX rc=%d\r\n",
+                                   (unsigned long)LP_OTA_SCRATCH_OFFSET, rc);
+                        s_image_active = false;
+                        push_status_error(c->fd, LP_OTA_ERR_FINALIZE,
+                                          "scratch erase failed");
+                        break;
+                    }
+                }
+                uint32_t erase_us = ClockP_getTimeUsec() - erase_start_us;
+                DebugP_log("[OTA] BEGIN erase complete in %lu ms\r\n",
+                           (unsigned long)(erase_us / 1000U));
                 push_status_progress(c->fd);
                 break;
             }
             case LP_OTA_TAG_CHUNK: {
-                /* Option 1: copy chunk into MSRAM buffer. */
+                /* Streaming: write chunk directly to flash via DAC mode. */
                 fw_chunk_t k;
                 if (decode_chunk(body, bodylen, &k) != 0 || k.data == NULL) {
                     push_status_error(c->fd, LP_OTA_ERR_DECODE, "FwChunk decode");
                     break;
                 }
-                if (!s_image_buffer_active) {
+                if (!s_image_active) {
                     push_status_error(c->fd, LP_OTA_ERR_CHUNK,
                                       "chunk before begin");
                     break;
                 }
+                /* Debug build: log EVERY chunk so we can see exactly
+                 * where the stream stalls. 32 KB / 1 KB = 32 lines max. */
+                DebugP_log("[OTA] CHUNK off=%lu len=%lu\r\n",
+                           (unsigned long)k.offset,
+                           (unsigned long)k.data_len);
                 if (k.offset + k.data_len > s_image_total_size) {
                     DebugP_log("[OTA] CHUNK overflow off=%lu len=%lu total=%lu\r\n",
                                (unsigned long)k.offset,
@@ -645,9 +1040,25 @@ static bool service_conn(ota_conn_t *c)
                                       "chunk past declared image size");
                     break;
                 }
-                /* Verify per-chunk CRC before committing to buffer so a
-                 * single corrupted chunk can be retransmitted from the
-                 * bridge without invalidating the whole image. */
+                /* Require in-order delivery for now — bridge does this
+                 * today (`orbitOtaPush.ts`). Out-of-order would require
+                 * a sparse-tracking bitmap; skip for the first cut. */
+                if (k.offset != s_image_bytes_written) {
+                    DebugP_log("[OTA] CHUNK out-of-order off=%lu expected=%lu\r\n",
+                               (unsigned long)k.offset,
+                               (unsigned long)s_image_bytes_written);
+                    push_status_error(c->fd, LP_OTA_ERR_CHUNK,
+                                      "out-of-order chunk");
+                    break;
+                }
+                /* Chunk offset must be page-aligned (every chunk except
+                 * possibly the very last writes whole pages). */
+                if ((k.offset % LP_OTA_FLASH_PAGE_SIZE) != 0) {
+                    push_status_error(c->fd, LP_OTA_ERR_CHUNK,
+                                      "chunk offset not page-aligned");
+                    break;
+                }
+                /* Verify per-chunk CRC. */
                 uint32_t calc = lp_ota_crc32(k.data, k.data_len);
                 if (calc != k.chunk_crc) {
                     DebugP_log("[OTA] CHUNK crc mismatch off=%lu got=0x%08lx want=0x%08lx\r\n",
@@ -658,134 +1069,281 @@ static bool service_conn(ota_conn_t *c)
                                       "chunk CRC mismatch");
                     break;
                 }
-                memcpy(&s_image_buf[k.offset], k.data, k.data_len);
-                s_image_bytes_buffered = k.offset + k.data_len;
+
+                /* Write whole pages directly from the receive buffer.
+                 * The last chunk may be < page-multiple; copy its
+                 * remainder to s_page_pad, 0xFF-pad, and write as one
+                 * full page. */
+                uint32_t full_pages_bytes = (k.data_len / LP_OTA_FLASH_PAGE_SIZE)
+                                            * LP_OTA_FLASH_PAGE_SIZE;
+                uint32_t remainder         = k.data_len - full_pages_bytes;
+
+                /* 0.A.183 Option 2: write to Bank B; verify via XIP memcpy;
+                 * on mismatch redirect to a fresh scratch page (different
+                 * chip address = no same-page back-to-back PP = no wedge).
+                 * Up to a few scratch retries per chunk if scratch itself
+                 * gets byte-loss. Builds s_remap[] which FINALIZE CRC and
+                 * stage-copy honor. */
+                bool chunk_clean = false;
+                {
+                    /* Helper: write `payload` bytes to `phys_addr`, padding
+                     * the tail with 0xFF if needed. payload is k.data_len
+                     * bytes (may be < LP_OTA_FLASH_PAGE_SIZE for last chunk).
+                     * Returns rc from hal_flash_write_dac (0 = OK). */
+                    /* Attempt 0: write to Bank B at k.offset. */
+                    uint32_t attempt_addr = FW_BANK_B_OFFSET + k.offset;
+                    bool last_attempt_was_bank_b = true;
+                    uint32_t scratch_off_used = 0;
+                    int max_attempts = 4;
+                    for (int attempt = 0; attempt < max_attempts && !chunk_clean; attempt++) {
+                        if (full_pages_bytes > 0) {
+                            int rc = hal_flash_write_dac(attempt_addr,
+                                                         k.data, full_pages_bytes);
+                            if (rc != 0) {
+                                DebugP_log("[OTA] CHUNK DAC write FAIL @0x%06lX rc=%d\r\n",
+                                           (unsigned long)attempt_addr, rc);
+                                /* fall through to next attempt slot */
+                            }
+                        }
+                        if (remainder > 0) {
+                            memset(s_page_pad, 0xFF, LP_OTA_FLASH_PAGE_SIZE);
+                            memcpy(s_page_pad, k.data + full_pages_bytes, remainder);
+                            int rc = hal_flash_write_dac(
+                                attempt_addr + full_pages_bytes,
+                                s_page_pad, LP_OTA_FLASH_PAGE_SIZE);
+                            if (rc != 0) {
+                                DebugP_log("[OTA] CHUNK DAC pad FAIL @0x%06lX rc=%d\r\n",
+                                           (unsigned long)(attempt_addr + full_pages_bytes), rc);
+                            }
+                        }
+                        /* Verify via XIP memcpy (reads don't wedge the chip). */
+                        volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)0x0FC40000U;
+                        *cfg_p = (*cfg_p) | (1U << 7);
+                        const volatile uint8_t *xip =
+                            (const volatile uint8_t *)(uintptr_t)(0x60000000U + attempt_addr);
+                        /* 0.A.184: explicit cache invalidate before read so
+                         * we definitely see fresh chip bytes (not stale
+                         * cache lines from before the write). */
+                        CacheP_inv((void *)xip, k.data_len, CacheP_TYPE_ALL);
+                        bool mismatch = false;
+                        int32_t first_mismatch = -1;
+                        for (uint32_t i = 0; i < k.data_len; i++) {
+                            if (xip[i] != k.data[i]) {
+                                mismatch = true;
+                                first_mismatch = (int32_t)i;
+                                break;
+                            }
+                        }
+                        /* 0.A.184: diagnostic for FIRST chunk failure of
+                         * each OTA. Tells us whether the write half-worked
+                         * (mostly correct, partial tail loss) vs fully
+                         * failed (all FF / all garbage). */
+                        if (mismatch && k.offset == 0 && attempt < 2) {
+                            uint8_t r[16], s[16];
+                            uint32_t base = (first_mismatch > 0)
+                                            ? (uint32_t)first_mismatch & ~0x7U : 0;
+                            for (int x = 0; x < 16 && base + x < k.data_len; x++) {
+                                r[x] = xip[base + x];
+                                s[x] = k.data[base + x];
+                            }
+                            DebugP_log("[OTA] CHUNK0 attempt%d first_diff @%ld\r\n",
+                                       attempt, (long)first_mismatch);
+                            DebugP_log("[OTA]   chip @0x%06lX+%lu: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                                       (unsigned long)attempt_addr,
+                                       (unsigned long)base,
+                                       r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                                       r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
+                            DebugP_log("[OTA]   src                 : %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                                       s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                                       s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
+                        }
+                        if (!mismatch) {
+                            chunk_clean = true;
+                            if (!last_attempt_was_bank_b) {
+                                /* Record remap entry: image bytes [k.offset,
+                                 * k.offset+k.data_len) → scratch at
+                                 * scratch_off_used. */
+                                if (s_remap_count >= LP_OTA_REMAP_MAX) {
+                                    DebugP_log("[OTA] CHUNK remap table full (>%lu)\r\n",
+                                               (unsigned long)LP_OTA_REMAP_MAX);
+                                    push_status_error(c->fd, LP_OTA_ERR_CHUNK,
+                                                      "remap table overflow");
+                                    break;
+                                }
+                                s_remap[s_remap_count].image_offset   = k.offset;
+                                s_remap[s_remap_count].length         = k.data_len;
+                                s_remap[s_remap_count].scratch_offset = scratch_off_used;
+                                s_remap_count++;
+                                DebugP_log("[OTA] CHUNK redirected off=0x%06lX -> scratch+0x%06lX (remap #%lu)\r\n",
+                                           (unsigned long)k.offset,
+                                           (unsigned long)scratch_off_used,
+                                           (unsigned long)s_remap_count);
+                            }
+                            break;
+                        }
+                        /* Mismatch: pick next scratch slot for retry. */
+                        /* Pad chunk size up to a page boundary for the
+                         * scratch allocation so writes are page-aligned. */
+                        uint32_t chunk_pages = (k.data_len + LP_OTA_FLASH_PAGE_SIZE - 1U)
+                                              / LP_OTA_FLASH_PAGE_SIZE;
+                        uint32_t alloc_bytes = chunk_pages * LP_OTA_FLASH_PAGE_SIZE;
+                        if (s_scratch_next + alloc_bytes > LP_OTA_SCRATCH_SIZE) {
+                            DebugP_log("[OTA] CHUNK scratch region full (%lu+%lu > %u)\r\n",
+                                       (unsigned long)s_scratch_next,
+                                       (unsigned long)alloc_bytes,
+                                       (unsigned)LP_OTA_SCRATCH_SIZE);
+                            push_status_error(c->fd, LP_OTA_ERR_CHUNK,
+                                              "scratch region exhausted");
+                            break;
+                        }
+                        scratch_off_used     = s_scratch_next;
+                        attempt_addr         = LP_OTA_SCRATCH_OFFSET + s_scratch_next;
+                        s_scratch_next      += alloc_bytes;
+                        last_attempt_was_bank_b = false;
+                        DebugP_log("[OTA] CHUNK off=0x%06lX verify mismatch (attempt %d) -> retry to scratch+0x%06lX\r\n",
+                                   (unsigned long)k.offset, attempt,
+                                   (unsigned long)scratch_off_used);
+                    }
+                }
+                if (!chunk_clean) {
+                    DebugP_log("[OTA] CHUNK off=0x%06lX exhausted scratch retries\r\n",
+                               (unsigned long)k.offset);
+                    push_status_error(c->fd, LP_OTA_ERR_CHUNK,
+                                      "chunk could not be cleanly written");
+                    break;
+                }
+                s_image_bytes_written += k.data_len;
                 push_status_progress(c->fd);
                 break;
             }
             case LP_OTA_TAG_FINALIZE: {
-                /* Option 1: verify CRC across the whole buffer. The
-                 * actual OSPI write is deferred to Activate so we have
-                 * a chance to ack the bridge before closing Enet. */
+                /* Streaming finalize: image is already in Bank B. Read
+                 * back the whole image incrementally and recompute CRC32
+                 * to verify. */
+                DebugP_log("[OTA] FINALIZE entered (bytes_written=%lu of %lu)\r\n",
+                           (unsigned long)s_image_bytes_written,
+                           (unsigned long)s_image_total_size);
                 uint32_t expected;
                 if (decode_finalize(body, bodylen, &expected) != 0) {
                     push_status_error(c->fd, LP_OTA_ERR_DECODE, "FwFinalize decode");
                     break;
                 }
-                if (!s_image_buffer_active) {
+                if (!s_image_active) {
                     push_status_error(c->fd, LP_OTA_ERR_FINALIZE,
                                       "finalize before begin");
                     break;
                 }
-                if (s_image_bytes_buffered != s_image_total_size) {
+                if (s_image_bytes_written != s_image_total_size) {
                     DebugP_log("[OTA] FINALIZE incomplete: bytes=%lu of %lu\r\n",
-                               (unsigned long)s_image_bytes_buffered,
+                               (unsigned long)s_image_bytes_written,
                                (unsigned long)s_image_total_size);
                     push_status_error(c->fd, LP_OTA_ERR_FINALIZE,
                                       "incomplete transfer");
                     break;
                 }
-                uint32_t calc = lp_ota_crc32(s_image_buf, s_image_total_size);
-                if (calc != expected) {
-                    DebugP_log("[OTA] FINALIZE crc mismatch got=0x%08lx want=0x%08lx\r\n",
-                               (unsigned long)calc, (unsigned long)expected);
-                    push_status_error(c->fd, LP_OTA_ERR_FINALIZE,
-                                      "image CRC mismatch");
-                    break;
+                /* 0.A.183: full-image CRC honoring the scratch remap table.
+                 * For each image byte, look up its physical chip address
+                 * via resolved_chip_addr() — most bytes come from Bank B,
+                 * but redirected chunks come from scratch. The remap
+                 * lookup is O(N) per byte but s_remap_count is tiny so
+                 * the total walk is ~500 KB × constant. */
+                {
+                    volatile uint32_t *cfg_p = (volatile uint32_t *)(uintptr_t)0x0FC40000U;
+                    *cfg_p = (*cfg_p) | (1U << 7);   /* ensure DAC enabled */
+                    DebugP_log("[OTA] FINALIZE remap entries: %lu\r\n",
+                               (unsigned long)s_remap_count);
+                    uint32_t crc = 0xFFFFFFFFu;
+                    for (uint32_t i = 0; i < s_image_total_size; i++) {
+                        uint32_t chip_addr = resolved_chip_addr(i);
+                        uint8_t byte = *(const volatile uint8_t *)
+                                       (uintptr_t)(0x60000000U + chip_addr);
+                        crc ^= (uint32_t)byte;
+                        for (int b = 0; b < 8; b++) {
+                            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+                        }
+                    }
+                    uint32_t crc_b = ~crc;
+                    bool crc_ok = (crc_b == expected);
+                    DebugP_log("[OTA] FINALIZE Bank-B (remapped) CRC32 = 0x%08lX  expected = 0x%08lX  %s\r\n",
+                               (unsigned long)crc_b,
+                               (unsigned long)expected,
+                               crc_ok ? "MATCH" : "MISMATCH");
+                    if (!crc_ok) {
+                        /* Per-chunk scratch retry should have caught all
+                         * byte-loss before FINALIZE. If we still have a
+                         * CRC mismatch, something more fundamental is
+                         * wrong (chunk CRCs on wire don't match what we
+                         * wrote, etc.). Bridge can re-OTA from BEGIN. */
+                        s_image_active = false;
+                        s_image_bytes_written = 0;
+                        push_status_error(c->fd, LP_OTA_ERR_BANK_B_REDO,
+                                          "post-remap CRC mismatch — please re-BEGIN");
+                        break;
+                    }
                 }
-                DebugP_log("[OTA] FINALIZE ok crc=0x%08lx (buffered, ready for activate)\r\n",
-                           (unsigned long)expected);
+                DebugP_log("[OTA] FINALIZE ok (Bank B verified bit-exact)\r\n");
                 push_status_progress(c->fd);
                 break;
             }
             case LP_OTA_TAG_ACTIVATE: {
-                /* Option 1: close Enet, then drain MSRAM buffer to the
-                 * live OSPI offset 0x80000, then warm-reset.
+                /* Streaming OTA: image is already in Bank B and CRC-
+                 * verified by FINALIZE. ACTIVATE just needs to decide
+                 * whether to promote Bank B → Bank A and warm-reset.
                  *
-                 * Once Enet is closed the bridge's TCP connection
-                 * drops; the bridge sees disconnection and treats it
-                 * the same as a successful reset (per orbitOtaPush.ts
-                 * comment block around line 343). Anything that goes
-                 * wrong after this point is silent from the bridge's
-                 * perspective; UART logs are the only post-mortem. */
+                 * If `reboot=0` (bench POC) we're done — Bank B holds
+                 * the validated image and Bank A is unchanged.
+                 *
+                 * If `reboot=1` (production OTA) we tear down Enet,
+                 * copy Bank B → Bank A using `hal_flash_write_dac`, then
+                 * warm-reset into the new firmware. */
                 bool reboot = false;
                 if (decode_activate(body, bodylen, &reboot) != 0) {
                     push_status_error(c->fd, LP_OTA_ERR_DECODE, "FwActivate decode");
                     break;
                 }
-                if (!s_image_buffer_active ||
-                    s_image_bytes_buffered != s_image_total_size) {
+                if (!s_image_active || s_image_bytes_written != s_image_total_size) {
                     push_status_error(c->fd, LP_OTA_ERR_ACTIVATE,
-                                      "no verified image buffered");
+                                      "no verified image in Bank B");
                     break;
                 }
-                DebugP_log("[OTA] ACTIVATE buffered=%lu reboot=%d — closing Enet\r\n",
+                DebugP_log("[OTA] ACTIVATE image_in_bank_b=%lu reboot=%d\r\n",
                            (unsigned long)s_image_total_size, (int)reboot);
-                /* Ack BEFORE we close Enet — the bridge needs at least
-                 * one frame back to know we accepted Activate. */
+
+                /* Ack first so the bridge knows we accepted Activate. */
                 push_status_progress(c->fd);
-                /* Drain TCP TX before tearing down Enet so the ack
-                 * actually goes out on the wire. */
-                vTaskDelay(pdMS_TO_TICKS(50));
+                vTaskDelay(pdMS_TO_TICKS(50));  /* drain TCP TX */
 
-                /* Silence the periodic PHY register polling task BEFORE
-                 * closing Enet. Otherwise its ClockP timer keeps firing and
-                 * the task asserts on the just-closed Enet handle
-                 * (test_enet_cpsw.c:215 / test_enet.c:391), eventually
-                 * wedging the CPU at 100 % via the assertion handler. */
+                if (!reboot) {
+                    /* Bench / dry-run case: image is committed to Bank B
+                     * but we don't promote it. Caller can verify, then
+                     * trigger a real activate via a follow-up FwActivate
+                     * with reboot=1. */
+                    DebugP_log("[OTA] reboot=0 — Bank B image committed, no promotion\r\n");
+                    s_image_active = false;
+                    break;
+                }
+
+                /* Real activate: close Enet, copy B → A, warm-reset. */
+                DebugP_log("[OTA] reboot=1 — closing Enet for stage-copy + reboot\r\n");
+
+                /* Silence PHY-poll task FIRST, then EnetApp_driverClose.
+                 * Without this, the polling task fires assertions on the
+                 * just-closed handle and wedges CPU at 100 %. */
                 extern void EnetApp_stopPhyRegisterPollingTask(void);
-                DebugP_log("[OTA] stopping PHY-poll task ...\r\n");
                 EnetApp_stopPhyRegisterPollingTask();
-
-                /* Close Enet to drop the runtime out of the broken
-                 * state. After this, lwip is dead and any further
-                 * UART log lines are our only visibility. */
                 DebugP_log("[OTA] EnetApp_driverClose ...\r\n");
                 EnetApp_driverClose(ENET_CPSW_3G, 0);
 
-                /* === Experiment A (2026-05-12) — full driver teardown ====
-                 * Hypothesis: CPSW-close alone wasn't enough because some
-                 * OTHER syscfg-initialised driver (I2C, EEPROM, OSPI's
-                 * own boot-time PHY-tune state, etc.) is what wedges
-                 * Flash_write. The auto-flasher's NoRTOS image initialises
-                 * a far smaller surface — basically just OSPI + Flash —
-                 * and it writes fine. So: tear down everything we can,
-                 * then selectively re-init only OSPI + Flash, and try
-                 * Flash_write from that minimal state.
-                 *
-                 * We keep UART alive: closing CONFIG_UART_CONSOLE (1) kills
-                 * DebugP_log, blinding the diagnostic. The auto-flasher
-                 * also uses UART for its own logs, so this isn't a
-                 * difference vs the working path. */
+                /* Tear down the rest of syscfg drivers; selectively re-init
+                 * just OSPI + Flash (UART left alive for DebugP_log). */
                 DebugP_log("[OTA] Closing Board+Drivers (Flash, EEPROM, I2C, OSPI; UART kept) ...\r\n");
                 Board_flashClose();
                 Board_eepromClose();
                 Drivers_i2cClose();
                 Drivers_ospiClose();
-                /* Drivers_uartClose intentionally skipped — DebugP uses UART1 */
                 vTaskDelay(pdMS_TO_TICKS(50));
 
-                /* === Experiment B (2026-05-12) — hardware-reset OSPI peripheral ===
-                 * Experiment A proved software-only driver teardown isn't
-                 * enough. `Drivers_ospiClose` only resets driver state — the
-                 * OSPI peripheral registers still carry whatever SBL set up
-                 * for XIP boot. Cycle the peripheral hardware itself via
-                 * TISCI / Sciclient PM (module id 75 = TISCI_DEV_FSS0_OSPI_0).
-                 * This is the strongest peripheral-level reset short of a
-                 * full SoC reset — closer to what the auto-flasher gets when
-                 * it boots cold via JTAG into a freshly-reset OSPI block.
-                 *
-                 * We tried this alone in 0.A.104 (without driver teardown);
-                 * combining both has never been tested. Brick-safe: only
-                 * resets the OSPI peripheral, not the chip. */
-                /* Experiments B / B-fix (0.A.125, 0.A.126) confirmed PM-reset
-                 * of FSS0_OSPI_0 is strictly harmful — even with
-                 * `Sciclient_pmSetModuleState(SW_STATE_ON)` afterward, the
-                 * first `hal_flash_erase_sector` wedged silently. Code
-                 * removed; Experiment C now runs against the 0.A.124 baseline
-                 * (Drivers_close + selective re-open, no peripheral reset). */
-
-                DebugP_log("[OTA] Re-opening OSPI + Flash (selective) ...\r\n");
+                DebugP_log("[OTA] Re-opening OSPI + Flash ...\r\n");
                 Drivers_ospiOpen();
                 int32_t flash_rc = Board_flashOpen();
                 DebugP_log("[OTA] re-open: ospi=%p flash=%p flash_rc=%ld\r\n",
@@ -794,157 +1352,47 @@ static bool service_conn(ota_conn_t *c)
                            (long)flash_rc);
                 if (gOspiHandle[CONFIG_OSPI0] == NULL ||
                     gFlashHandle[CONFIG_FLASH0] == NULL) {
-                    DebugP_log("[OTA] re-open FAILED — cannot test Flash_write. "
-                               "(Bank A intact; reboot to recover network.)\r\n");
+                    DebugP_log("[OTA] re-open FAILED — Bank A intact, manual recovery required\r\n");
                     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
                 }
-                /* === Option 1 bench-POC target: BANK B (0x900000),
-                 * NOT live (0x80000). Bank B is non-bootable scratch —
-                 * if Flash_write works post-Enet-close, we see success
-                 * here; if it doesn't, the LP keeps running fine on
-                 * the live image (Bank A is untouched). When/if the
-                 * POC validates, switch this back to LP_OTA_MAIN_LIVE_OFFSET
-                 * for a real activate. */
-                const uint32_t TEST_TARGET = FW_BANK_B_OFFSET;  /* 0x900000 */
-                DebugP_log("[OTA] Enet closed; flashing %lu B to 0x%06lx (Bank B test)\r\n",
-                           (unsigned long)s_image_total_size,
-                           (unsigned long)TEST_TARGET);
 
-                /* CANCEL any stuck INDIRECT_WRITE_XFER state from prior
-                 * runtime attempts BEFORE the SDK Flash_eraseBlk runs.
-                 * Empirically (0.A.140 vs 0.A.141 regression): leaving the
-                 * CANCEL until after the erase causes Flash_eraseBlk to
-                 * hang inside its WIP-poll loop. The CANCEL write is a
-                 * no-op when the register is already clean (which it
-                 * usually is on a fresh boot) but the side-effects of
-                 * the W1C bits seem to nudge the controller into a state
-                 * the SDK can drive. Cheap insurance either way. */
+                /* CANCEL any stuck INDIRECT_WRITE_XFER state before the
+                 * Bank A erase loop inside lp_ota_stage_copy_b_to_a. */
                 hal_flash_clear_indirect_state();
 
-                /* Erase only the sectors we actually need to write,
-                 * not the full 1 MB main region — much faster, and
-                 * Bank B isn't booted from anyway. */
-                uint32_t erase_bytes = s_image_total_size;
-                if (erase_bytes < 4096U) erase_bytes = 4096U;
-                int erase_err = 0;
-                for (uint32_t off = 0; off < erase_bytes; off += 4096U) {
-                    if (hal_flash_erase_sector(TEST_TARGET + off) != 0) {
-                        DebugP_log("[OTA] erase fail @0x%06lx\r\n",
-                                   (unsigned long)(TEST_TARGET + off));
-                        erase_err = 1;
-                        break;
-                    }
-                }
-                if (erase_err) {
-                    DebugP_log("[OTA] activate erase FAILED post-close (unexpected — erase worked pre-close)\r\n");
+                /* Stage copy Bank B → Bank A using hal_flash_write_dac.
+                 * Erases Bank A in 4 KB sectors then copies in 256-byte
+                 * pages. Total ~1 s for a 485 KB image. */
+                DebugP_log("[OTA] staging Bank B -> Bank A (%lu B)\r\n",
+                           (unsigned long)s_image_total_size);
+                if (lp_ota_stage_copy_b_to_a(s_image_total_size) != 0) {
+                    DebugP_log("[OTA] stage copy FAILED — Bank A may be partially overwritten. "
+                               "Recovery: re-flash via Flash-LP.ps1.\r\n");
                     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
                 }
+                DebugP_log("[OTA] stage copy ok — warm-resetting into new firmware\r\n");
+                /* 0.A.162: 5-second pause after verify diagnostic so the
+                 * UART can drain and the bench operator can read the
+                 * A==B / A!=B verdict BEFORE warm-reset wipes the screen. */
+                vTaskDelay(pdMS_TO_TICKS(5000));
 
-                /* DAC-mode page-program loop is now in
-                 * `Platform/hal_flash.c::hal_flash_write_dac`. The
-                 * function wraps the write loop in `vTaskSuspendAll` so
-                 * the CPSW PHY-poll task can't preempt mid-write. Image
-                 * length is a multiple of the chip's 256-byte page size
-                 * (validated implicitly by the buffer-fill path; OTA
-                 * images are always page-aligned). */
-                DebugP_log("[OTA] starting DAC-mode write loop (%lu B -> 0x%06lX)\r\n",
-                           (unsigned long)s_image_total_size,
-                           (unsigned long)TEST_TARGET);
-                uint32_t loop_start_us = ClockP_getTimeUsec();
-                int dac_rc = hal_flash_write_dac(TEST_TARGET, s_image_buf,
-                                                 s_image_total_size);
-                uint32_t loop_us = ClockP_getTimeUsec() - loop_start_us;
-                DebugP_log("[OTA] hal_flash_write_dac: rc=%d, %lu B in %lu us\r\n",
-                           dac_rc,
-                           (unsigned long)s_image_total_size,
-                           (unsigned long)loop_us);
-                int write_err = (dac_rc != 0) ? 1 : 0;
+                /* 0.A.163: send Cypress software reset BEFORE the SoC
+                 * warm-reset. The chip's volatile config still says
+                 * "QPI+DTR" from our Flash_open; the next SBL boot
+                 * tries to issue setup commands single-line and fails
+                 * because the chip isn't listening on the single-line
+                 * protocol. Software reset (RSTEN+RST) clears volatile
+                 * config and returns the chip to factory single-line
+                 * SDR — same state as if we'd power-cycled. */
+                DebugP_log("[OTA] chip soft-reset (RSTEN+RST) before warm-reset\r\n");
+                int rst_rc = hal_flash_chip_soft_reset();
+                DebugP_log("[OTA] chip soft-reset rc=%d\r\n", rst_rc);
+                /* Give UART one more tick to drain. */
+                vTaskDelay(pdMS_TO_TICKS(100));
 
-                /* Readback verification — best-effort. CPSW PHY-poll task may
-                 * preempt and assert before all 5 reads complete, but the
-                 * DAC PP loop above is already proven (74.7 ms, err=0 in
-                 * 0.A.137). Reads use SDK `hal_flash_read` (XIP/INDIRECT
-                 * path; unaffected by INDIRECT_WRITE wedge). Each call does
-                 * its own atomic_enter/exit so we don't nest with the loop
-                 * suspend above. */
-                if (!write_err) {
-                    const uint32_t sample_offsets[] = {0U, 0x1000U, 0x2000U, 0x4000U, 0x7F00U};
-                    for (uint32_t i = 0; i < sizeof(sample_offsets)/sizeof(sample_offsets[0]); i++) {
-                        uint32_t off = sample_offsets[i];
-                        if (off >= s_image_total_size) continue;
-                        uint8_t rb[8] = {0};
-                        if (hal_flash_read(TEST_TARGET + off, rb, sizeof(rb)) != 0) {
-                            DebugP_log("[DAC] verify @0x%06lX READ FAILED\r\n",
-                                       (unsigned long)(TEST_TARGET + off));
-                            continue;
-                        }
-                        bool match = (memcmp(rb, &s_image_buf[off], sizeof(rb)) == 0);
-                        DebugP_log("[DAC] verify @0x%06lX rdb=%02X %02X %02X %02X %02X %02X %02X %02X %s\r\n",
-                                   (unsigned long)(TEST_TARGET + off),
-                                   rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7],
-                                   match ? "OK" : "MISMATCH");
-                        if (!match) write_err = 1;
-                    }
-                }
-                if (write_err) {
-                    DebugP_log("[OTA] activate DAC-MODE PP FAILED too. Both INDIRECT and DAC "
-                               "transfer mechanisms wedged in our runtime — wedge is below "
-                               "all software-reachable OSPI controller paths. File TI E2E "
-                               "ticket; bridge-side flash is the customer path.\r\n");
-                    /* Halt: bridge is gone, Bank A is intact, LP is
-                     * still running fine. A JTAG operator (or
-                     * Flash-LP.ps1) can recover by re-flashing. */
-                    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
-                }
-                /* === Experiment E SUCCESS PATH ===
-                 * DAC-mode PP loop completed. The OSPI controller's DAC
-                 * (Direct Access Controller) path works where INDIRECT_WRITE_XFER
-                 * stalls. This isolates the bug to the SRAM/INDIRECT
-                 * subsystem of the controller — the chip and the OSPI bus
-                 * itself are fine. We have a shippable workaround (DAC mode
-                 * writes) and a precise repro for the TI E2E ticket. */
-                DebugP_log("[OTA] activate SUCCESS via DAC-MODE PP: %lu B flashed to 0x%06lX (%lu pages)\r\n",
-                           (unsigned long)s_image_total_size,
-                           (unsigned long)TEST_TARGET,
-                           (unsigned long)(s_image_total_size / 256U));
-                /* Sanity read-back: compare a few bytes from OSPI vs
-                 * buffer. Cheap correctness check that catches a
-                 * "wrote 0xFF, OSPI claims OK" silent corruption. */
-                {
-                    uint8_t check[16] = {0};
-                    if (hal_flash_read(TEST_TARGET, check, sizeof(check)) == 0) {
-                        DebugP_log("[OTA] readback @0x%06lX: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-                                   (unsigned long)TEST_TARGET,
-                                   check[0], check[1], check[2], check[3],
-                                   check[4], check[5], check[6], check[7]);
-                        DebugP_log("[OTA] expected         : %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-                                   s_image_buf[0], s_image_buf[1], s_image_buf[2], s_image_buf[3],
-                                   s_image_buf[4], s_image_buf[5], s_image_buf[6], s_image_buf[7]);
-                    }
-                }
-                s_image_buffer_active = false;
-
-                /* If the bridge requested reboot (production OTA flow), do
-                 * the staging copy from Bank B → Bank A and warm-reset
-                 * into the new firmware. Otherwise (bench POC with
-                 * --no-reboot), leave Bank A alone — Bank B is just a
-                 * scratch validation of the DAC write path. */
-                if (reboot && TEST_TARGET == FW_BANK_B_OFFSET) {
-                    DebugP_log("[OTA] reboot=1 — staging Bank B -> Bank A (%lu B)\r\n",
-                               (unsigned long)s_image_total_size);
-                    if (lp_ota_stage_copy_b_to_a(s_image_total_size) != 0) {
-                        DebugP_log("[OTA] stage copy FAILED — Bank A may be partially overwritten. "
-                                   "Recovery: re-flash via Flash-LP.ps1.\r\n");
-                        while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
-                    }
-                    DebugP_log("[OTA] stage copy ok — warm-resetting into new firmware\r\n");
-                    lp_ota_warm_reset();  /* does not return */
-                }
-
-                /* No further frame ack — Enet is already closed. The
-                 * bridge sees disconnection; UART log is the source
-                 * of truth. Tell caller to drop this connection so it
-                 * doesn't keep calling select() on dead lwip. */
+                s_image_active = false;
+                lp_ota_warm_reset();  /* does not return */
+                /* unreachable, but kept for the compiler: */
                 return false;
             }
             default:
@@ -966,6 +1414,25 @@ static bool service_conn(ota_conn_t *c)
 void lp_ota_task(void *args)
 {
     (void)args;
+
+    /* 0.A.176: disable OSPI controller auto-polling at OTA task entry,
+     * BEFORE the listen loop. The SDK Cypress driver's Board_flashOpen
+     * (run in main) leaves WRITE_COMPLETION_CTRL_REG=0x000340FF whose
+     * OPCODE field [7:0] is 0xFF — and on Cypress S25HL512T, opcode
+     * 0xFF is "Reset to Default I/O Mode". Every auto-poll cycle the
+     * controller issues to wait for WIP=0 actually sends a chip-reset
+     * command. That mid-PP reset is the root cause of Bank B + Bank A
+     * silent corruption (0.A.175 bench: Bank B CRC also MISMATCH).
+     * Setting WCC=0 disables auto-polling entirely; our STIG-based
+     * `hal_wait_wip_clear` in hal_flash.c handles WIP timing correctly. */
+    {
+        volatile uint32_t *wcc_p = (volatile uint32_t *)(uintptr_t)(0x0FC40000U + 0x38U);
+        uint32_t wcc_before = *wcc_p;
+        *wcc_p = 0x00000000U;
+        uint32_t wcc_after = *wcc_p;
+        DebugP_log("[OTA] startup: WCC %08lX -> %08lX (auto-poll disabled, kills 0xFF reset opcode)\r\n",
+                   (unsigned long)wcc_before, (unsigned long)wcc_after);
+    }
 
     /* Wait for lwIP to come up. Mirrors orbit_modbus_tcp_task — the
      * listen socket call will fail until the network task is running,
@@ -1009,7 +1476,9 @@ void lp_ota_task(void *args)
     DebugP_log("[OTA] Phase 1A listening on :%d (version=%s)\r\n",
                LP_OTA_PORT, LP_FW_VERSION);
 
-    ota_conn_t conns[LP_OTA_MAX_CONNS];
+    /* conns must NOT live on the task stack — at 4108 B per conn the
+     * array would smash an 8 KB stack. BSS-allocated instead. */
+    static ota_conn_t conns[LP_OTA_MAX_CONNS];
     for (int i = 0; i < LP_OTA_MAX_CONNS; i++) {
         conns[i].fd = -1; conns[i].rx_len = 0;
     }
@@ -1060,6 +1529,9 @@ void lp_ota_task(void *args)
 
             int space = (int)(sizeof(conns[i].rx) - conns[i].rx_len);
             if (space <= 0) {
+                DebugP_log("[OTA] rx buffer FULL (rx_len=%u, cap=%u) — closing conn\r\n",
+                           (unsigned)conns[i].rx_len,
+                           (unsigned)sizeof(conns[i].rx));
                 lwip_close(conns[i].fd);
                 conns[i].fd = -1;
                 conns[i].rx_len = 0;
@@ -1068,6 +1540,8 @@ void lp_ota_task(void *args)
             int n = lwip_recv(conns[i].fd,
                               &conns[i].rx[conns[i].rx_len], space, 0);
             if (n <= 0) {
+                DebugP_log("[OTA] lwip_recv returned %d (errno=%d) — peer closed?\r\n",
+                           n, errno);
                 lwip_close(conns[i].fd);
                 conns[i].fd = -1;
                 conns[i].rx_len = 0;
