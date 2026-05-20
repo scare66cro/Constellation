@@ -47,8 +47,20 @@ import {
   LpOtaTag,
   FwUpdateState,
   type FwUpdateStatus,
+  type FwBankInfo,
   _internal as ota_internal,
 } from './orbitOtaClient.js';
+
+// ─── Version parsing — for downgrade rejection (Gap 2 bridge-side) ─────
+// Project firmware version format is `0.A.<n>+<sha>[-dirty]`. Compare
+// the integer N for downgrade detection. Returns null if string doesn't
+// parse — caller treats null as "unknown, skip comparison".
+// See docs/firmware-version-current.md and docs/lp-am2434-ota-hardening-plan.md.
+function parseAlphaN(version: string): number | null {
+  if (!version) return null;
+  const m = version.match(/^0\.A\.(\d+)(?:[+\-]|$)/);
+  return m ? parseInt(m[1], 10) : null;
+}
 
 // ─── CRC-32 (Ethernet/zlib polynomial, must match firmware) ────────────
 
@@ -169,6 +181,24 @@ export interface PushImageOptions {
   rebootAfterActivate?: boolean;
   /** Progress callback — fires on every status frame from firmware. */
   onProgress?: (status: FwUpdateStatus) => void;
+  // ─── Hardening (Gap 2 + Gap 3 — see docs/lp-am2434-ota-hardening-plan.md) ───
+  /** How long to wait for the LP's auto-pushed FwBankInfo frame after
+   *  TCP connect (default 3000 ms). If the LP doesn't send BankInfo
+   *  within this window, the push proceeds anyway (logs a warning) —
+   *  this is a soft gate, not a hard requirement, so legacy firmware
+   *  without BankInfo support stays compatible. */
+  bankInfoTimeoutMs?: number;
+  /** If true (default), refuse to push when the LP's currently-running
+   *  Alpha-N is *higher* than this push's Alpha-N (per `version` opt).
+   *  This is the bridge-side downgrade-rejection net; the LP-side
+   *  enforcement (Gap 2-LP) is a separate fix. Set false to allow
+   *  intentional downgrades (e.g. rolling back a broken release). */
+  rejectDowngrade?: boolean;
+  /** Called once when the LP's auto-pushed FwBankInfo is received
+   *  (or once with null on timeout). Useful for the installer to
+   *  build an audit log of "what did this board look like before
+   *  we touched it". */
+  onBankInfo?: (info: FwBankInfo | null) => void;
 }
 
 export class OtaPushError extends Error {
@@ -184,6 +214,9 @@ export interface PushImageResult {
   imageCrc: number;
   /** Last status frame received from firmware. */
   finalStatus: FwUpdateStatus | null;
+  /** The pre-push FwBankInfo we captured from the LP on connect (Gap 3).
+   *  Null if the LP didn't send one within `bankInfoTimeoutMs`. */
+  preBankInfo: FwBankInfo | null;
 }
 
 /**
@@ -208,6 +241,8 @@ export async function pushImage(
   const totalTimeout  = opts.totalTimeoutMs  ?? 10 * 60_000;
   const version       = opts.version         ?? 'unspecified';
   const rebootAfterActivate = opts.rebootAfterActivate ?? true;
+  const bankInfoTimeout = opts.bankInfoTimeoutMs ?? 3000;
+  const rejectDowngrade = opts.rejectDowngrade ?? true;
 
   const image = await fs.readFile(imagePath);
   if (image.length === 0) {
@@ -242,6 +277,16 @@ export async function pushImage(
     }
   };
 
+  // ── Pre-push FwBankInfo capture (Gap 3) ────────────────────────────
+  // LP auto-pushes one FwBankInfo frame on TCP connect. We capture it,
+  // expose it to the installer for audit logging, and (optionally) gate
+  // the push on it for downgrade detection (Gap 2 bridge-side).
+  let preBankInfo: FwBankInfo | null = null;
+  let bankInfoResolver: ((info: FwBankInfo | null) => void) | null = null;
+  const bankInfoPromise = new Promise<FwBankInfo | null>((resolve) => {
+    bankInfoResolver = resolve;
+  });
+
   sock.on('data', (chunk: Buffer) => {
     rx = Buffer.concat([rx, chunk]);
     while (rx.length >= 4) {
@@ -270,8 +315,16 @@ export async function pushImage(
           sock.destroy();
           return;
         }
+      } else if (tag === LpOtaTag.BankInfo) {
+        try {
+          preBankInfo = ota_internal.decodeBankInfo(body);
+          if (bankInfoResolver) { bankInfoResolver(preBankInfo); bankInfoResolver = null; }
+        } catch (e) {
+          // Bad BankInfo shouldn't kill the push (legacy compat) — just log.
+          console.warn(`[ota-push ${host}] BankInfo decode failed: ${(e as Error).message}`);
+        }
       }
-      // Ignore BankInfo (auto-pushed on connect) and any unknown tags.
+      // Unknown tags silently skipped (forward compatibility).
     }
   });
 
@@ -328,6 +381,35 @@ export async function pushImage(
   let bankClean = false;
 
   try {
+    // ── Gate: wait for LP's auto-pushed FwBankInfo (Gap 3) ─────────────
+    // Soft gate — if the LP doesn't speak BankInfo (legacy fw), proceed
+    // anyway with a warning. The optional rejectDowngrade check below
+    // only fires when we DID receive BankInfo.
+    const bankInfoTimer = new Promise<null>(r => setTimeout(() => r(null), bankInfoTimeout));
+    preBankInfo = await Promise.race([bankInfoPromise, bankInfoTimer]);
+    if (preBankInfo) {
+      const active = preBankInfo.activeBank === 1 /* BankA */ ? preBankInfo.bankAVersion
+                   : preBankInfo.activeBank === 2 /* Golden */ ? preBankInfo.goldenVersion
+                   : preBankInfo.bankBVersion;
+      console.log(`[ota-push ${host}] pre-push state: activeBank=${preBankInfo.activeBank} ` +
+                  `version="${active}" bootCount=${preBankInfo.bootCount} ` +
+                  `bootReason=${preBankInfo.bootReason} A.valid=${preBankInfo.bankAValid} ` +
+                  `B.valid=${preBankInfo.bankBValid}`);
+      if (rejectDowngrade) {
+        const currentN = parseAlphaN(active);
+        const incomingN = parseAlphaN(version);
+        if (currentN !== null && incomingN !== null && incomingN < currentN) {
+          throw new OtaPushError('downgradeBlocked',
+            `${host} is running 0.A.${currentN} ("${active}"); refusing to push 0.A.${incomingN} ("${version}"). ` +
+            `Pass rejectDowngrade=false to override.`);
+        }
+      }
+    } else {
+      console.warn(`[ota-push ${host}] no FwBankInfo received within ${bankInfoTimeout}ms ` +
+                   `— proceeding without pre-flight bank check (legacy fw?)`);
+    }
+    opts.onBankInfo?.(preBankInfo);
+
     while (bankAttempt < bankRedoLimit && !bankClean) {
       bankAttempt++;
       bytesSent = 0;
@@ -389,5 +471,5 @@ export async function pushImage(
     sock.destroy();
   }
 
-  return { bytesSent, totalSize: image.length, imageCrc, finalStatus };
+  return { bytesSent, totalSize: image.length, imageCrc, finalStatus, preBankInfo };
 }
