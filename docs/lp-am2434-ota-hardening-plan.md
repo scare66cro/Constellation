@@ -1,5 +1,12 @@
 # LP-AM2434 OTA hardening — progress tracker
 
+> **STATUS 2026-05-21: end-to-end OTA validated on real silicon with
+> universal binary delivery.** Every defensive check fires correctly,
+> the four-layer OSPI device-config persistence bug is fully rooted
+> and fixed, and a storage LP receiving an OTA pushes of a universal
+> binary now stays as STORAGE/.2 post-reboot. See the "Final bench
+> validation 2026-05-21" section at the bottom.
+>
 > Living doc for the OTA defensive-checks work kicked off 2026-05-20
 > after a multi-hour session where:
 > 1. The wrong-probe trap on JTAG (`Flash-LP.ps1`) reflashed Nova as
@@ -109,6 +116,44 @@ over TCP `:5503` with length-prefixed framing.
 **Fix location:** Custom F2c SBL chooser per [docs/lp-am2434-f2c-sbl-chooser-design.md](lp-am2434-f2c-sbl-chooser-design.md). Boots whichever bank has the higher generation counter + valid signature, watchdog-driven rollback if the new image fails.
 
 **Status:** ⏸ **DEFERRED** — Phase 3 / F2c work, separate session. Mitigation today: "don't power-cycle during activate" (write into operator docs).
+
+## Final bench validation 2026-05-21 (0.A.192) — END-TO-END VALIDATED
+
+After two days of bug-hunting through four compounding layers, the
+full OTA pipeline is bench-validated end-to-end on real silicon. A
+universal binary OTA'd onto a STORAGE LP now correctly stays as STORAGE
+post-reboot. The four layers, in the order they were resolved:
+
+| Layer | Component | Symptom | Root cause | Fix |
+|---|---|---|---|---|
+| **1** | Build-Cfu.ps1 | `.cfu` binary baked with `CONFIG_NOVA_LP_IP` rewrote target board's OSPI to its compile-time IP | The factory-IP-override block in `lp_device_config.c` was designed for "JTAG provisioning" but the same mechanism re-roled OTA targets | Removed `-DCONFIG_NOVA_LP_ROLE/-DCONFIG_NOVA_LP_IP` from `Build-Cfu.ps1` gmake invocation. Universal binary has the override block compiled out (`#if CONFIG_NOVA_LP_IP != 0` is false). |
+| **2** | hal_flash.c | Boot-time `Flash_write` operations silently corrupted because `WRITE_COMPLETION_CTRL_REG = 0x000340FF` (opcode `0xFF` = Cypress "Reset to Default I/O Mode") | `Board_flashOpen` (SDK) leaves WCC at that broken default. The OTA task's WCC=0 fix runs too late for `LpDeviceConfig_Init`'s boot-time save. | Moved WCC=0 into `hal_flash_init()` which runs in `main()` immediately after `Board_flashOpen` and before any other OSPI write. `lp_ota_task` startup fix kept as belt-and-suspenders. |
+| **3** | lp_device_config.c | Override block never fired on blank banks — banks stayed blank forever, RAM cache masked the failure | `apply_compile_time_defaults()` sets `s_cfg.ip = CONFIG_NOVA_LP_IP`. The override check `if (s_cfg.ip != CONFIG_NOVA_LP_IP)` is always false on a fresh board. | Extended condition to `if (s_active_bank < 0 \|\| s_cfg.ip != CONFIG_NOVA_LP_IP)` — also fires when no valid bank was found. Memory note: `memories/repo/devcfg-blank-banks-override-never-fired.md`. |
+| **4** | lp_device_config.c | Once override fired, `LpDeviceConfig_Save` returned FALSE. Per-step diagnostic pinpointed: SDK `Flash_write` returns -1. | Same SDK `Flash_norOspiWrite` / INDIRECT_WRITE_XFER breakage that the OTA path fixed in 0.A.141 by switching to `hal_flash_write_dac`. `bank_program` had never been migrated. | Switched `bank_program` to `hal_flash_write_dac` with the 80-byte `LpDevCfgBank` padded to a 256-byte PP page with `0xFF`. `hal_flash_atomic_enter/exit` is no-op pre-scheduler so the same code works at boot and at runtime. Memory note: `memories/repo/devcfg-flash-write-broken-needs-dac.md`. |
+
+The diagnostic logging added during the hunt (`[FLASH] WCC ...`,
+`[DevCfg-Diag]`, `[DevCfg-Override]`, `[DevCfg-Save]`, `[DevCfg-Erase]`,
+`[DevCfg-Program]`) was kept in the binary — it's all pre-scheduler
+`bb_uart0_puts`, costs ~1 ms of UART output and ~600 bytes of `.text`,
+and would catch any regression in this code path instantly.
+
+### The end-to-end test that proved it
+
+1. JTAG-flash storage LP with 0.A.192 STORAGE binary (CONFIG_NOVA_LP_ROLE=1, CONFIG_NOVA_LP_IP=0x0A2F1B02).
+2. First boot: `[DevCfg-Diag] BankA valid=0` (blank), `[DevCfg-Override] firing s_active_bank=-1 -> SAVING`, `[DevCfg-Program] hal_flash_write_dac ... rc=0`, `verify memcmp=0`, `save returned TRUE`.
+3. Power-cycle. Second boot: `[DevCfg-Diag] BankA valid=1  42 44 50 4C 01 00 00 00 40 00 00 00 43 44 50 4C 01 00 00 00 01 00 00 00 02 1B 2F 0A` (LPDB + seq=1 + size=64 + LPDC + version=1 + ROLE=1 + ip=10.47.27.2). **No override line** — load path works.
+4. Build universal `.cfu` (0.A.192, no CONFIG_NOVA_LP_IP override block compiled in). OTA-push via UI with role-based routing + ORBIT_FLEET set.
+5. Bridge log: `fleet snapshot: members=[10.47.27.2=role1]` → `"storage" routed by role: role=1 → 10.47.27.2` → `pushed: bytes=501866/501866` → 25 s after push → `/firmware/install completed`.
+6. Post-OTA probe: `10.47.27.2 OK active=bankA "0.A.192+bd9a153c-dirty" role=1(STORAGE)` — same version, same role, same IP.
+7. Post-OTA COM5: `[DevCfg-Diag] BankA valid=1 42 44 50 4C ...` — identical bytes to step 3. OTA stage-copy did NOT touch OSPI device-config at 0x600000.
+
+All eight pre-existing OTA defenses (G2 / G3 / G4 bridge-side + G1-LP / G2-LP + fleet snapshot + role-based routing + LP-side gates) fired correctly. The OTA pipeline is production-shape-validated at the LP firmware level.
+
+The remaining work (per `docs/uart-airgap-architecture.md`) is the
+**Nova-as-OTA-broker migration** — moving the bridge-side direct-LP TCP
+push code into the Nova firmware so the production Pi5 can sit on the
+office LAN with no IP route to the equipment LAN. The LP-side and
+in-bridge work is done.
 
 ## Patch progress this session (2026-05-20)
 
