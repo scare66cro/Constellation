@@ -29,11 +29,26 @@ package agristar;
 
 // ─── FwBeginUpdate — Bridge → Firmware: start an update session ──────────
 // Firmware erases the inactive bank and prepares to receive chunks.
+//
+// Hardening (2026-05-20, OTA Gap 1-LP / Gap 2-LP):
+//   - expected_role / allow_downgrade let the LP fail-fast in BEGIN
+//     before the ~5 s Bank-B erase, instead of having to rely on
+//     the bridge alone for these checks.
 message FwBeginUpdate {
   uint32 total_size      = 1;   // Total firmware image size in bytes
   uint32 crc32           = 2;   // CRC-32 of the complete image
-  string version         = 3;   // Version string (e.g. "2.1.0")
+  string version         = 3;   // Version string (e.g. "0.A.187+abc1234")
   uint32 chunk_size      = 4;   // Negotiated chunk size (default 1024)
+  uint32 expected_role   = 5;   // OrbitRole the bundle expects this LP to be.
+                                // 0 (CONTROLLER) is a real role, but proto3 zero-
+                                // suppression means "field absent" is indistinguishable
+                                // from CONTROLLER on the wire — so the bridge MUST send
+                                // this as a forced varint (pb_uint32_force) whenever
+                                // role-checking is desired. If absent, LP skips the role
+                                // gate (back-compat with older bridges).
+  bool   allow_downgrade = 6;   // Bridge has explicitly opted into a downgrade.
+                                // If false (default), LP rejects an image whose
+                                // 0.A.<N> integer is < running LP_FW_VERSION's N.
 }
 
 // ─── FwDataChunk — Bridge → Firmware: one chunk of firmware data ─────────
@@ -98,4 +113,13 @@ message FwBankInfo {
   string   golden_version  = 8;
   uint32   boot_count      = 9;   // Incremented each boot
   uint32   boot_reason     = 10;  // 0=normal, 1=watchdog, 2=fallback
+  uint32   current_role    = 11;  // OrbitRole this LP is provisioned as
+                                  // (from lp_device_config). Added 2026-05-20
+                                  // for OTA Gap 1: bridge cross-checks manifest
+                                  // role against this before sending FwBeginUpdate.
+                                  // MUST be force-encoded by LP because 0
+                                  // (CONTROLLER) is a valid value. Older firmwares
+                                  // that don't emit this field → bridge treats
+                                  // "unknown role" and falls through to relying on
+                                  // LP-side FwBeginUpdate.expected_role gate.
 }

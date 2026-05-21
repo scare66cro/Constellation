@@ -161,8 +161,14 @@ function Assert-OnlyTargetProbeReachable {
         Write-Warning "[probe-check:$Context] xdsdfu.exe not found — SKIPPING isolation gate (risky)."
         return
     }
-    $serials = (& $xdsdfu -e 2>&1 | Select-String 'Serial Num:\s*(\S+)' |
-                ForEach-Object { $_.Matches[0].Groups[1].Value })
+    # @(...) array-subexpression: when xdsdfu enumerates exactly one probe,
+    # the Select-String | ForEach pipeline returns a SCALAR string. Without
+    # @(), $serials[0] would index character 0 of that string ('S' instead
+    # of 'S24L0417') and the next equality check would always fail. This
+    # path only matters after Set-Probe -Action Solo has disabled the other
+    # probes (the multi-probe path produces an array naturally).
+    $serials = @(& $xdsdfu -e 2>&1 | Select-String 'Serial Num:\s*(\S+)' |
+                 ForEach-Object { $_.Matches[0].Groups[1].Value })
     if ($serials.Count -ne 1) {
         throw "[probe-check:$Context] FATAL: expected exactly ONE probe ($ExpectedSerial), saw $($serials.Count) ($($serials -join ', ')). DSS would silently route to wrong board. Run Set-Probe -Probe <X> -Action Solo or unplug the others. Abort."
     }

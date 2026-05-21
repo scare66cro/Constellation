@@ -91,6 +91,16 @@
                                     * giving the chip a fresh slate) and
                                     * re-stream all chunks. Up to N full
                                     * retries per OTA attempt. */
+#define LP_OTA_ERR_ROLE_MISMATCH 27 /* FwBeginUpdate.expected_role didn't match
+                                    * this LP's lp_device_config.role. Bridge
+                                    * is pushing the wrong-role binary at us.
+                                    * See docs/lp-am2434-ota-hardening-plan.md
+                                    * Gap 1-LP. */
+#define LP_OTA_ERR_DOWNGRADE     28 /* Incoming version's 0.A.<N> integer is
+                                    * lower than the running LP_FW_VERSION's
+                                    * N, and FwBeginUpdate.allow_downgrade
+                                    * was false. Bridge must set allow_downgrade
+                                    * explicitly to roll back. See Gap 2-LP. */
 
 /* LP staging-hack constants (Phase 2; see
  * docs/LP-AM2434-OTA-Update-Plan.md §"Phase 2").

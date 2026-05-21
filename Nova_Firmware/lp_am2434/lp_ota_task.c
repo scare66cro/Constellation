@@ -23,6 +23,8 @@
 
 #include "lp_ota_task.h"
 #include "lp_version.h"
+#include "lp_device_config.h"
+#include "orbit_server/orbit_role.h"
 #include "nova_fw_update.h"
 #include "hal.h"
 #include "ti_drivers_open_close.h"
@@ -292,6 +294,7 @@ static int pb_skip(pb_iter_t *it, uint32_t wt)
  *   8  string   golden_version
  *   9  uint32   boot_count
  *  10  uint32   boot_reason
+ *  11  uint32   current_role       (OrbitRole; force-encoded since 0=CONTROLLER is valid)
  *
  * Phase 1B: read FwBankHeader / FwBootMeta from OSPI via the Platform
  * NovaFwUpdate API (Init populates a cached copy at boot, getters are
@@ -327,6 +330,11 @@ static uint16_t encode_bank_info(uint8_t *dst, uint16_t cap)
     }
     n += pb_uint32(dst + n, 9, meta.boot_count);
     n += pb_uint32(dst + n, 10, meta.boot_reason);
+    /* G1-bridge enabler (2026-05-20): emit the provisioned role so the
+     * bridge can cross-check it against the manifest before sending
+     * BEGIN. Force-encoded — 0 (CONTROLLER) is a valid role and proto3
+     * zero-suppression would otherwise hide it. */
+    n += pb_uint32_force(dst + n, 11, (uint32_t)LpDeviceConfig_Get()->role);
     (void)cap;
     return n;
 }
@@ -379,7 +387,33 @@ typedef struct {
     uint32_t       crc32;
     uint32_t       chunk_size;
     char           version[32];
+    /* 2026-05-20 OTA Gap 1-LP / Gap 2-LP: bridge-provided role + downgrade
+     * intent. Both fields are optional on the wire — bridges that don't
+     * send them get the old behavior (no role check, downgrade allowed). */
+    uint32_t       expected_role;     /* OrbitRole; only valid if has_expected_role */
+    bool           allow_downgrade;
+    bool           has_expected_role; /* true if field 5 was present on the wire */
 } fw_begin_t;
+
+/* Parse the integer N out of a "0.A.<N>+<sha>[-dirty]" version string,
+ * mirroring the bridge-side `parseAlphaN` in orbitOtaPush.ts so the two
+ * sides stay in lockstep. Returns -1 if the string doesn't match the
+ * alpha format — caller treats that as "unknown, skip the gate". */
+static int parse_alpha_n(const char *s)
+{
+    if (!s) return -1;
+    if (s[0] != '0' || s[1] != '.' || s[2] != 'A' || s[3] != '.') return -1;
+    const char *p = s + 4;
+    if (*p < '0' || *p > '9') return -1;
+    long n = 0;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10 + (*p - '0');
+        if (n > 1000000) return -1;   /* sanity cap */
+        p++;
+    }
+    if (*p != '+' && *p != '-' && *p != '\0') return -1;
+    return (int)n;
+}
 
 static int decode_begin(const uint8_t *body, uint32_t len, fw_begin_t *out)
 {
@@ -414,6 +448,16 @@ static int decode_begin(const uint8_t *body, uint32_t len, fw_begin_t *out)
             case 4: /* chunk_size, varint */
                 if (wt != 0 || pb_read_varint(&it, &v) != 0) return -1;
                 out->chunk_size = (uint32_t)v;
+                break;
+            case 5: /* expected_role, varint — presence-tracked so 0
+                     * (CONTROLLER) is distinguishable from "absent". */
+                if (wt != 0 || pb_read_varint(&it, &v) != 0) return -1;
+                out->expected_role     = (uint32_t)v;
+                out->has_expected_role = true;
+                break;
+            case 6: /* allow_downgrade, bool (varint 0/1) */
+                if (wt != 0 || pb_read_varint(&it, &v) != 0) return -1;
+                out->allow_downgrade = (v != 0);
                 break;
             default:
                 if (pb_skip(&it, wt) != 0) return -1;
@@ -954,6 +998,45 @@ static bool service_conn(ota_conn_t *c)
                                       "image > LP_OTA_BANK_B_SIZE");
                     break;
                 }
+
+                /* G1-LP (2026-05-20): role-mismatch gate. Reject before
+                 * the ~5 s Bank-B erase if the bridge's claimed-bundle-
+                 * role doesn't match what this LP is provisioned as.
+                 * Bridges that don't send the field (older firmwares /
+                 * test harnesses) skip the gate. See
+                 * docs/lp-am2434-ota-hardening-plan.md Gap 1-LP. */
+                if (b.has_expected_role) {
+                    OrbitRole self_role = (OrbitRole)LpDeviceConfig_Get()->role;
+                    OrbitRole bundle_role = (OrbitRole)b.expected_role;
+                    if (bundle_role != self_role) {
+                        DebugP_log("[OTA] BEGIN role-mismatch reject: bundle=%s(%u) self=%s(%u)\r\n",
+                                   OrbitRole_Name(bundle_role), (unsigned)bundle_role,
+                                   OrbitRole_Name(self_role),   (unsigned)self_role);
+                        push_status_error(c->fd, LP_OTA_ERR_ROLE_MISMATCH,
+                                          "bundle role does not match LP role");
+                        break;
+                    }
+                }
+
+                /* G2-LP (2026-05-20): firmware-side downgrade gate.
+                 * If incoming version's 0.A.<N> < running N, reject unless
+                 * the bridge has explicitly opted in via allow_downgrade.
+                 * Equal N is allowed (re-flash same build with new sha).
+                 * Non-alpha version strings → skip gate. */
+                {
+                    int incoming_n = parse_alpha_n(b.version);
+                    int running_n  = parse_alpha_n(LP_FW_VERSION);
+                    if (incoming_n >= 0 && running_n >= 0 &&
+                        incoming_n < running_n && !b.allow_downgrade)
+                    {
+                        DebugP_log("[OTA] BEGIN downgrade reject: incoming=0.A.%d running=0.A.%d (allow_downgrade=0)\r\n",
+                                   incoming_n, running_n);
+                        push_status_error(c->fd, LP_OTA_ERR_DOWNGRADE,
+                                          "downgrade rejected (set allow_downgrade=true to force)");
+                        break;
+                    }
+                }
+
                 DebugP_log("[OTA] BEGIN (streaming) size=%lu crc=0x%08lx ver=%s\r\n",
                            (unsigned long)b.total_size,
                            (unsigned long)b.crc32, b.version);

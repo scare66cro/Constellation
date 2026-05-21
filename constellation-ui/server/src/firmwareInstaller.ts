@@ -20,7 +20,13 @@ import {
     type LoadedBundle, type OrbitComponent,
 } from './firmwareBundle.js';
 import { pushImage, OtaPushError } from './orbitOtaPush.js';
+import { FwBankId } from './orbitOtaClient.js';
 import { resolveOrbitHost } from './orbitMbtcp.js';
+import {
+    snapshotFleet, resolveByRoleFromSnapshot,
+    FleetResolverError,
+    type FleetSnapshot,
+} from './orbitFleetResolver.js';
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 
@@ -102,6 +108,13 @@ export interface InstallOptions {
     /** If true, push the image but do NOT trigger reboot on the LP.
      *  Used for dry-run validation.  Default false. */
     skipReboot?: boolean;
+    /** Explicit fleet of candidate IPs for role-based routing. When
+     *  set (or when `ORBIT_FLEET` env var is set), the installer probes
+     *  each IP for FwBankInfo.current_role and routes each manifest
+     *  component to the IP whose role matches `comp.role`, instead of
+     *  using the legacy slot→IP map (`resolveOrbitHost`).
+     *  See `orbitFleetResolver.ts`. */
+    fleet?: string[];
 }
 
 export async function installBundle(
@@ -145,13 +158,36 @@ export async function installBundle(
             }
         }
 
+        // Probe the fleet for role-based routing (G1-bridge follow-up,
+        // 2026-05-20). If `ORBIT_FLEET` is set (or opts.fleet is passed),
+        // each LP in the list is asked for its FwBankInfo.current_role
+        // in parallel and the results are cached for the duration of
+        // this install. The per-component lookup downstream then uses
+        // `resolveByRoleFromSnapshot(snapshot, comp.role)` instead of
+        // the legacy slot→IP map. Snapshot is null when no fleet is
+        // configured → falls back to `resolveOrbitHost(slot)`. See
+        // `docs/lp-am2434-ota-hardening-plan.md` and orbitFleetResolver.ts.
+        const fleetSnap = await snapshotFleet({ fleet: opts.fleet });
+        if (fleetSnap) {
+            const memberLine = fleetSnap.members
+                .map(m => `${m.host}=role${m.currentRole}`).join(', ');
+            const unprovLine = fleetSnap.unprovisioned
+                .map(u => u.host).join(', ');
+            const unrchLine  = fleetSnap.unreachable
+                .map(u => `${u.host}(${u.error})`).join(', ');
+            console.log(`[fw-install] fleet snapshot: members=[${memberLine || 'none'}] ` +
+                        `legacy-fw=[${unprovLine || 'none'}] unreachable=[${unrchLine || 'none'}]`);
+        } else {
+            console.log('[fw-install] no ORBIT_FLEET configured — using slot→IP map (resolveOrbitHost)');
+        }
+
         // Per-orbit firmware push.
         for (const { name, comp } of orbitComponents(bundle)) {
             const cp = progress.components.find(c => c.name === name);
             if (!cp) continue;
 
             try {
-                await pushOneComponent(bundle, name, comp, cp, broadcastProgress, opts);
+                await pushOneComponent(bundle, name, comp, cp, broadcastProgress, opts, fleetSnap);
             } catch (e) {
                 cp.state = 'failed';
                 cp.errorMessage = (e instanceof OtaPushError)
@@ -189,12 +225,50 @@ async function pushOneComponent(
     cp: ComponentProgress,
     broadcastProgress: ProgressBroadcastFn | null,
     opts: InstallOptions,
+    fleetSnap: FleetSnapshot | null,
 ): Promise<void> {
-    // Resolve host.  Slot==-1 means CONTROLLER; pushImage just needs a
-    // direct IP, no slot magic required.  For orbit slots 0..7 we go
-    // through resolveOrbitHost so the bridge's bench IP mapping stays
-    // authoritative (and matches what /iot/orbit/ota/version reads).
-    const host = comp.slot >= 0 ? resolveOrbitHost(comp.slot) : comp.ip;
+    // ── Resolve host ───────────────────────────────────────────────────
+    // Precedence (most specific first):
+    //   (a) Slot == -1 (CONTROLLER component): use comp.ip from the
+    //       manifest directly. The bridge's controller LP is at a
+    //       configuration-known IP; no discovery involved.
+    //   (b) Fleet snapshot present (operator set ORBIT_FLEET or
+    //       opts.fleet): match comp.role against the LPs we probed at
+    //       install start. This is the authoritative path now that
+    //       FwBankInfo.current_role exists (LP fw ≥ 0.A.188). Throws
+    //       FleetResolverError on noMatch / ambiguous — both are
+    //       deployment mistakes that the operator must fix.
+    //   (c) Legacy slot→IP map (resolveOrbitHost). Used on bench rigs
+    //       and any deployment that hasn't configured ORBIT_FLEET yet.
+    //       The G1-bridge cross-check in pushImage() still validates
+    //       comp.role vs FwBankInfo.current_role at push time, so a
+    //       misrouted slot still aborts cleanly before the Bank-B erase.
+    let host: string;
+    if (comp.slot < 0) {
+        host = comp.ip;
+        console.log(`[fw-install] "${name}" routed to controller IP ${host} (slot=-1)`);
+    } else if (fleetSnap) {
+        const resolved = resolveByRoleFromSnapshot(fleetSnap, comp.role);
+        if (!resolved) {
+            // snapshot is non-null here so the helper either returns a
+            // string or throws — defensive fall-through for type safety.
+            throw new FleetResolverError('noMatch',
+                `Fleet snapshot returned null for role=${comp.role}`);
+        }
+        host = resolved;
+        const slotHost = resolveOrbitHost(comp.slot);
+        if (host !== slotHost) {
+            console.log(`[fw-install] "${name}" routed by role: role=${comp.role} → ${host} ` +
+                        `(legacy slot=${comp.slot} → ${slotHost} suppressed)`);
+        } else {
+            console.log(`[fw-install] "${name}" routed by role: role=${comp.role} → ${host} ` +
+                        `(matches legacy slot map)`);
+        }
+    } else {
+        host = resolveOrbitHost(comp.slot);
+        console.log(`[fw-install] "${name}" routed by slot map: slot=${comp.slot} → ${host} ` +
+                    `(set ORBIT_FLEET to enable role-based routing)`);
+    }
 
     cp.state = 'pushing';
     cp.bytesWritten = 0;
@@ -227,10 +301,21 @@ async function pushOneComponent(
         // Gap 3 (bridge-side) — bridge captures + logs the LP's pre-push
         // bank state for audit and rejects downgrades by default.
         rejectDowngrade: true,
+        // Gap 1 (2026-05-20) — manifest's role is the source of truth for
+        // "what should be flashed here". The bridge pre-flight cross-checks
+        // it against FwBankInfo.currentRole (if the LP firmware is new
+        // enough to emit it) AND forwards it to the LP via FwBeginUpdate
+        // for the firmware-side gate. Wrong-role bundles abort before
+        // burning a Bank-B erase cycle.
+        expectedRole: comp.role,
         onBankInfo: (info) => {
             if (info) {
-                const active = info.activeBank === 1 ? info.bankAVersion
-                             : info.activeBank === 2 ? info.goldenVersion
+                // Same off-by-one fix as orbitOtaPush.ts — FwBankId enum
+                // is BankA=0/BankB=1/Golden=2; the literal-1-with-"BankA"
+                // pattern from commit 6042c59 printed empty strings.
+                // See memories/repo/orbitotapush-bankid-off-by-one.md.
+                const active = info.activeBank === FwBankId.BankA  ? info.bankAVersion
+                             : info.activeBank === FwBankId.Golden ? info.goldenVersion
                              : info.bankBVersion;
                 console.log(`[fw-install] component "${name}" @${host} pre-push: ` +
                             `active="${active}" bootCount=${info.bootCount}`);

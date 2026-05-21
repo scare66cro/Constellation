@@ -46,6 +46,7 @@ import {
   LP_OTA_PORT,
   LpOtaTag,
   FwUpdateState,
+  FwBankId,
   type FwUpdateStatus,
   type FwBankInfo,
   _internal as ota_internal,
@@ -106,6 +107,13 @@ function pbUint32(out: number[], field: number, v: number): void {
   pbKey(out, field, 0);
   pbVarint(out, v);
 }
+/** Force-encode a uint32 even when value is 0 — required for fields like
+ *  OrbitRole.expected_role where 0 (CONTROLLER) is a meaningful value
+ *  that must survive the wire. Mirrors `pb_uint32_force` on the LP side. */
+function pbUint32Force(out: number[], field: number, v: number): void {
+  pbKey(out, field, 0);
+  pbVarint(out, v);
+}
 function pbBool(out: number[], field: number, v: boolean): void {
   if (!v) return;
   pbKey(out, field, 0);
@@ -128,12 +136,21 @@ function pbBytes(out: number[], field: number, data: Buffer): void {
 // ─── Message encoders (must match proto/agristar/firmware.proto) ───────
 
 function encodeBegin(totalSize: number, crc: number,
-                     version: string, chunkSize: number): Buffer {
+                     version: string, chunkSize: number,
+                     expectedRole: number | undefined,
+                     allowDowngrade: boolean): Buffer {
   const out: number[] = [];
   pbUint32(out, 1, totalSize);
   pbUint32(out, 2, crc);
   pbString(out, 3, version);
   pbUint32(out, 4, chunkSize);
+  // Field 5 (expected_role): omit entirely when caller doesn't know the
+  // role (legacy / dry-run paths), or force-encode otherwise so 0
+  // (CONTROLLER) is distinguishable from "absent" on the LP side.
+  if (expectedRole !== undefined) {
+    pbUint32Force(out, 5, expectedRole);
+  }
+  pbBool(out, 6, allowDowngrade);   // omitted when false (LP defaults to deny)
   return Buffer.from(out);
 }
 function encodeChunk(offset: number, data: Buffer, chunkCrc: number): Buffer {
@@ -190,15 +207,26 @@ export interface PushImageOptions {
   bankInfoTimeoutMs?: number;
   /** If true (default), refuse to push when the LP's currently-running
    *  Alpha-N is *higher* than this push's Alpha-N (per `version` opt).
-   *  This is the bridge-side downgrade-rejection net; the LP-side
-   *  enforcement (Gap 2-LP) is a separate fix. Set false to allow
-   *  intentional downgrades (e.g. rolling back a broken release). */
+   *  Both the bridge-side check here and the firmware-side gate (Gap 2-LP,
+   *  2026-05-20) honor this; setting false lets an intentional rollback
+   *  through. Forwarded to the LP as FwBeginUpdate.allow_downgrade so the
+   *  two sides stay in lockstep. */
   rejectDowngrade?: boolean;
   /** Called once when the LP's auto-pushed FwBankInfo is received
    *  (or once with null on timeout). Useful for the installer to
    *  build an audit log of "what did this board look like before
    *  we touched it". */
   onBankInfo?: (info: FwBankInfo | null) => void;
+  /** OrbitRole the bundle was built for (from the .cfu manifest's
+   *  `components.<name>.role` field). When supplied, the bridge:
+   *    - cross-checks it against `preBankInfo.currentRole` BEFORE sending
+   *      Begin and throws OtaPushError('roleMismatch', …) on conflict,
+   *      saving a roundtrip + Bank-B erase on the obviously-wrong target;
+   *    - includes it in FwBeginUpdate (field 5, force-encoded) so the LP
+   *      can fail-fast even if the bridge-side check missed (Gap 1-LP).
+   *  Leave undefined to skip the role gate entirely (test harnesses,
+   *  legacy bundles without a role field). */
+  expectedRole?: number;
 }
 
 export class OtaPushError extends Error {
@@ -243,6 +271,7 @@ export async function pushImage(
   const rebootAfterActivate = opts.rebootAfterActivate ?? true;
   const bankInfoTimeout = opts.bankInfoTimeoutMs ?? 3000;
   const rejectDowngrade = opts.rejectDowngrade ?? true;
+  const expectedRole    = opts.expectedRole;   // undefined → skip role gate
 
   const image = await fs.readFile(imagePath);
   if (image.length === 0) {
@@ -360,7 +389,16 @@ export async function pushImage(
 
   function checkStatus(s: FwUpdateStatus, where: string): void {
     if (s.state === FwUpdateState.Error) {
-      const kind = s.errorCode === 1 ? 'notImplemented' : 'firmwareError';
+      // Map known LP_OTA_ERR_* codes to distinct OtaPushError kinds so
+      // callers (installer / UI) can branch on them. Codes mirror
+      // Nova_Firmware/lp_am2434/lp_ota_task.h.
+      let kind: string;
+      switch (s.errorCode) {
+        case 1:  kind = 'notImplemented'; break;
+        case 27: kind = 'roleMismatch';   break;   // LP_OTA_ERR_ROLE_MISMATCH
+        case 28: kind = 'downgradeBlocked'; break; // LP_OTA_ERR_DOWNGRADE
+        default: kind = 'firmwareError';
+      }
       throw new OtaPushError(kind,
         `firmware ${where} error code=${s.errorCode} msg="${s.errorMessage}"`);
     }
@@ -388,8 +426,16 @@ export async function pushImage(
     const bankInfoTimer = new Promise<null>(r => setTimeout(() => r(null), bankInfoTimeout));
     preBankInfo = await Promise.race([bankInfoPromise, bankInfoTimer]);
     if (preBankInfo) {
-      const active = preBankInfo.activeBank === 1 /* BankA */ ? preBankInfo.bankAVersion
-                   : preBankInfo.activeBank === 2 /* Golden */ ? preBankInfo.goldenVersion
+      // FwBankId enum (proto/agristar/firmware.proto): BankA=0, BankB=1, Golden=2.
+      // The previous comparison-with-literal-1-commented-"BankA" was a latent
+      // off-by-one — it printed the wrong bank's version and silently disabled
+      // the rejectDowngrade gate below for boards running on Bank A (the
+      // common case). 2026-05-20 bench evidence: a freshly-flashed LP with
+      // Bank A active and 0.A.188 firmware logged `version=""` because the
+      // else-branch returned the empty bankBVersion. Now uses the typed enum
+      // so the values and labels stay in lockstep.
+      const active = preBankInfo.activeBank === FwBankId.BankA  ? preBankInfo.bankAVersion
+                   : preBankInfo.activeBank === FwBankId.Golden ? preBankInfo.goldenVersion
                    : preBankInfo.bankBVersion;
       console.log(`[ota-push ${host}] pre-push state: activeBank=${preBankInfo.activeBank} ` +
                   `version="${active}" bootCount=${preBankInfo.bootCount} ` +
@@ -404,6 +450,16 @@ export async function pushImage(
             `Pass rejectDowngrade=false to override.`);
         }
       }
+      // G1-bridge (2026-05-20): role cross-check. If the LP firmware
+      // is new enough to emit current_role AND the caller told us what
+      // role the bundle expects, fail fast on a mismatch instead of
+      // sending Begin and waiting for the LP's role-mismatch reject.
+      if (expectedRole !== undefined && preBankInfo.currentRole !== undefined &&
+          preBankInfo.currentRole !== expectedRole) {
+        throw new OtaPushError('roleMismatch',
+          `${host} reports currentRole=${preBankInfo.currentRole} but bundle expects role=${expectedRole}. ` +
+          `Aborting before Begin to save a Bank-B erase cycle.`);
+      }
     } else {
       console.warn(`[ota-push ${host}] no FwBankInfo received within ${bankInfoTimeout}ms ` +
                    `— proceeding without pre-flight bank check (legacy fw?)`);
@@ -415,8 +471,14 @@ export async function pushImage(
       bytesSent = 0;
 
       // ── Begin ────────────────────────────────────────────────────────
+      // Forward expectedRole + !rejectDowngrade to the LP so the
+      // firmware-side gates (Gap 1-LP, Gap 2-LP, 2026-05-20) match what
+      // we just enforced bridge-side. allow_downgrade is the inverse of
+      // rejectDowngrade — true tells the LP to skip its own downgrade
+      // check too.
       send(LpOtaTag.Begin,
-           encodeBegin(image.length, imageCrc, version, chunkSize));
+           encodeBegin(image.length, imageCrc, version, chunkSize,
+                       expectedRole, !rejectDowngrade));
       finalStatus = await awaitStatus();
       checkStatus(finalStatus, 'Begin');
 
