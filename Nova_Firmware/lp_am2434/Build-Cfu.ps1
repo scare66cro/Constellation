@@ -4,15 +4,38 @@
     Build a Constellation Firmware Update (.cfu) bundle for OTA testing.
 
 .DESCRIPTION
-    Compiles the LP-AM2434 firmware via the standard `gmake PROFILE=release`
-    pipeline (same build path as Flash-LP.ps1), then packs the produced
-    `nova_lp.release.mcelf.hs_fs` into a .cfu zip with a manifest that
-    declares ALL FOUR orbit roles. The same .hs_fs file is referenced by
-    each manifest component — the LP-side role check compares the
-    incoming `expected_role` to `lp_device_config.role` (the OSPI-
-    persisted role from the board's last JTAG provision), NOT to the
-    binary's compile-time default. So one build is functionally equivalent
-    to four for already-provisioned boards.
+    Compiles the LP-AM2434 firmware as a UNIVERSAL binary — same gmake
+    pipeline as Flash-LP.ps1, but WITHOUT the `-DCONFIG_NOVA_LP_ROLE` and
+    `-DCONFIG_NOVA_LP_IP` flags. The resulting `.hs_fs` carries every
+    role's code paths (CONTROLLER + STORAGE + GDC + TRITON dispatch
+    branches; main.c picks at runtime via `OrbitRole_Get()` reading
+    `lp_device_config.role` from OSPI) and CRITICALLY does NOT contain
+    the factory-provisioning override block in `lp_device_config.c:309-339`
+    (that block is `#if defined(CONFIG_NOVA_LP_IP) && (CONFIG_NOVA_LP_IP
+    != 0U)` — compiled out when the flag is unset).
+
+    Why this matters for OTA: a CONFIG_NOVA_LP_IP-baked binary, when
+    OTA'd onto a board whose stored IP differs, ACTIVELY OVERWRITES the
+    target board's OSPI device-config record with the binary's
+    compile-time values on first boot. That's how a CONTROLLER-baked
+    binary OTA'd onto a STORAGE board makes the STORAGE board come back
+    up as CONTROLLER at 10.47.27.1, fighting the real controller for
+    the IP. (Bench-confirmed 2026-05-20; see
+    memories/repo/cfu-baked-role-overrode-ospi.md.)
+
+    The universal binary has no role-specific bake — its boot path reads
+    OSPI device-config and uses whatever role is persisted there. JTAG
+    flashes via Flash-LP.ps1 still pass the flags so the override block
+    writes OSPI on initial provisioning. OTA flashes (this script) skip
+    them so existing OSPI records are preserved.
+
+    The same .hs_fs is referenced by all four manifest components — the
+    file is identical; only the per-component (role, slot, ip) metadata
+    differs so the bridge routes each push to the correct LP via
+    FwBankInfo.current_role. The LP-side G1-LP role gate still fires:
+    bridge sends `expected_role` from the manifest, LP compares against
+    its persisted role, mismatch = reject. (See
+    docs/lp-am2434-ota-hardening-plan.md.)
 
     The bundle is written to `firmware-bundles/constellation-<version>.cfu`.
 
@@ -96,7 +119,7 @@ Write-Host ""
 
 # ─── Build the firmware (optional skip) ─────────────────────────────────
 if (-not $SkipBuild) {
-    Write-Host "[build] gmake PROFILE=release CONFIG_NOVA_LP_ROLE=0 CONFIG_NOVA_LP_IP=0x0A2F1B01" -ForegroundColor Yellow
+    Write-Host "[build] gmake PROFILE=release (UNIVERSAL - no CONFIG_NOVA_LP_ROLE/IP flags)" -ForegroundColor Yellow
     $gmake = 'C:\ti\ccs2050\ccs\utils\bin\gmake.exe'
     if (-not (Test-Path $gmake)) { throw "gmake not found at $gmake" }
     $env:CCS_PATH    = 'C:/ti/ccs2050/ccs'
@@ -124,10 +147,9 @@ if (-not $SkipBuild) {
         $oldEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            & $gmake PROFILE=release `
-                'CONFIG_NOVA_LP_ROLE=0' `
-                'CONFIG_NOVA_LP_IP=0x0A2F1B01' `
-                all 2>&1 | Out-Host
+            # No CONFIG_NOVA_LP_ROLE / CONFIG_NOVA_LP_IP flags — see
+            # script header for rationale. Universal binary, OSPI-driven role.
+            & $gmake PROFILE=release all 2>&1 | Out-Host
         } finally {
             $ErrorActionPreference = $oldEap
         }

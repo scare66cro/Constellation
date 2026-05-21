@@ -93,6 +93,25 @@ mechanical, not a research project.
     — match that pattern exactly. Full rule + 3-day debug trail:
     [`docs/lp-am2434-ospi-dac-writes.md`](docs/lp-am2434-ospi-dac-writes.md).
 
+12. **🚨 UART airgap is the production data path between Pi5 and the
+    equipment LAN — not a transport choice.** In production the Pi5
+    lives on the customer/internet side (e.g. `192.168.10.108`) and
+    has NO IP route to `10.47.27.0/24`. The Nova-controller LP
+    bridges via UART (`/dev/ttyAMA0` @ 921600, COBS+protobuf
+    envelopes) on the Pi5 side and Ethernet on the LP side. Every
+    bit of bridge↔LP communication must traverse Nova.
+    **TODAY'S BENCH HAS THE PI5 DUAL-HOMED ON `10.47.27.108` FOR
+    DEV CONVENIENCE.** That breaks the airgap and is the reason
+    `orbitOtaPush.ts` / `orbitFleetResolver.ts` / `probe_fleet.ts` /
+    `vfdClient.ts` / `orbitMbtcp.ts` work — they open TCP sockets
+    directly to LPs. **None of those code paths is production-shaped
+    and they must migrate into Nova-as-broker before a Pi5 ships to
+    a customer.** Full architecture + migration plan:
+    [`docs/uart-airgap-architecture.md`](docs/uart-airgap-architecture.md).
+    If you are writing new bridge↔LP code and you see TCP-from-Pi5-to-LP
+    in your design, that is the migration target, not the production
+    pattern — design the envelope, not the socket.
+
 # Doc map (single source of truth for "where is X?")
 
 ## Architecture & state
@@ -117,6 +136,7 @@ mechanical, not a research project.
 - [`docs/LP-Flash-Probe-Discipline.md`](docs/LP-Flash-Probe-Discipline.md) — flash/probe/reset, wrong-probe recovery.
 - [`docs/Constellation-Board-Hardware-Spec.md`](docs/Constellation-Board-Hardware-Spec.md) — custom production PCB v0 spec.
 - [`docs/Network-Migration-10.47.27.x.md`](docs/Network-Migration-10.47.27.x.md) — lab network plan.
+- [`docs/uart-airgap-architecture.md`](docs/uart-airgap-architecture.md) — **production UART airgap + Nova-as-OTA-broker migration plan.** Bench Pi5 is currently dual-homed for dev; production Pi5 lives on internet side with UART-only path to Nova.
 - [`docs/lp-am2434-watchdog-design.md`](docs/lp-am2434-watchdog-design.md), [`docs/lp-am2434-f2c-sbl-chooser-design.md`](docs/lp-am2434-f2c-sbl-chooser-design.md).
 - [`docs/Bench-Checklist-2026-05-02.md`](docs/Bench-Checklist-2026-05-02.md) — archived runbook.
 

@@ -1,0 +1,261 @@
+# UART airgap architecture + OTA migration plan
+
+> **🚨 INVARIANT — IF YOU ARE WORKING ON BRIDGE↔NOVA COMMUNICATION, READ THIS FIRST 🚨**
+>
+> The **production** Constellation deployment has the Pi5 on the operator/
+> internet-side LAN (e.g. `192.168.10.0/24`) and Nova on the equipment LAN
+> (`10.47.27.0/24` via dipswitch-assigned IPs). The **only** physical path
+> between the two networks is the **UART** at `/dev/ttyAMA0` between the
+> Pi5 and the Nova-controller LP.
+>
+> **In the production architecture, the Pi5 has NO IP route to any orbit LP.**
+> Any bridge-side code that opens a TCP socket to `10.47.27.x` is dev-only
+> and must not ship.
+>
+> **THE CURRENT BENCH (2026-05-20) IS DUAL-HOMED FOR DEV CONVENIENCE.**
+> The Pi5 sits at `10.47.27.108` on the same LAN as the orbit LPs and can
+> reach `:5503` on each LP directly. This breaks the airgap. It exists
+> only because it lets us iterate on the LP firmware over OTA without
+> building Nova-as-OTA-relay first. **All bridge-side code that
+> TCP-connects directly to LPs (`orbitOtaPush.ts`, `orbitOtaClient.ts`,
+> `orbitFleetResolver.ts`, `probe_fleet.ts`, `vfdClient.ts`,
+> `orbitMbtcp.ts`) is on borrowed time and must migrate to Nova-as-relay
+> before a Pi5 ships to a customer.**
+>
+> If you are touching this stack and you see TCP-from-Pi5-to-LP, that is
+> the migration target, not the production design.
+
+## The intended architecture (production)
+
+```
+┌──────────────────────────┐
+│  Operator workstation /  │
+│  customer office WiFi    │
+│  192.168.10.0/24         │
+└────────────┬─────────────┘
+             │ HTTPS, SvelteKit UI (port 80/443 via lighttpd)
+             │
+┌────────────▼─────────────────────────────────┐
+│              Raspberry Pi 5                  │
+│              192.168.10.108                  │
+│                                              │
+│  - SvelteKit UI (operator-facing)            │
+│  - agristar-bridge.service (REST/WS, :9001)  │
+│  - Speaks ONLY UART to Nova                  │
+│  - NO route to 10.47.27.x                    │
+└────────────┬─────────────────────────────────┘
+             │ /dev/ttyAMA0  @ 921600 baud
+             │ COBS + protobuf envelopes
+             │ (the ONLY data path between sides)
+             │
+┌────────────▼─────────────────────────────────┐
+│         Nova-controller LP (AM2434)          │
+│         10.47.27.1  (dipswitch-set)          │
+│                                              │
+│  - UART2 ↔ Pi5 (bridge_uart_task)            │
+│  - CPSW Ethernet ↔ 10.47.27.0/24 LAN         │
+│  - Modbus TCP master to Storage/GDC/Triton   │
+│  - OTA broker (relay role — see migration)   │
+└────────────┬─────────────────────────────────┘
+             │ Ethernet (gigabit RGMII via DP83869 PHY)
+             │ 10.47.27.0/24 — AIRGAPPED equipment LAN
+             │
+   ┌─────────┴─────────┬──────────┬──────────┐
+   │                   │          │          │
+┌──▼──────┐  ┌─────────▼──┐  ┌────▼────┐  ┌──▼──────┐
+│ Storage │  │  GDC       │  │ Triton  │  │ Pulsar  │
+│ 10.47.  │  │  10.47.    │  │ 10.47.  │  │ 10.47.  │
+│  27.2   │  │   27.3     │  │  27.4   │  │  27.5+  │
+└─────────┘  └────────────┘  └─────────┘  └─────────┘
+```
+
+The dipswitches on each LP set the bottom-octet of its `10.47.27.x` IP
+and are read at boot before any networking comes up. There's no DHCP on
+this LAN — every IP is hardware-pinned.
+
+## Why the UART matters
+
+The UART isn't just convention; it's the entire security argument for
+the system. Specifically:
+
+| Threat | UART airgap mitigation |
+|---|---|
+| Pi5 web UI compromise (RCE via SvelteKit/Node CVE) | Attacker has shell on Pi5 but no IP route to LPs. To touch equipment they must speak the bridge envelope protocol over UART — a structured proto3-over-COBS interface that the Nova firmware validates field-by-field. |
+| Customer/operator network exposure | Pi5 sits on the office LAN; the equipment LAN is physically separate. Internet-side attackers can't pivot to the LP bus. |
+| Lateral movement from one LP to another | LPs are on a closed LAN with only Nova as Modbus master. A compromised LP can't pivot to other LPs because no LP runs a Modbus client (only Nova does). |
+| Malicious firmware delivery | OTA traffic must traverse Nova. Nova can validate manifest signatures, role-vs-binary consistency, and version-downgrade policy before any byte hits the destination LP. Choke point = control point. |
+
+The cost is that **every bit of communication between operator-side
+and equipment-side has to go through Nova**. Adding a new control
+surface means designing a new envelope field, decoding it in Nova,
+acting on it. There's no "just open another port from the Pi5" shortcut.
+That cost is the price of the airgap, and it's worth it.
+
+## The current dev compromise (2026-05-20)
+
+Today's bench has the Pi5 dual-homed (or single-homed on the airgapped
+LAN at `10.47.27.108`). This means:
+
+- `orbitFleetResolver.snapshotFleet()` directly probes each LP's
+  `:5503` OTA listener for `FwBankInfo`.
+- `firmwareInstaller.pushOneComponent()` directly streams chunks to
+  the destination LP via `orbitOtaPush.pushImage()`.
+- `probe_fleet.ts` runs on the Pi5 (or the dev workstation) and
+  reaches the LPs directly.
+- `vfdClient.ts` and `orbitMbtcp.ts` are Modbus TCP clients that talk
+  directly to LP `:5502`.
+
+**None of this works in the production airgap.** It works on the bench
+because we put the Pi5 on the wrong LAN.
+
+The reason we did this: it lets us iterate on LP-firmware changes
+rapidly without first standing up Nova-as-OTA-relay. JTAG + OTA round-
+trips in ~3 minutes today; an OTA-via-Nova round-trip would require
+Nova firmware to be the OTA broker, which is multi-session work to
+build. The "Pi5 on LAN" shortcut was the right dev call, but the
+production migration is owed.
+
+## Migration plan — OTA via Nova
+
+The goal: the Pi5 is back on the operator LAN. Nova becomes the OTA
+broker. The LP-side wire protocol stays the same.
+
+### Phase 1 — Capture the bridge-side algorithms as Nova-side specs
+
+What today's `firmwareInstaller.ts` + `orbitOtaPush.ts` +
+`orbitFleetResolver.ts` do, that Nova will need to do:
+
+1. **Fleet snapshot.** Probe every LP on `10.47.27.0/24`, capture
+   `FwBankInfo` (active bank, version, role, valid bits).
+2. **Manifest validation.** Verify the .cfu manifest sha256, schema
+   version, role-coherent component layout.
+3. **Role-to-IP routing.** For each manifest component, match
+   `comp.role` to an LP whose `FwBankInfo.current_role` matches.
+   Throw on `noMatch` or `ambiguous` (today's `FleetResolverError`).
+4. **Per-LP push.** Connect to LP `:5503`, send `FwBeginUpdate`
+   (with `expected_role` + `allow_downgrade`), stream chunks,
+   `FwFinalizeUpdate`, `FwActivateBank`, wait for return.
+5. **Audit logging.** Record per-component pre-push state, push
+   timing, success/failure with the LP error code.
+
+In the migrated architecture all of this runs on Nova. The Pi5 just
+sends the .cfu blob and receives progress updates.
+
+### Phase 2 — Add bridge envelope for OTA initiation
+
+Define new envelope fields (`proto/agristar/firmware.proto`):
+
+- `FwInstallBundle { bytes manifest_json; bytes cfu_blob; }` — Pi5 →
+  Nova: here's the .cfu, please install across the fleet. Or a
+  chunked variant `FwInstallChunk { uint32 offset; bytes data; }` if
+  the .cfu doesn't fit in a single envelope (likely; .cfu is ~300 KB,
+  envelope budget is much smaller).
+- `FwInstallProgress { string component; ... bytes_written/total; state; }` —
+  Nova → Pi5: per-component progress, mirroring the existing
+  `firmware-progress` WebSocket on the bridge.
+- `FwInstallResult { ComponentResult[] components; ... }` — Nova →
+  Pi5: terminal result.
+
+These envelope fields are the contract between the Pi5 and Nova for
+OTA. The Pi5 becomes a thin client that hands Nova the bundle and
+listens for progress.
+
+### Phase 3 — Implement Nova OTA broker
+
+In Nova firmware:
+
+- New task `nova_ota_broker_task` (similar shape to today's
+  `lp_ota_task` but Nova-side).
+- Reuses the existing TCP `:5503` push state machine from
+  `orbitOtaPush.ts` — port it to C in Nova. The wire protocol on
+  LP `:5503` is unchanged.
+- Adds a `FwInstallBundle` handler that buffers the .cfu in MSRAM
+  or a temp OSPI scratch region, validates the manifest, then
+  fans out per-component pushes.
+- Sends `FwInstallProgress` envelopes back to the Pi5 every chunk
+  or every state transition.
+
+This task replaces the bridge-side `firmwareInstaller.ts` for
+production. The Pi5 still has `firmwareInstaller.ts` as the
+**thin-client orchestrator** but it just relays envelopes — no
+direct TCP to LPs.
+
+### Phase 4 — Retire bridge-side direct-LP TCP
+
+When Phase 3 ships and is bench-verified:
+
+- Delete `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
+  `probe_fleet.ts` from the bridge.
+- Move `vfdClient.ts` and `orbitMbtcp.ts` Modbus-TCP logic INTO Nova.
+  Today these run on the Pi5 because that was the dev shortcut.
+  Production: Nova polls the orbit LPs and VFD over Modbus, then
+  publishes the results to the Pi5 via envelopes (today's
+  `FrontMatter` and friends).
+- Update the bridge env: drop `ORBIT_FLEET`, drop `VFD_HOST`.
+- Update Pi5 deployment: bind only to `192.168.10.108` (or whatever
+  customer-side address), explicitly NOT to `10.47.27.0/24`.
+
+### Phase 5 — Move the dev Pi5 off the equipment LAN
+
+Once Phase 4 is solid, the bench Pi5 stops needing the
+`10.47.27.0/24` interface. Reconfigure the Pi5's network bringup
+(systemd-networkd, dhcpcd, or whatever's used) to only have the
+operator-side NIC. Verify with `ip route` that there's no route to
+`10.47.27.0/24`. Then attempt every OTA, sensor-read, equipment-
+command via the UART path only. If anything still works directly to
+an LP, find and remove the offending bridge code.
+
+### Migration risks + open questions
+
+- **Size of .cfu through UART.** At 921600 baud, a 300 KB .cfu takes
+  ~2.6 seconds raw, more with COBS escaping and per-chunk
+  acknowledgement. Acceptable. The 4-component bundle is ~1.2 MB
+  which is ~10 seconds — also OK.
+- **Nova storage for the bundle during install.** MSRAM is ~1.4 MB.
+  Today the bridge holds the .cfu in `/tmp/constellation-firmware-staging`.
+  In the migrated architecture Nova holds it. Either (a) buffer the
+  whole .cfu in MSRAM (fits today but tight), or (b) buffer per-
+  component (stream chunk N of component K from Pi5 → Nova → LP
+  without intermediate storage). The chunked variant is more code
+  but avoids the MSRAM ceiling.
+- **Progress reporting cadence.** Today the bridge emits
+  `firmware-progress` over WebSocket every chunk. Echoing every
+  chunk over UART to the Pi5 would saturate the UART. Aggregate
+  to every-N-chunks or every-5%-progress.
+- **Failure recovery.** If Nova's OTA broker hangs mid-install,
+  the Pi5 needs a watchdog/timeout to surface the failure to the UI.
+  Today the bridge has its own timeouts. Nova-side needs the same.
+
+## What this means for already-shipped work
+
+The work landed in commit `f7dea6f9` and earlier (today's WCC fix +
+universal-binary build flow on top) is **mostly transport-independent
+and survives the migration**:
+
+| Component | Survives migration? | Notes |
+|---|---|---|
+| LP-side role gate (G1-LP, BEGIN handler) | ✅ | LP doesn't care if the chunks come from Pi5 or Nova. |
+| LP-side downgrade gate (G2-LP) | ✅ | Same. |
+| `FwBankInfo.current_role` proto field | ✅ | Used by whoever does the fleet probe. Today Pi5, tomorrow Nova. |
+| `FwBeginUpdate.expected_role` / `allow_downgrade` | ✅ | Same. |
+| Universal-binary build (`Build-Cfu.ps1`) | ✅ | The binary content is unchanged; only the orchestrator changes. |
+| `hal_flash_init` WCC=0 fix | ✅ | Unrelated to transport. |
+| LP-side OTA listener on `:5503` | ✅ | Migration changes whose IP it accepts from. |
+| Bridge `orbitFleetResolver.ts` | ⚠️  Logic migrates to Nova | Same algorithm, different host. |
+| Bridge `firmwareInstaller.ts` | ⚠️  Migrates partial | Thin-client orchestration stays on Pi5; per-component push moves to Nova. |
+| Bridge `orbitOtaPush.ts` | ⚠️  Logic migrates to Nova | Port the TCP push state machine to C. |
+| Bridge `probe_fleet.ts` | 🗑️  Becomes Nova-side diag CLI | Or a UI button that asks Nova "probe and report". |
+| `ORBIT_FLEET` env var on bridge | 🗑️  Becomes a Nova-side config | Or hardcoded from dipswitch discovery. |
+
+So the firmware-side work tonight is durable. The bridge-side work is
+"correct dev tooling" that documents the production algorithms but
+needs to move home.
+
+## Where this doc fits
+
+- Cross-referenced from [`CLAUDE.md`](../CLAUDE.md) invariant #12.
+- Cross-referenced from [`docs/Network-Migration-10.47.27.x.md`](Network-Migration-10.47.27.x.md).
+- Cross-referenced from [`docs/lp-am2434-ota-hardening-plan.md`](lp-am2434-ota-hardening-plan.md).
+- Cross-referenced from `memories/repo/ota-bench-2026-05-20-three-layers.md`.
+
+Update those if this doc moves or its invariants change.

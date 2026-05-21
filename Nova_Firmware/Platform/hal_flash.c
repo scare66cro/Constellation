@@ -292,6 +292,42 @@ void hal_flash_init(void)
      * NOT touch chip NV registers or do chip-level recovery — that's
      * the auto-flasher's responsibility. */
     (void)hal_flash_chip_reset;     /* kept as a dead reference */
+
+    /* 0.A.189 (2026-05-20): disable OSPI controller auto-polling.
+     * Board_flashOpen leaves WRITE_COMPLETION_CTRL_REG = 0x000340FF
+     * whose OPCODE field [7:0] is 0xFF — on Cypress S25HL512T that's
+     * "Reset to Default I/O Mode". Every auto-poll cycle the controller
+     * issues to wait for WIP=0 actually sends a chip-reset command,
+     * which silently corrupts mid-PP and any subsequent OSPI write
+     * during boot (LpDeviceConfig saves, NovaFwUpdate bank headers, …).
+     *
+     * The same fix lives in lp_ota_task startup (line ~1511) as a
+     * belt-and-suspenders for the OTA path, but THAT is too late for
+     * boot-time saves: LpDeviceConfig_Init runs in main() and may
+     * invoke LpDeviceConfig_Save (factory IP override at line 318 or
+     * legacy bank migration at line 300) BEFORE the lp_ota_task ever
+     * gets to run. Without this fix at hal_flash_init, those boot-time
+     * saves silently fail — the RAM cache reflects the intended new
+     * record so the running firmware appears correct (probe shows the
+     * expected role + IP) but the next boot reads corrupted/blank OSPI
+     * and falls back to compile-time defaults (CONTROLLER).
+     *
+     * Bench-confirmed 2026-05-20: storage board went OTA → universal
+     * binary → boot → comes up as CONTROLLER on 10.47.27.1, in IP
+     * conflict with the real controller. Root cause was the JTAG-boot
+     * LpDeviceConfig save being silently corrupted by this auto-poll
+     * chip-reset, so OSPI no longer held the STORAGE record on the
+     * next boot. See memories/repo/wcc-auto-poll-corrupts-boot-saves.md.
+     *
+     * Pre-scheduler safe: a single MMIO write to the OSPI controller. */
+    {
+        extern void bb_uart0_puts(const char *s);
+        volatile uint32_t *wcc_p = (volatile uint32_t *)(uintptr_t)(0x0FC40000U + 0x38U);
+        uint32_t wcc_before = *wcc_p;
+        *wcc_p = 0x00000000U;
+        bb_uart0_puts("[FLASH] WCC auto-poll disabled (0xFF reset opcode neutralised)\r\n");
+        (void)wcc_before;
+    }
 }
 
 int hal_flash_read(uint32_t addr, uint8_t *buf, uint32_t len)
