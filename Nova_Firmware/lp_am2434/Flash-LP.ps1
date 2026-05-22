@@ -137,6 +137,43 @@ $roleMap = @{
     'TRITON'     = @{ Id = 3; DefaultIp = '10.47.27.4' }
 }
 
+# === Probe-state helpers ===============================================
+# After a Flash-LP run the script disables non-target probes and
+# re-enables them in its finally{}. But if the user kills/aborts a
+# previous run (or hits the COM-busy Disable failure path), some probes
+# can stay administratively-disabled across sessions. The next flash
+# fails non-obviously: "Requested probe X is NOT enumerated. Plug it in
+# and retry." (when in fact it IS plugged in, just PnP-disabled).
+#
+# Enable-AllKnownProbes is the cure: at the top of every Flash-LP run,
+# walk every distinct serial in $probeMap and call Set-Probe -Action
+# Enable on it. Idempotent — already-enabled probes log "[keep on]"
+# and no-op. Cheap (~5 ms per probe via Get-PnpDevice).
+#
+# Note: $probeMap has 'B' and 'N' sharing physical serial S24L0707, so
+# we dedupe by serial here.
+function Enable-AllKnownProbes {
+    param([hashtable]$ProbeMap, [string]$SetProbeScript)
+    $seenSerials = @{}
+    $letters = @()
+    foreach ($k in @('A','B','N','P','T')) {
+        if (-not $ProbeMap.ContainsKey($k)) { continue }
+        $s = $ProbeMap[$k].Serial
+        if ($seenSerials.ContainsKey($s)) { continue }
+        $seenSerials[$s] = $true
+        $letters += $k
+    }
+    Write-Host "[probe-prep] ensuring all known probes are PnP-enabled: $($letters -join ', ')" -ForegroundColor DarkGray
+    foreach ($l in $letters) {
+        try {
+            & $SetProbeScript -Probe $l -Action Enable -ErrorAction Stop
+        } catch {
+            Write-Warning "[probe-prep] Enable -Probe $l failed: $_  (continuing — flash-side checks will catch real issues)"
+        }
+    }
+    Start-Sleep -Milliseconds 500   # USB stack settle
+}
+
 # === Belt-and-suspenders probe isolation gate =========================
 # Defense against the well-documented DSS "wrong-probe trap": the .ccxml
 # `<property id="The serial number is">` filter is silently ignored when
@@ -238,7 +275,18 @@ if ($dirty -and -not $Force -and -not $FlashPhyTuning) {
 # re-enable all probes afterward.
 $xdsdfu = 'C:\ti\ccs2050\ccs\ccs_base\common\uscif\xds110\xdsdfu.exe'
 $setProbe = Join-Path $PSScriptRoot 'Set-Probe.ps1'
-$disabledOthers = $false
+
+# Wrap from here so the finally{} below ALWAYS re-enables probes, even
+# if the probe-safety precheck itself aborts (e.g. Disable-PnpDevice
+# failed because a COM port was open). Previously the try{} started
+# AFTER the precheck, so a precheck abort left probes in a half-disabled
+# state and the next flash session couldn't find them.
+try {
+
+# Ensure every physically-attached probe is PnP-enabled BEFORE the
+# precheck enumerates. Cures the "previous Flash-LP run aborted before
+# its finally{} restored siblings" sticky state.
+Enable-AllKnownProbes -ProbeMap $probeMap -SetProbeScript $setProbe
 
 if (Test-Path $xdsdfu) {
     $serials = (& $xdsdfu -e 2>&1 | Select-String 'Serial Num:\s*(\S+)' |
@@ -250,7 +298,6 @@ if (Test-Path $xdsdfu) {
     if ($serials.Count -gt 1) {
         Write-Host "[probe-check] Multiple probes — running Set-Probe -Probe $Probe -Action Solo" -ForegroundColor Yellow
         & $setProbe -Probe $Probe -Action Solo
-        $disabledOthers = $true
         Start-Sleep -Seconds 2  # let Windows USB stack settle after disables
     }
     # Belt-and-suspenders gate. Throws if anything is off (multiple probes
@@ -261,12 +308,10 @@ if (Test-Path $xdsdfu) {
     Write-Warning "[probe-check] xdsdfu.exe not found at $xdsdfu — skipping safety check."
 }
 
-# Wrap the entire build+flash run so a failure (build error, OSPI
-# uniflash crash, image-missing throw) still re-enables the probes we
-# disabled. Without this, a botched flash leaves you with one live
-# probe + N silently-disabled siblings, so the next role's flash works
-# but its sibling can't talk over UART or be flashed.
-try {
+# NOTE: the try{} that wraps the rest of this script (and the matching
+# finally{} that re-enables all probes) now lives BEFORE the probe-
+# safety precheck, so an abort there still triggers the cleanup.
+# Don't re-open another try here.
 
 # --- One-shot: PHY tuning attack-vector writer -------------------------
 # Recovered (and virgin) S25HL512T chips lack the 128-byte attack vector
@@ -581,13 +626,23 @@ if ($SkipWatchdog -and $flashExitCode -eq 0) {
 }  # end of `if (-not $FlashPhyTuning)` — normal build+flash path
 
 } finally {
-    # Always re-enable every probe we touched, even on build/flash
-    # failure. Idempotent: Set-Probe -Action Enable on an already-enabled
-    # probe is a no-op.
-    if ($disabledOthers) {
-        Write-Host "[probe-check] Re-enabling all probes (finally)..." -ForegroundColor Yellow
-        foreach ($p in @('N','A','B','T')) {
+    # Always re-enable every probe, regardless of whether THIS run was
+    # the one that disabled them. Idempotent: Set-Probe -Action Enable
+    # on an already-enabled probe is a no-op. Running unconditionally
+    # protects against the case where a prior session left things in a
+    # half-disabled state.
+    #
+    # Probe letters covered: 'A' (S24L0417 storage), 'B' / 'N' (both
+    # alias S24L0707 controller/GDC — Set-Probe is idempotent), 'P'
+    # (S24L0727 GDC, added 2026-05-20), 'T' (S24L0957 triton). Missing
+    # 'P' was a 2026-05-21 bug that left it disabled across role swaps.
+    Write-Host "[probe-check] Re-enabling all probes (finally)..." -ForegroundColor Yellow
+    foreach ($p in @('N','A','B','P','T')) {
+        try {
             & $setProbe -Probe $p -Action Enable -ErrorAction SilentlyContinue
+        } catch {
+            # Don't let cleanup failures mask the original error.
+            Write-Warning "[probe-check] finally re-enable -Probe $p failed: $_"
         }
     }
 }

@@ -61,6 +61,25 @@ $all = Get-PnpDevice -PresentOnly | Where-Object {
 
 if (-not $all) { throw "No XDS110 USB Composite Devices enumerated." }
 
+# Disable-PnpDevice failure helper. The most common cause is that the
+# probe's USB-CDC serial port (COM5/COM7/COM9/COM4 depending on probe)
+# is currently open by another process - typically Capture-Com.ps1
+# leaving a COM monitor running. Windows refuses to disable a USB
+# Composite Device while any child endpoint has an open handle.
+# Emit a clear, actionable hint instead of the bare "Generic failure".
+function Invoke-DisableWithHint {
+    param([string]$Serial, [string]$InstanceId)
+    try {
+        Disable-PnpDevice -InstanceId $InstanceId -Confirm:$false -ErrorAction Stop
+    } catch {
+        $msg = "Disable-PnpDevice failed for $Serial. Most common cause: " +
+               "a COM port for this probe (COM5/COM7/COM9/COM4) is currently " +
+               "open in another terminal (Capture-Com.ps1?). Close that " +
+               "terminal, then retry. Underlying error: $($_.Exception.Message)"
+        throw $msg
+    }
+}
+
 if ($Action -eq 'Solo') {
     foreach ($d in $all) {
         $serial = ($d.InstanceId -split '\\')[-1]
@@ -74,7 +93,7 @@ if ($Action -eq 'Solo') {
         } else {
             if ($d.Status -eq 'OK') {
                 Write-Host "[disable] $serial" -ForegroundColor Yellow
-                Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false
+                Invoke-DisableWithHint -Serial $serial -InstanceId $d.InstanceId
             } else {
                 Write-Host "[keep off] $serial (already disabled)" -ForegroundColor DarkGray
             }
@@ -91,7 +110,7 @@ if ($Action -eq 'Solo') {
     }
     if ($Action -eq 'Disable') {
         Write-Host "[disable] $wantSerial" -ForegroundColor Yellow
-        Disable-PnpDevice -InstanceId $target.InstanceId -Confirm:$false
+        Invoke-DisableWithHint -Serial $wantSerial -InstanceId $target.InstanceId
     } else {
         Write-Host "[enable]  $wantSerial" -ForegroundColor Green
         Enable-PnpDevice -InstanceId $target.InstanceId -Confirm:$false
