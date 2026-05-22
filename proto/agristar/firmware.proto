@@ -123,3 +123,208 @@ message FwBankInfo {
                                   // "unknown role" and falls through to relying on
                                   // LP-side FwBeginUpdate.expected_role gate.
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pi5 ↔ Nova install-orchestration layer (UART airgap migration, Phase 2)
+//
+// The messages above (FwBeginUpdate / FwDataChunk / FwFinalizeUpdate /
+// FwActivateBank / FwUpdateStatus / FwBankInfo) are the LP-level wire
+// protocol. In the production UART-airgap architecture (see
+// docs/uart-airgap-architecture.md and CLAUDE.md invariant #12), the Pi5
+// has NO IP route to the orbit LPs. Instead, the Pi5 hands the .cfu
+// bundle's contents to Nova over UART using the FwInstall* messages
+// defined below, and Nova brokers per-component pushes to the orbit LPs
+// over CPSW using the LP-level protocol above.
+//
+// State machine (Pi5 → Nova):
+//   FwInstallBegin
+//   [ FwInstallComponentBegin
+//     FwInstallChunk*            -- streamed at UART line rate
+//     FwInstallComponentFinalize
+//   ]+
+//   FwInstallComplete
+//
+// At any point Pi5 may send FwInstallAbort to cancel.
+//
+// Nova → Pi5 emits FwInstallProgress envelopes on every state transition
+// and periodically while pushing (cadence: every ~5% of component bytes
+// to keep UART back-direction duty cycle low). After FwInstallComplete
+// (or FwInstallAbort cleanup) Nova sends FwInstallResult with the
+// per-component terminal summary.
+//
+// Routing model: Nova routes each component to its destination by
+// **role**, not slot. Nova knows its own role from OSPI device-config;
+// role-matching the controller component → Nova self-updates its own
+// inactive bank. Role-matching an orbit component → Nova opens TCP to
+// the LP whose FwBankInfo.current_role matches and runs the existing
+// orbitOtaPush state machine against it. This means the Pi5 stays
+// agnostic of physical IP assignments and dipswitch ordering.
+//
+// Memory model: Nova never buffers a full component image. Chunks flow
+// Pi5 → UART → Nova → TCP → LP without intermediate storage beyond
+// the in-flight chunk. Pi5 streams chunks open-loop at UART line rate;
+// Nova's TCP-to-LP path drains faster than the UART supplies them so
+// no flow-control envelope is needed.
+//
+// Install mode: FwInstallBegin causes Nova to drop non-essential tasks
+// (sensor polling, equipment loops, settings broadcasts) until
+// FwInstallComplete or FwInstallAbort. This frees CPU and avoids
+// envelope contention on the UART during the install.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── FwInstallComponentState ─────────────────────────────────────────────
+// Per-component state as seen by Pi5. Coarser than the LP-level
+// FwUpdateState because it bundles Nova-side routing/probe phases too.
+enum FwInstallComponentState {
+  FW_INSTALL_PENDING      = 0;   // queued, not started
+  FW_INSTALL_BEGIN        = 1;   // FwBeginUpdate sent to target LP / self
+  FW_INSTALL_ERASING      = 2;   // inactive bank erase in progress (~5 s)
+  FW_INSTALL_PUSHING      = 3;   // streaming chunks
+  FW_INSTALL_VERIFYING    = 4;   // LP CRC-verifying full image
+  FW_INSTALL_ACTIVATING   = 5;   // FwActivateBank sent
+  FW_INSTALL_REBOOTING    = 6;   // target warm-resetting, awaiting return
+  FW_INSTALL_CONFIRMED    = 7;   // post-reboot version matches expected
+  FW_INSTALL_DONE         = 8;   // terminal success
+  FW_INSTALL_SKIPPED      = 9;   // intentionally not run (Phase-2 component)
+  FW_INSTALL_FAILED       = 10;  // terminal failure (see error_code)
+}
+
+enum FwInstallOverallState {
+  FW_INSTALL_OVERALL_IDLE        = 0;
+  FW_INSTALL_OVERALL_PROBING     = 1;   // fleet probe in progress
+  FW_INSTALL_OVERALL_INSTALLING  = 2;
+  FW_INSTALL_OVERALL_DONE        = 3;
+  FW_INSTALL_OVERALL_FAILED      = 4;
+  FW_INSTALL_OVERALL_ABORTED     = 5;
+}
+
+// ─── FwInstallBegin — Pi5 → Nova: start a bundle install ────────────────
+// Nova enters install mode (suspends non-essential tasks), validates the
+// manifest digest, and prepares to receive component data.
+message FwInstallBegin {
+  string bundle_version    = 1;   // manifest "version" string
+  bytes  manifest_sha256   = 2;   // 32-byte digest of the manifest blob
+  uint32 component_count   = 3;   // how many FwInstallComponentBegin will follow
+  uint32 chunk_size        = 4;   // hint for Pi5's chunk sizing; 0 = default 1024.
+                                  // Nova uses this for its TCP-side chunk size too.
+  bool   allow_downgrade   = 5;   // applies to ALL components in the bundle
+}
+
+// ─── FwInstallComponentBegin — Pi5 → Nova: start one component push ─────
+// Nova resolves the destination by `role` (its own OSPI current_role for
+// self-update, or fleet lookup for orbit components) and issues LP-level
+// FwBeginUpdate. Reports back via FwInstallProgress(state=BEGIN | ERASING
+// | FAILED).
+message FwInstallComponentBegin {
+  string component_name    = 1;   // manifest key (e.g. "storage", "controller")
+  uint32 component_index   = 2;   // 0..component_count-1, monotonic.
+                                  // Force-encode — 0 is the first component.
+  uint32 role              = 3;   // OrbitRole target. Force-encode —
+                                  // 0 (CONTROLLER) is a valid value.
+                                  // See CLAUDE.md invariant #1.
+  uint32 total_size        = 4;   // bytes for THIS component image
+  bytes  image_sha256      = 5;   // 32-byte digest of the component image
+  string expected_version  = 6;   // for audit logging; LP gates by its
+                                  // own running-version comparison
+}
+
+// ─── FwInstallChunk — Pi5 → Nova: one chunk of the current component ────
+// Streamed back-to-back at UART line rate. Nova forwards bytes to the
+// target LP via FwDataChunk (or writes locally for the controller
+// component). offset must be monotonically increasing within a component.
+message FwInstallChunk {
+  uint32 component_index   = 1;   // which component this chunk belongs to.
+                                  // Force-encode — 0 is the first component.
+  uint32 offset            = 2;   // byte offset within the component.
+                                  // Force-encode — 0 is the first chunk.
+  bytes  data              = 3;   // chunk payload (up to chunk_size bytes).
+                                  // pb_callback_t on the C side — never
+                                  // statically allocated.
+}
+
+// ─── FwInstallComponentFinalize — Pi5 → Nova: all chunks for one comp ───
+// Nova sends LP-level FwFinalizeUpdate, awaits verify, then
+// FwActivateBank(reboot=true), then post-reboot version probe.
+// Terminal state is reported via FwInstallProgress(state=DONE | FAILED).
+message FwInstallComponentFinalize {
+  uint32 component_index   = 1;   // force-encode
+  bytes  image_sha256      = 2;   // confirmation — must match Begin's digest
+}
+
+// ─── FwInstallComplete — Pi5 → Nova: bundle install finished ────────────
+// All FwInstallComponentBegin/Finalize pairs have been sent. Nova exits
+// install mode (resumes normal operation) and emits FwInstallResult.
+message FwInstallComplete {
+}
+
+// ─── FwInstallAbort — Pi5 → Nova: cancel the install ────────────────────
+// Nova best-effort closes any in-flight LP socket, leaves inactive banks
+// as-is (LPs will not boot an unfinalized bank), and emits FwInstallResult
+// with overall=ABORTED. Does NOT roll back already-activated components
+// — once a component reboots into its new image that's a commit point.
+message FwInstallAbort {
+  string reason            = 1;
+}
+
+// ─── FwInstallProgress — Nova → Pi5: state update ───────────────────────
+// Emitted on every state transition and periodically while PUSHING
+// (target cadence: every ~5% of component bytes). The Pi5 uses this for
+// UI updates only — chunk streaming is open-loop, not gated on progress.
+message FwInstallProgress {
+  uint32                  component_index = 1;   // force-encode
+  string                  component_name  = 2;
+  string                  target_host     = 3;   // resolved IP, or "self"
+                                                 // for the controller path
+  FwInstallComponentState state           = 4;
+  uint32                  bytes_written   = 5;
+  uint32                  total_size      = 6;
+  uint32                  error_code      = 7;   // 0 = no error
+  string                  error_message   = 8;
+  FwInstallOverallState   overall         = 9;
+}
+
+// ─── FwInstallResult — Nova → Pi5: terminal bundle result ───────────────
+// Sent after FwInstallComplete (or after FwInstallAbort cleanup). Carries
+// the per-component terminal summary so the UI can present a final
+// per-component success/fail table without replaying progress history.
+message FwInstallResult {
+  FwInstallOverallState              overall        = 1;
+  string                             failure_reason = 2;   // first failing component's reason
+  repeated FwInstallComponentResult  components     = 3;
+}
+
+message FwInstallComponentResult {
+  uint32                  component_index      = 1;   // force-encode
+  string                  component_name       = 2;
+  string                  target_host          = 3;
+  FwInstallComponentState state                = 4;   // terminal state
+  uint32                  error_code           = 5;
+  string                  error_message        = 6;
+  string                  post_install_version = 7;   // version LP reports post-reboot
+}
+
+// ─── FwFleetProbe — Pi5 → Nova: probe orbit fleet, report ───────────────
+// Optional pre-flight before FwInstallBegin so the UI can show "boards I
+// see" and warn on missing/legacy/unreachable hosts. Nova probes every
+// known orbit IP (dipswitch-derived discovery TBD) in parallel and
+// returns FwFleetSnapshot.
+message FwFleetProbe {
+  uint32 timeout_ms        = 1;   // 0 = use default (~300 ms per host)
+}
+
+// ─── FwFleetSnapshot — Nova → Pi5: result of FwFleetProbe ───────────────
+message FwFleetSnapshot {
+  repeated FwFleetMember members = 1;
+}
+
+message FwFleetMember {
+  string   host             = 1;   // e.g. "10.47.27.2"
+  bool     reachable        = 2;
+  uint32   current_role     = 3;   // OrbitRole — force-encode (0 = CONTROLLER)
+  string   active_version   = 4;
+  FwBankId active_bank      = 5;
+  bool     bank_a_valid     = 6;
+  bool     bank_b_valid     = 7;
+  uint32   boot_count       = 8;
+  string   error            = 9;   // populated when reachable=false
+}

@@ -8,6 +8,8 @@
 //   80-89:  Bridge → Firmware (equipment/system commands)
 //   90-99:  Bridge → Firmware (settings updates)
 //   100-109: Protocol control (ACK, heartbeat, data request)
+//   200-209: Bridge-emitted (NOT on UART) — sourced inside the bridge
+//            and fanned out to UI WebSocket clients.
 // ═══════════════════════════════════════════════════════════════════════════
 syntax = "proto3";
 package agristar;
@@ -23,6 +25,7 @@ import "agristar/logs.proto";
 import "agristar/accounts.proto";
 import "agristar/firmware.proto";
 import "agristar/orbit.proto";
+import "agristar/vfd.proto";
 
 // ─── Envelope — wraps every message on the wire ──────────────────────────
 message Envelope {
@@ -40,6 +43,7 @@ message Envelope {
     AuxSwitches       aux_switches       = 16;
     DataLoadStatus    data_load_status   = 17;
     FanRuntime        fan_runtime        = 18;
+    NetworkConfig     network_config     = 19;
 
     // ── Firmware → Bridge: settings/config data (20-29) ───────────────
     BasicSetup        basic_setup        = 20;
@@ -84,10 +88,21 @@ message Envelope {
     AlertSettings         alert_settings         = 63;
     PwmChannelSettings    pwm_settings           = 64;
     NetworkNodeSettings   network_nodes          = 65;
+    MasterSlaveSettings   master_slave_settings  = 66;
+    PidLogSettings        pid_log_settings       = 67;
+    CureLimitSettings     cure_limit_settings    = 68;
+    HttpPortSettings      http_port_settings     = 69;
+    // 70-73 reserved for log data push (below)
+    PublicAddressSettings public_address_settings = 74;
+    SysModeSettings       sys_mode_settings      = 75;
+    BayNameSettings       bay_name_settings      = 76;
+    RuntimeSettings       runtime_settings       = 77;
 
     // ── Firmware → Bridge: log data push (70-79) ──────────────────────
     LogRecord         log_record         = 70;
     ActivityEvent     activity_event     = 71;
+    PidLogRecord      pid_log_record     = 72;
+    LoadLogRecord     load_log_record    = 73;
 
     // ── Bridge → Firmware: commands (80-89) ───────────────────────────
     EquipmentCmd      equipment_cmd      = 80;
@@ -106,13 +121,17 @@ message Envelope {
     Heartbeat         heartbeat          = 101;
     DataRequest       data_request       = 102;
 
-    // ── Firmware update (110-119) ─────────────────────────────────────
-    // Bridge → Firmware
+    // ── Firmware update — LP-level wire (110-119) ─────────────────────
+    // Used today on the bench between bridge/Pi5 and LP over TCP :5503.
+    // In the production airgap architecture (CLAUDE.md #12) these become
+    // Nova → orbit-LP over CPSW; Nova internally drives them on behalf
+    // of the Pi5's FwInstall* messages below.
+    // Bridge/Nova → LP
     FwBeginUpdate     fw_begin_update    = 110;
     FwDataChunk       fw_data_chunk      = 111;
     FwFinalizeUpdate  fw_finalize_update = 112;
     FwActivateBank    fw_activate_bank   = 113;
-    // Firmware → Bridge
+    // LP → Bridge/Nova
     FwUpdateStatus    fw_update_status   = 114;
     FwBankInfo        fw_bank_info       = 115;
 
@@ -122,5 +141,32 @@ message Envelope {
     OrbitDiscovery    orbit_discovery    = 121;
     // Bridge → Firmware
     OrbitRoleAssign   orbit_role_assign  = 122;
+    AoEquipAssign     ao_equip_assign    = 123;
+    // Firmware → Bridge (raw HR bank, no CSV translation)
+    OrbitSensorBank   orbit_sensor_bank  = 124;
+    // Bridge → Firmware (single Triton HR write — UI control surfaces)
+    TritonRegWrite    triton_reg_write   = 125;
+
+    // ── Firmware install orchestration — Pi5 ↔ Nova (130-149) ─────
+    // The production OTA path: Pi5 has the .cfu, Nova brokers per-LP
+    // pushes over CPSW. See firmware.proto §"Pi5 ↔ Nova install-
+    // orchestration layer" and docs/uart-airgap-architecture.md.
+    // Pi5 → Nova
+    FwInstallBegin              fw_install_begin              = 130;
+    FwInstallComponentBegin     fw_install_component_begin    = 131;
+    FwInstallChunk              fw_install_chunk              = 132;
+    FwInstallComponentFinalize  fw_install_component_finalize = 133;
+    FwInstallComplete           fw_install_complete           = 134;
+    FwInstallAbort              fw_install_abort              = 135;
+    FwFleetProbe                fw_fleet_probe                = 136;
+    // Nova → Pi5
+    FwInstallProgress           fw_install_progress           = 140;
+    FwInstallResult             fw_install_result             = 141;
+    FwFleetSnapshot             fw_fleet_snapshot             = 142;
+
+    // ── Bridge-emitted (200-209) ──────────────────────────────────
+    // These NEVER cross the UART. The bridge originates them (e.g. from
+    // its Modbus VFD client) and fans out to UI WebSocket subscribers.
+    VfdStatus         vfd_status         = 200;
   }
 }

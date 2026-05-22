@@ -109,3 +109,29 @@ agristar.ServiceInfoUpdate.notes         max_size:64
 agristar.SystemCmd.str_param             max_size:64
 agristar.RuntimeSettings.entries         max_count:32
 agristar.AnalogBoardSettings.sensors     max_count:4
+
+# ── Firmware install orchestration (Pi5 ↔ Nova) ───────────────────────────
+# Chunk data stays as pb_callback_t (default for unsized `bytes`) — same
+# pattern as FwDataChunk.data. Everything else is statically sized for
+# the embedded no-malloc world. Component count caps at 8 (Pulsar/etc
+# headroom past today's 4-board fleet).
+agristar.FwInstallBegin.bundle_version            max_size:32
+agristar.FwInstallBegin.manifest_sha256           max_size:32
+agristar.FwInstallComponentBegin.component_name   max_size:24
+agristar.FwInstallComponentBegin.image_sha256     max_size:32
+agristar.FwInstallComponentBegin.expected_version max_size:32
+agristar.FwInstallComponentFinalize.image_sha256  max_size:32
+agristar.FwInstallAbort.reason                    max_size:64
+agristar.FwInstallProgress.component_name         max_size:24
+agristar.FwInstallProgress.target_host            max_size:24
+agristar.FwInstallProgress.error_message          max_size:96
+agristar.FwInstallResult.failure_reason           max_size:96
+agristar.FwInstallResult.components               max_count:8
+agristar.FwInstallComponentResult.component_name        max_size:24
+agristar.FwInstallComponentResult.target_host           max_size:24
+agristar.FwInstallComponentResult.error_message         max_size:96
+agristar.FwInstallComponentResult.post_install_version  max_size:32
+agristar.FwFleetSnapshot.members                  max_count:8
+agristar.FwFleetMember.host                       max_size:24
+agristar.FwFleetMember.active_version             max_size:32
+agristar.FwFleetMember.error                      max_size:96

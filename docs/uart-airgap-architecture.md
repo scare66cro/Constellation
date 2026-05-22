@@ -141,9 +141,50 @@ What today's `firmwareInstaller.ts` + `orbitOtaPush.ts` +
 In the migrated architecture all of this runs on Nova. The Pi5 just
 sends the .cfu blob and receives progress updates.
 
-### Phase 2 — Add bridge envelope for OTA initiation
+### Phase 2 — Add bridge envelope for OTA initiation — **LANDED 2026-05-22**
 
-Define new envelope fields (`proto/agristar/firmware.proto`):
+> **RESOLVED 2026-05-22** — envelope contract landed in
+> `proto/agristar/firmware.proto` (Pi5↔Nova install-orchestration
+> section) and `proto/agristar/envelope.proto` (oneof slots 130-149).
+> C codegen verified. Bridge-side TS regen deferred until protoc is
+> on the dev box (or run on the Pi5 / CI).
+> _Original sketch retained below for context._
+
+Per-component streaming was chosen over whole-bundle buffering so each
+LP only receives its own component and Nova never buffers more than
+an in-flight chunk:
+
+| Field | Direction | Purpose |
+|---|---|---|
+| `FwInstallBegin` (130) | Pi5→Nova | Enter install mode, declare bundle |
+| `FwInstallComponentBegin` (131) | Pi5→Nova | Start one component (role-routed) |
+| `FwInstallChunk` (132) | Pi5→Nova | Stream chunk (open-loop, UART line rate) |
+| `FwInstallComponentFinalize` (133) | Pi5→Nova | All chunks sent — finalize + activate |
+| `FwInstallComplete` (134) | Pi5→Nova | All components done — exit install mode |
+| `FwInstallAbort` (135) | Pi5→Nova | Cancel install |
+| `FwFleetProbe` (136) | Pi5→Nova | Pre-flight fleet probe |
+| `FwInstallProgress` (140) | Nova→Pi5 | Per-component progress + bundle overall |
+| `FwInstallResult` (141) | Nova→Pi5 | Terminal per-component summary |
+| `FwFleetSnapshot` (142) | Nova→Pi5 | Result of FwFleetProbe |
+
+Routing model: Pi5 sends `role` (OrbitRole) per component; Nova
+matches against its own `current_role` (→ self-update path) or
+fleet-probed `FwBankInfo.current_role` (→ TCP push). The Pi5 stays
+agnostic of IP-to-role mapping and dipswitch ordering.
+
+Memory: Nova never buffers a full component. Chunks flow Pi5 → UART
+→ Nova → TCP → LP without intermediate storage beyond the in-flight
+chunk. Open-loop streaming (no per-chunk envelope ack) because the
+UART side is the bottleneck — LP TCP path drains chunks faster than
+UART supplies them.
+
+Install mode: `FwInstallBegin` causes Nova to suspend non-essential
+tasks (sensor polling, equipment loops, settings broadcasts) until
+`FwInstallComplete`/`FwInstallAbort`. Per user direction 2026-05-22:
+"It is fine if the nova has to shutdown and its memory be flushed in
+order to handle the push to the orbits."
+
+_Original sketch:_
 
 - `FwInstallBundle { bytes manifest_json; bytes cfu_blob; }` — Pi5 →
   Nova: here's the .cfu, please install across the fleet. Or a
