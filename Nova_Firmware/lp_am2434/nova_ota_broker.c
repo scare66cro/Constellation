@@ -1,22 +1,21 @@
 /*
- * nova_ota_broker.c — Pi5 ↔ Nova install-orchestration broker (Phase 3
- *                      scaffold, UART-airgap OTA migration).
+ * nova_ota_broker.c — Pi5 ↔ Nova install-orchestration broker
+ *                      (UART-airgap OTA migration).
  *
- * Scope of this file (Phase 3):
+ * Scope of this file:
  *   - Decode envelope-130..136 inner bodies into a small per-component
  *     state struct.
  *   - Track an `s_state` (IDLE / PROBING / INSTALLING / ERROR) so the
  *     rest of `main.c` can gate non-essential broadcasts via
  *     `NovaOtaBroker_IsInInstallMode()`.
- *   - Emit `FwInstallProgress` (envelope tag 140) and
- *     `FwInstallResult`  (envelope tag 141) and
+ *   - Emit `FwInstallProgress` (envelope tag 140),
+ *     `FwInstallResult`  (envelope tag 141), and
  *     `FwFleetSnapshot`  (envelope tag 142) via `NovaProto_SendRaw`.
- *   - **Stub** every leaf operation (no TCP push, no NovaFwUpdate_* call,
- *     no fleet probe). Each STUB path emits
- *     FwInstallProgress(state=FAILED, error_code=99, error_message=
- *     "broker leaf not implemented") so Pi5's `firmwareInstaller.ts`
- *     surfaces the gap immediately instead of hanging on a missing
- *     reply.
+ *   - Phase 3.5 (2026-05-22) — orbit-LP push path wired: each Pi5 chunk
+ *     is forwarded to the target LP over TCP via `NovaOtaPush_*`. Fleet
+ *     snapshot is built by probing known orbit IPs on first component.
+ *   - **Stub** still applies to the controller-self-update branch
+ *     (role == own role) — Phase 3.6 wires that to NovaFwUpdate_*.
  *
  * Invariants enforced here (per `CLAUDE.md`):
  *   1. proto3 zero-suppression — `pb_uint32_force` for 0-meaningful
@@ -48,6 +47,9 @@
 #include <kernel/dpl/DebugP.h>
 
 #include "nova_protocol.h"
+#include "nova_ota_push.h"
+#include "orbit_server/orbit_role.h"
+#include "lp_device_config.h"
 
 /* ─── Envelope tag wire-keys (length-delimited, wire-type 2) ──────────
  *
@@ -107,6 +109,8 @@ typedef enum {
 /* Per-bundle / per-component scratch. Sized for one chunk in flight. */
 #define BROKER_NAME_MAX           48
 #define BROKER_TARGET_HOST_MAX    24
+#define BROKER_FLEET_MAX          8       /* cached members per install */
+#define BROKER_PROGRESS_PCT       5u      /* emit PUSHING every ~N% */
 
 typedef struct {
     /* Bundle-wide */
@@ -120,7 +124,16 @@ typedef struct {
     uint32_t cur_role;
     uint32_t cur_total_size;
     uint32_t cur_bytes_written;
+    uint32_t cur_image_crc;          /* accumulated chunk CRC for Finalize */
+    uint32_t cur_next_progress;      /* next bytes_written threshold to emit */
+    bool     cur_push_active;        /* a remote-LP push session is open */
+    bool     cur_failed;              /* sticky for the in-flight component */
     FwInstallComponentStateLocal cur_state;
+    /* Fleet snapshot — populated lazily on first decode_component_begin
+     * of each install, dropped on Complete/Abort. */
+    NovaFwFleetMember fleet[BROKER_FLEET_MAX];
+    size_t            fleet_count;
+    bool              fleet_probed;
     /* Last seq Pi5 included on the install envelope (diagnostics only). */
     uint32_t last_envelope_seq;
 } NovaOtaBrokerCtx;
@@ -297,18 +310,126 @@ static size_t emit_install_result(uint32_t    overall,
     return epos;
 }
 
-/* Build Envelope { fw_fleet_snapshot = { members: [] } }. Empty in the
- * Phase 3 scaffold — Phase 3.5 walks orbit_client / dipswitch discovery. */
-static size_t emit_fleet_snapshot_empty(void)
+/* Encode one FwFleetMember submsg into `dst`. Field map mirrors
+ * proto/agristar/firmware.proto §FwFleetMember:
+ *   1 host (string), 2 reachable (bool), 3 current_role (force),
+ *   4 active_version (string), 5 active_bank (varint),
+ *   6 bank_a_valid (bool), 7 bank_b_valid (bool),
+ *   8 boot_count (varint), 9 error (string).
+ * Returns bytes written. */
+static size_t emit_fleet_member(uint8_t *dst, const NovaFwFleetMember *m)
 {
-    uint8_t env[16];
+    size_t n = 0;
+    n += bk_pb_string(dst + n, 1u, m->host);
+    if (m->reachable) {
+        n += bk_encode_tag(dst + n, 2u, 0u);
+        n += bk_encode_varint(dst + n, 1u);
+    }
+    n += bk_pb_u32_force(dst + n, 3u, m->current_role);
+    n += bk_pb_string(dst + n, 4u, m->active_version);
+    if (m->active_bank != 0u) {
+        n += bk_encode_tag(dst + n, 5u, 0u);
+        n += bk_encode_varint(dst + n, m->active_bank);
+    }
+    if (m->bank_a_valid) {
+        n += bk_encode_tag(dst + n, 6u, 0u);
+        n += bk_encode_varint(dst + n, 1u);
+    }
+    if (m->bank_b_valid) {
+        n += bk_encode_tag(dst + n, 7u, 0u);
+        n += bk_encode_varint(dst + n, 1u);
+    }
+    if (m->boot_count != 0u) {
+        n += bk_encode_tag(dst + n, 8u, 0u);
+        n += bk_encode_varint(dst + n, m->boot_count);
+    }
+    if (!m->reachable && m->error[0]) {
+        n += bk_pb_string(dst + n, 9u, m->error);
+    }
+    return n;
+}
+
+/* Build Envelope { fw_fleet_snapshot = { members: [...] } } from the
+ * cached `members[]`. */
+static size_t emit_fleet_snapshot(const NovaFwFleetMember *members,
+                                  size_t count)
+{
+    /* Outer body holds N members; each ~120 B worst case → cap at 1 KB. */
+    uint8_t inner[1024];
+    size_t  ipos = 0;
+    for (size_t i = 0; i < count; i++) {
+        /* Encode submsg into a scratch buffer first so we know its
+         * length, then write tag + length + body. */
+        uint8_t sub[200];
+        size_t  sublen = emit_fleet_member(sub, &members[i]);
+        if (ipos + 2u + 5u + sublen > sizeof(inner)) break;   /* safety */
+        ipos += bk_encode_tag(inner + ipos, 1u, 2u);
+        ipos += bk_encode_varint(inner + ipos, (uint32_t)sublen);
+        memcpy(inner + ipos, sub, sublen);
+        ipos += sublen;
+    }
+
+    uint8_t env[1200];
     size_t  epos = 0;
     env[epos++] = ENV_TAG_FW_FLEET_SNAPSHOT_B0;
     env[epos++] = ENV_TAG_FW_FLEET_SNAPSHOT_B1;
-    /* Empty inner body → length=0. */
-    epos += bk_encode_varint(env + epos, 0u);
+    epos += bk_encode_varint(env + epos, (uint32_t)ipos);
+    if (epos + ipos > sizeof(env)) return 0u;
+    memcpy(env + epos, inner, ipos);
+    epos += ipos;
+
     NovaProto_SendRaw(env, epos);
     return epos;
+}
+
+/* Ensure the cached fleet is populated. Idempotent: only probes if
+ * `fleet_probed` is false. Called lazily on the first component begin
+ * of each install so a fleet-less install (controller-only) doesn't
+ * pay the probe cost. */
+static void ensure_fleet_snapshot(uint32_t timeout_ms)
+{
+    if (s_ctx.fleet_probed) return;
+    s_ctx.fleet_count = NovaOtaPush_ProbeFleet(
+        s_ctx.fleet, BROKER_FLEET_MAX,
+        timeout_ms == 0u ? 500u : timeout_ms);
+    s_ctx.fleet_probed = true;
+    DebugP_log("[OTA-BROKER] fleet probe → %u members\r\n",
+               (unsigned)s_ctx.fleet_count);
+}
+
+/* Look up an orbit member by role. Returns pointer into s_ctx.fleet[]
+ * or NULL if no reachable LP advertises that role. */
+static const NovaFwFleetMember *fleet_find_by_role(uint32_t role)
+{
+    for (size_t i = 0; i < s_ctx.fleet_count; i++) {
+        const NovaFwFleetMember *m = &s_ctx.fleet[i];
+        if (m->reachable && m->current_role == role) {
+            return m;
+        }
+    }
+    return NULL;
+}
+
+/* Convert "10.47.27.2" → 0x0A2F1B02 (host order). Returns 0 on parse error. */
+static uint32_t parse_ipv4_host(const char *ip)
+{
+    if (ip == NULL) return 0u;
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    uint32_t parts[4] = {0};
+    int idx = 0;
+    for (const char *p = ip; *p && idx < 4; p++) {
+        if (*p >= '0' && *p <= '9') {
+            parts[idx] = parts[idx] * 10u + (uint32_t)(*p - '0');
+        } else if (*p == '.') {
+            idx++;
+        } else {
+            return 0u;
+        }
+    }
+    if (idx != 3) return 0u;
+    a = parts[0]; b = parts[1]; c = parts[2]; d = parts[3];
+    if (a > 255u || b > 255u || c > 255u || d > 255u) return 0u;
+    return (a << 24) | (b << 16) | (c << 8) | d;
 }
 
 /* ─── Decoders for the seven Pi5 → Nova messages ─────────────────────── */
@@ -367,7 +488,7 @@ static void decode_install_begin(const uint8_t *body, size_t len)
         }
     }
 
-    /* Reset state for the new bundle. */
+    /* Reset state for the new bundle — including fleet cache. */
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.component_count = component_count;
     s_ctx.chunk_size      = chunk_size;
@@ -424,48 +545,155 @@ static void decode_component_begin(const uint8_t *body, size_t len)
         }
     }
 
-    /* Stage the per-component scratch — emit BEGIN, then immediately
-     * surface the Phase-3 stub failure so Pi5 doesn't wait forever on
-     * the chunk-write side. */
+    /* Stage the per-component scratch. */
     s_ctx.cur_component_index = component_index;
     s_ctx.cur_role            = role;
     s_ctx.cur_total_size      = total_size;
     s_ctx.cur_bytes_written   = 0u;
+    s_ctx.cur_image_crc       = 0u;
+    s_ctx.cur_next_progress   = 0u;
+    s_ctx.cur_push_active     = false;
+    s_ctx.cur_failed          = false;
     s_ctx.cur_state           = FW_INSTALL_BEGIN;
     bk_copy_string(s_ctx.cur_component_name,
                    sizeof(s_ctx.cur_component_name),
                    (const uint8_t *)component_name, strlen(component_name));
-    s_ctx.cur_target_host[0]  = '\0';   /* "self" not resolved yet */
+    s_ctx.cur_target_host[0]  = '\0';
 
     DebugP_log("[OTA-BROKER] ComponentBegin idx=%u name=\"%s\" "
-               "role=%u total=%u (STUB → FAILED)\r\n",
+               "role=%u total=%u\r\n",
                (unsigned)component_index, component_name,
                (unsigned)role, (unsigned)total_size);
 
-    /* Phase-3 scaffold: report BEGIN, then FAILED immediately. */
-    emit_install_progress(component_index, component_name, "stub",
+    /* Branch on role: own-role → Phase 3.6 self-update (still stubbed),
+     * else → look up target IP in fleet snapshot and open TCP push. */
+    OrbitRole own_role = (OrbitRole)LpDeviceConfig_Get()->role;
+    if ((uint32_t)own_role == role) {
+        /* Phase 3.6 owes this. Surface a clearer message than the
+         * generic "leaf not implemented" so Pi5 log triage is easy. */
+        emit_install_progress(component_index, component_name, "self",
+                              FW_INSTALL_BEGIN, 0u, total_size,
+                              0u, "",
+                              FW_INSTALL_OVERALL_INSTALLING);
+        emit_install_progress(component_index, component_name, "self",
+                              FW_INSTALL_FAILED, 0u, total_size,
+                              BROKER_ERR_STUB_LEAF_NOT_IMPL,
+                              "controller self-update not yet wired (Phase 3.6)",
+                              FW_INSTALL_OVERALL_FAILED);
+        s_ctx.cur_failed = true;
+        s_ctx.cur_state  = FW_INSTALL_FAILED;
+        s_state          = BROKER_ERROR;
+        return;
+    }
+
+    /* Remote-LP path: ensure the fleet is probed, find the target. */
+    ensure_fleet_snapshot(500u);
+    const NovaFwFleetMember *m = fleet_find_by_role(role);
+    if (m == NULL) {
+        DebugP_log("[OTA-BROKER] ComponentBegin: no fleet member with role=%u\r\n",
+                   (unsigned)role);
+        emit_install_progress(component_index, component_name, "",
+                              FW_INSTALL_FAILED, 0u, total_size,
+                              100u, "no reachable LP for component role",
+                              FW_INSTALL_OVERALL_FAILED);
+        s_ctx.cur_failed = true;
+        s_ctx.cur_state  = FW_INSTALL_FAILED;
+        s_state          = BROKER_ERROR;
+        return;
+    }
+    bk_copy_string(s_ctx.cur_target_host,
+                   sizeof(s_ctx.cur_target_host),
+                   (const uint8_t *)m->host, strlen(m->host));
+
+    /* Emit BEGIN so Pi5's UI moves off "queued". The image_crc and the
+     * full chunk-stream haven't started yet — total_size is the only
+     * meaningful counter at this point. */
+    emit_install_progress(component_index, component_name,
+                          s_ctx.cur_target_host,
                           FW_INSTALL_BEGIN, 0u, total_size,
                           0u, "",
                           FW_INSTALL_OVERALL_INSTALLING);
-    emit_install_progress(component_index, component_name, "stub",
-                          FW_INSTALL_FAILED, 0u, total_size,
-                          BROKER_ERR_STUB_LEAF_NOT_IMPL,
-                          "broker leaf not implemented",
-                          FW_INSTALL_OVERALL_FAILED);
-    s_ctx.cur_state = FW_INSTALL_FAILED;
-    s_state         = BROKER_ERROR;
+
+    /* Open TCP, run pre-flight + send Begin. The LP's first Status
+     * after Begin means it's already started ERASING (Phase 1B is
+     * synchronous on Bank B erase before replying), so we report
+     * ERASING-then-PUSHING in quick succession. The image CRC for
+     * Begin is left 0 — the bridge-side Pi5 never streams the full
+     * CRC to us in a single message; we accumulate as we forward
+     * chunks and pass the running CRC to Finalize. (This differs
+     * slightly from orbitOtaPush.ts, which has the full image up
+     * front; here we trust Pi5's per-chunk CRCs and let the LP's
+     * Finalize-time full-image CRC catch any mid-stream corruption.) */
+    uint32_t lp_err = 0;
+    uint32_t target_ip_host = parse_ipv4_host(s_ctx.cur_target_host);
+    int32_t  rc = NovaOtaPush_BeginToLp(target_ip_host,
+                                        total_size,
+                                        0u, /* image_crc TBD at Finalize */
+                                        "",  /* version forwarded later */
+                                        s_ctx.chunk_size ? s_ctx.chunk_size : 1024u,
+                                        role,
+                                        s_ctx.allow_downgrade,
+                                        &lp_err);
+    if (rc != NOVA_OTA_PUSH_OK) {
+        DebugP_log("[OTA-BROKER] Begin push failed rc=%d lp_err=%u\r\n",
+                   (int)rc, (unsigned)lp_err);
+        emit_install_progress(component_index, component_name,
+                              s_ctx.cur_target_host,
+                              FW_INSTALL_FAILED, 0u, total_size,
+                              lp_err ? lp_err : 101u,
+                              "push Begin failed",
+                              FW_INSTALL_OVERALL_FAILED);
+        s_ctx.cur_failed = true;
+        s_ctx.cur_state  = FW_INSTALL_FAILED;
+        s_state          = BROKER_ERROR;
+        return;
+    }
+    s_ctx.cur_push_active = true;
+
+    /* Begin succeeded → LP is ERASING / RECEIVING. Emit those states in
+     * order so Pi5's UI animation is faithful. */
+    emit_install_progress(component_index, component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_ERASING, 0u, total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    emit_install_progress(component_index, component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_PUSHING, 0u, total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    s_ctx.cur_state = FW_INSTALL_PUSHING;
+    /* First PUSHING progress threshold. */
+    s_ctx.cur_next_progress = (total_size * BROKER_PROGRESS_PCT) / 100u;
 }
 
-/* Decode FwInstallChunk (envelope 132). Phase 3 silently swallows chunks
- * for any component already in FAILED state — Pi5 may keep pushing for
- * a few hundred milliseconds before its TS-side state machine sees the
- * FAILED progress envelope. We don't re-emit FAILED on every chunk; one
- * is enough per component. */
+/* CRC-32 (Ethernet/zlib polynomial — matches firmware + orbitOtaPush.ts). */
+static uint32_t broker_crc32_continue(uint32_t state,
+                                      const uint8_t *data, size_t len)
+{
+    uint32_t c = state ^ 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        c ^= data[i];
+        for (int k = 0; k < 8; k++) {
+            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        }
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+/* Decode FwInstallChunk (envelope 132). Forwards the chunk to the
+ * remote LP via the push state machine; on LP error, marks the
+ * component FAILED and surfaces the error code. Subsequent chunks
+ * for a FAILED component are dropped silently — Pi5 needs ~one UART
+ * round-trip to react to our FAILED progress envelope. */
 static void decode_chunk(const uint8_t *body, size_t len)
 {
     uint32_t component_index = 0;
     uint32_t offset          = 0;
+    const uint8_t *data      = NULL;   /* pointer into `body` — no copy */
     uint32_t data_len        = 0;
+    uint32_t chunk_crc       = 0;
+    bool     chunk_crc_seen  = false;
 
     size_t pos = 0;
     while (pos < len) {
@@ -476,18 +704,20 @@ static void decode_chunk(const uint8_t *body, size_t len)
         uint32_t field = tag >> 3;
         uint8_t  wire  = (uint8_t)(tag & 0x07u);
 
-        if (wire == 0u && (field == 1u || field == 2u)) {
+        if (wire == 0u && (field == 1u || field == 2u || field == 4u)) {
             uint32_t v;
             size_t vn = bk_decode_varint(body + pos, len - pos, &v);
             if (vn == 0u) return;
             pos += vn;
             if      (field == 1u) component_index = v;
             else if (field == 2u) offset          = v;
+            else if (field == 4u) { chunk_crc = v; chunk_crc_seen = true; }
         } else if (wire == 2u && field == 3u) {
             uint32_t slen;
             size_t ln = bk_decode_varint(body + pos, len - pos, &slen);
             if (ln == 0u || pos + ln + slen > len) return;
             pos += ln;
+            data = body + pos;
             data_len = slen;
             pos += slen;
         } else {
@@ -497,16 +727,71 @@ static void decode_chunk(const uint8_t *body, size_t len)
         }
     }
 
-    /* Stub: do nothing with the bytes. Suppress the noisy log past the
-     * first chunk of each component. */
-    if (offset == 0u) {
-        DebugP_log("[OTA-BROKER] Chunk idx=%u off=%u len=%u "
-                   "(STUB, dropping)\r\n",
-                   (unsigned)component_index, (unsigned)offset,
-                   (unsigned)data_len);
+    if (component_index != s_ctx.cur_component_index) {
+        DebugP_log("[OTA-BROKER] Chunk for idx=%u but current=%u — dropping\r\n",
+                   (unsigned)component_index,
+                   (unsigned)s_ctx.cur_component_index);
+        return;
     }
-    (void)component_index;
-    (void)offset;
+    if (s_ctx.cur_failed || !s_ctx.cur_push_active) {
+        /* Pi5 hasn't seen the FAILED progress yet; swallow quietly. */
+        return;
+    }
+    if (data == NULL || data_len == 0u) {
+        return;
+    }
+    /* If Pi5 didn't supply chunk_crc (rare; legacy bundle), compute it
+     * locally so the LP's per-chunk verify still has something to gate on. */
+    if (!chunk_crc_seen) {
+        chunk_crc = broker_crc32_continue(0u, data, data_len);
+    }
+
+    /* Accumulate the running image CRC so Finalize can use it. */
+    s_ctx.cur_image_crc = broker_crc32_continue(s_ctx.cur_image_crc,
+                                                data, data_len);
+
+    uint32_t lp_err = 0;
+    int32_t  rc = NovaOtaPush_WriteChunkToLp(offset, data, data_len,
+                                             chunk_crc, &lp_err);
+    if (rc != NOVA_OTA_PUSH_OK) {
+        DebugP_log("[OTA-BROKER] Chunk@%u push failed rc=%d lp_err=%u\r\n",
+                   (unsigned)offset, (int)rc, (unsigned)lp_err);
+        emit_install_progress(s_ctx.cur_component_index,
+                              s_ctx.cur_component_name,
+                              s_ctx.cur_target_host,
+                              FW_INSTALL_FAILED,
+                              s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                              lp_err ? lp_err : 102u,
+                              "chunk push failed",
+                              FW_INSTALL_OVERALL_FAILED);
+        s_ctx.cur_failed = true;
+        s_ctx.cur_state  = FW_INSTALL_FAILED;
+        s_ctx.cur_push_active = false;
+        s_state          = BROKER_ERROR;
+        return;
+    }
+
+    s_ctx.cur_bytes_written = offset + data_len;
+
+    /* Throttled PUSHING progress: emit every ~5% of total_size. */
+    if (s_ctx.cur_total_size != 0u
+            && s_ctx.cur_bytes_written >= s_ctx.cur_next_progress) {
+        emit_install_progress(s_ctx.cur_component_index,
+                              s_ctx.cur_component_name,
+                              s_ctx.cur_target_host,
+                              FW_INSTALL_PUSHING,
+                              s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                              0u, "",
+                              FW_INSTALL_OVERALL_INSTALLING);
+        /* Advance threshold by 5% (clamped at total_size to fire the
+         * "100%" tick exactly once on the boundary). */
+        uint32_t step = (s_ctx.cur_total_size * BROKER_PROGRESS_PCT) / 100u;
+        if (step == 0u) step = 1u;
+        s_ctx.cur_next_progress += step;
+        if (s_ctx.cur_next_progress > s_ctx.cur_total_size) {
+            s_ctx.cur_next_progress = s_ctx.cur_total_size;
+        }
+    }
 }
 
 /* Decode FwInstallComponentFinalize (envelope 133). */
@@ -536,10 +821,86 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
         }
     }
 
-    DebugP_log("[OTA-BROKER] ComponentFinalize idx=%u (STUB)\r\n",
+    DebugP_log("[OTA-BROKER] ComponentFinalize idx=%u\r\n",
                (unsigned)component_index);
-    /* No additional progress envelope here — the component already moved
-     * to FAILED on Begin. */
+
+    if (component_index != s_ctx.cur_component_index || s_ctx.cur_failed) {
+        return;
+    }
+    if (!s_ctx.cur_push_active) {
+        return;
+    }
+
+    /* VERIFYING → ACTIVATING → REBOOTING → CONFIRMED → DONE.
+     * The actual LP-side state transitions inside
+     * NovaOtaPush_FinalizeAndActivateLp are:
+     *   Finalize sent     → LP runs full image CRC ............ VERIFYING
+     *   Status=Verified   → we send Activate(reboot=true) ..... ACTIVATING
+     *   Activate sent     → LP starts stage copy + reset ...... REBOOTING
+     *   socket close/timeout → LP rebooted ................... CONFIRMED
+     *   bundle still has more components OR FwInstallComplete  DONE
+     *
+     * The push module collapses the sub-step status reads internally,
+     * so we emit the externally-visible states around the single call. */
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_VERIFYING,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+
+    uint32_t lp_err = 0;
+    int32_t  rc = NovaOtaPush_FinalizeAndActivateLp(s_ctx.cur_image_crc,
+                                                    &lp_err);
+    s_ctx.cur_push_active = false;
+    if (rc != NOVA_OTA_PUSH_OK) {
+        DebugP_log("[OTA-BROKER] Finalize push failed rc=%d lp_err=%u\r\n",
+                   (int)rc, (unsigned)lp_err);
+        emit_install_progress(s_ctx.cur_component_index,
+                              s_ctx.cur_component_name,
+                              s_ctx.cur_target_host,
+                              FW_INSTALL_FAILED,
+                              s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                              lp_err ? lp_err : 103u,
+                              "finalize/activate failed",
+                              FW_INSTALL_OVERALL_FAILED);
+        s_ctx.cur_failed = true;
+        s_ctx.cur_state  = FW_INSTALL_FAILED;
+        s_state          = BROKER_ERROR;
+        return;
+    }
+
+    /* Successful sequence — emit the externally-visible tail states. */
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_ACTIVATING,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_REBOOTING,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_CONFIRMED,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_DONE,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
+    s_ctx.cur_state = FW_INSTALL_DONE;
 }
 
 /* Decode FwInstallComplete (envelope 134). Body has no fields today;
@@ -548,9 +909,17 @@ static void decode_complete(const uint8_t *body, size_t len)
 {
     (void)body;
     (void)len;
-    DebugP_log("[OTA-BROKER] InstallComplete (STUB → emit Result FAILED)\r\n");
-    emit_install_result(FW_INSTALL_OVERALL_FAILED,
-                        "broker leaf not implemented");
+    /* Best-effort close — if anything was left in-flight after a
+     * partial bundle, drop the socket cleanly. */
+    NovaOtaPush_AbortLp();
+    if (s_ctx.cur_failed || s_state == BROKER_ERROR) {
+        DebugP_log("[OTA-BROKER] InstallComplete (overall=FAILED)\r\n");
+        emit_install_result(FW_INSTALL_OVERALL_FAILED,
+                            "one or more components failed");
+    } else {
+        DebugP_log("[OTA-BROKER] InstallComplete (overall=DONE)\r\n");
+        emit_install_result(FW_INSTALL_OVERALL_DONE, "");
+    }
     /* Bundle is done as far as Pi5 is concerned; return to IDLE so
      * non-essential broadcasts resume. */
     memset(&s_ctx, 0, sizeof(s_ctx));
@@ -586,6 +955,10 @@ static void decode_abort(const uint8_t *body, size_t len)
     }
 
     DebugP_log("[OTA-BROKER] InstallAbort reason=\"%s\"\r\n", reason);
+    /* Close any open push socket without sending Finalize/Activate so
+     * the target LP's Bank B is left uncommitted and the next boot
+     * comes up on Bank A. */
+    NovaOtaPush_AbortLp();
     emit_install_result(FW_INSTALL_OVERALL_ABORTED,
                         reason[0] ? reason : "aborted by Pi5");
     memset(&s_ctx, 0, sizeof(s_ctx));
@@ -622,10 +995,13 @@ static void decode_fleet_probe(const uint8_t *body, size_t len)
         }
     }
 
-    DebugP_log("[OTA-BROKER] FleetProbe timeout=%u (STUB → empty snapshot)\r\n",
+    DebugP_log("[OTA-BROKER] FleetProbe timeout=%u\r\n",
                (unsigned)timeout_ms);
     s_state = BROKER_PROBING;
-    emit_fleet_snapshot_empty();
+    NovaFwFleetMember members[BROKER_FLEET_MAX];
+    size_t count = NovaOtaPush_ProbeFleet(members, BROKER_FLEET_MAX,
+                                          timeout_ms);
+    emit_fleet_snapshot(members, count);
     s_state = BROKER_IDLE;
 }
 

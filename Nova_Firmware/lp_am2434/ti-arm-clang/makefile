@@ -70,6 +70,7 @@ FILES_common := \
 	lp_ota_task.c \
 	nova_fw_update.c \
 	nova_ota_broker.c \
+	nova_ota_push.c \
 	hal_flash.c \
 	lp_enet_dma_pause.c \
 	lp_orbit_io.c \
