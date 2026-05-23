@@ -11,9 +11,11 @@
  * The leaf operations — opening TCP to a fleet LP and driving its
  * `lp_ota_task.h` state machine (tags 0x10/0x11/0x12/0x13), or calling
  * `NovaFwUpdate_Begin/WriteChunk/Finalize/Activate` for the self-update
- * path — are STUBBED in Phase 3 and surface as
- * `FwInstallProgress(state=FAILED, error_code=99)`. Phase 3.5 / 3.6
- * sessions wire the real bytes through.
+ * path — were STUBBED in the Phase 3 scaffold and surfaced as
+ * `FwInstallProgress(state=FAILED, error_code=99)`. Phase 3.5 wired the
+ * remote-LP push path (`nova_ota_push.c`); Phase 3.6 wires the
+ * controller self-update path through `Platform/nova_fw_update.h`. Both
+ * leaves are now real.
  *
  * Memory model: chunks flow Pi5 → UART → Nova → TCP/local-OSPI with at
  * most one chunk in flight. No bundle-wide buffering. See CLAUDE.md
