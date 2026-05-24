@@ -257,10 +257,46 @@ static uint32_t      s_cmd_queue_head = 0;
 static uint32_t      s_cmd_queue_tail = 0;
 static uint32_t      s_cmd_queue_count = 0;
 
-/* Broker task. Mirrors lp_ota_task's sizing & priority (CLAUDE.md
- * mention of the same TCP listener pattern). Priority lower than
- * UART RX so RX always wins under contention; higher than idle. */
-#define BROKER_TASK_STACK_BYTES   (8u * 1024u)
+/* Broker task. Priority lower than UART RX so RX always wins under
+ * contention; higher than idle. Mirrors lp_ota_task's priority.
+ *
+ * Stack budget (Phase 3.7.1 — bumped from 8 KB → 16 KB after Bug B
+ * triage 2026-05-24):
+ *
+ *   Worst-case call chain on the chunk path:
+ *     task entry frame + locals       ~256 B
+ *     drain loop: BrokerChunkSlot ch  ~2 KB  (sizeof(slot) ~2056)
+ *     decode_chunk locals             ~80 B
+ *     target_chunk → WriteChunkToLp:
+ *       body[1600] + frame[2048]      ~3.7 KB
+ *       await_status: body[512]       ~520 B
+ *       lwip_recv internal recursion  ~512-1024 B (varies)
+ *     ─────────────────────────────────────────
+ *     Total                          ~7.0-7.5 KB
+ *
+ *   Worst-case on the cmd path (decode_component_begin):
+ *     task entry frame + locals       ~256 B
+ *     BrokerCmdSlot cmd               ~280 B
+ *     decode_component_begin locals   ~200 B (name + version buffers)
+ *     ensure_fleet_snapshot → probe_one_host:
+ *       body[PUSH_RX_FRAME_MAX]       ~520 B
+ *       LpBankInfo                    ~200 B
+ *     target_begin → BeginToLp:
+ *       body[256] + frame[2048]       ~2.3 KB
+ *       BankInfo drain: body[512]+bi  ~720 B  (separate inner scope —
+ *                                              compiler may overlap)
+ *       await_status: body[512]       ~520 B
+ *       lwip_send/recv internals      ~512-1024 B
+ *     ─────────────────────────────────────────
+ *     Total                          ~5.5-6.5 KB
+ *
+ *   8 KB was tight (~85-95% utilisation worst-case). Phase 3.7
+ *   (0.A.194) bench showed BeginToLp fast-failing in ~2.3 s on a
+ *   known-reachable STORAGE LP with no per-step log emit, which is
+ *   consistent with stack-overflow corruption of return addresses
+ *   inside the lwip_recv call chain. Bumped to 16 KB — same headroom
+ *   pattern lp_ota_task uses for the inbound side. */
+#define BROKER_TASK_STACK_BYTES   (16u * 1024u)
 #define BROKER_TASK_STACK_WORDS   (BROKER_TASK_STACK_BYTES / sizeof(configSTACK_DEPTH_TYPE))
 #define BROKER_TASK_PRI           (configMAX_PRIORITIES - 6)
 
@@ -757,9 +793,24 @@ static void decode_install_begin(const uint8_t *body, size_t len)
         }
     }
 
-    /* Reset state for the new bundle — including fleet cache. */
+    /* Reset state for the new bundle — including fleet cache.
+     *
+     * Phase 3.7.1 Bug A (2026-05-24): explicit fleet-cache clear here +
+     * in decode_complete / decode_abort. The wholesale memset of s_ctx
+     * already zeros `fleet_probed` / `fleet_count` / `fleet[]`, but
+     * bench evidence on 0.A.194 showed stale fleet snapshots being
+     * reused across consecutive install attempts within one boot
+     * session (an unreachable orbit in attempt N stayed cached as
+     * unreachable for attempt N+1 even after a real probe would have
+     * found it healthy). Belt-and-suspenders explicit clear documents
+     * the invariant: every install boundary re-probes fresh. */
     broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
+    /* Explicit fleet-cache invalidation (belt-and-suspenders even though
+     * the memset above zeros these — survives a future refactor that
+     * reorders or removes the wholesale memset). */
+    s_ctx.fleet_probed = false;
+    s_ctx.fleet_count  = 0u;
     s_ctx.component_count = component_count;
     s_ctx.chunk_size      = chunk_size;
     s_ctx.allow_downgrade = allow_downgrade;
@@ -1362,9 +1413,13 @@ static void decode_complete(const uint8_t *body, size_t len)
         emit_install_result(FW_INSTALL_OVERALL_DONE, "");
     }
     /* Bundle is done as far as Pi5 is concerned; return to IDLE so
-     * non-essential broadcasts resume. */
+     * non-essential broadcasts resume. Phase 3.7.1 Bug A: explicit
+     * fleet-cache invalidation so the next install in this boot
+     * session re-probes fresh. */
     broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
+    s_ctx.fleet_probed = false;
+    s_ctx.fleet_count  = 0u;
     broker_set_state_locked(BROKER_IDLE);
     broker_unlock();
 }
@@ -1408,8 +1463,13 @@ static void decode_abort(const uint8_t *body, size_t len)
     /* Nova doesn't reboot for an abort; emit the result envelope normally. */
     emit_install_result(FW_INSTALL_OVERALL_ABORTED,
                         reason[0] ? reason : "aborted by Pi5");
+    /* Phase 3.7.1 Bug A: explicit fleet-cache invalidation so a retry
+     * after this abort re-probes (the abort may have been triggered by
+     * a fleet member coming back online or losing connectivity). */
     broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
+    s_ctx.fleet_probed = false;
+    s_ctx.fleet_count  = 0u;
     broker_set_state_locked(BROKER_IDLE);
     broker_unlock();
 }

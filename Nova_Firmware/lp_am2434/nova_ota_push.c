@@ -475,27 +475,51 @@ int32_t NovaOtaPush_BeginToLp(uint32_t target_ip,
 {
     if (out_lp_error) *out_lp_error = 0u;
 
+    /* Per-step diagnostics — Phase 3.7.1 Bug B triage (2026-05-24).
+     * 0.A.194 bench: BeginToLp fast-failed in ~2.3 s on a known-reachable
+     * STORAGE LP with the only emit being "push Begin failed" at the
+     * broker layer (no per-step log emit from this function). These
+     * `[OTA-PUSH] Begin step=N` markers let us pinpoint which sub-step
+     * tripped without needing extensive bench iteration. Cost: one
+     * DebugP_log per step (~6 lines per Begin call). Keep until Bug B is
+     * rooted, then either delete or downgrade behind a #ifdef. */
+    char ip_dbg[NOVA_OTA_PUSH_HOST_MAX];
+    ip_to_string(target_ip, ip_dbg, sizeof(ip_dbg));
+    uint64_t t_enter = ClockP_getTimeUsec();
+    DebugP_log("[OTA-PUSH] Begin step=0 enter target=%s total=%u role=%u "
+               "version=\"%s\" downgrade=%d\r\n",
+               ip_dbg, (unsigned)total_size, (unsigned)expected_role,
+               version ? version : "", (int)allow_downgrade);
+
     /* Close any stale socket first — defensive. */
     close_active_socket();
     s_push_target_ip = target_ip;
 
     /* Open with the long Begin-recv timeout (Bank B erase ~5 s). */
+    DebugP_log("[OTA-PUSH] Begin step=1 connect target=%s recvTo=%ds\r\n",
+               ip_dbg, PUSH_BEGIN_RECV_TIMEOUT_S);
     int sock = open_lp_socket(target_ip, PUSH_BEGIN_RECV_TIMEOUT_S);
     if (sock < 0) {
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PUSH] Begin step=1 FAIL (connect) elapsed=%uus errno=%d\r\n",
+                   (unsigned)dt_us, errno);
         return NOVA_OTA_PUSH_ERR_TRANSPORT;
     }
     s_push_sock = sock;
+    DebugP_log("[OTA-PUSH] Begin step=2 connected sock=%d\r\n", sock);
 
     /* LP auto-pushes FwBankInfo on connect. Drain it (best-effort) so
      * the post-Begin Status read isn't preceded by a stale BankInfo we
      * have to skip. We log the bank info as it arrives. */
     {
+        DebugP_log("[OTA-PUSH] Begin step=3 drain BankInfo recvTo=%ds\r\n",
+                   PUSH_BANK_INFO_TIMEOUT_S);
         sock_set_recv_timeout(sock, PUSH_BANK_INFO_TIMEOUT_S);
         uint8_t body[PUSH_RX_FRAME_MAX];
         uint8_t tag = 0;
         size_t body_len = 0;
-        if (recv_frame(sock, &tag, body, &body_len) == 0
-                && tag == LP_OTA_TAG_BANK_INFO) {
+        int rfrc = recv_frame(sock, &tag, body, &body_len);
+        if (rfrc == 0 && tag == LP_OTA_TAG_BANK_INFO) {
             LpBankInfo bi;
             decode_bank_info(body, body_len, &bi);
             DebugP_log("[OTA-PUSH] BankInfo active=%u roleEmitted=%d "
@@ -511,12 +535,18 @@ int32_t NovaOtaPush_BeginToLp(uint32_t target_ip,
              * gates this server-side as LP_OTA_ERR_ROLE_MISMATCH = 27,
              * so this is belt-and-suspenders for the round-trip cost.) */
             if (bi.has_current_role && bi.current_role != expected_role) {
-                DebugP_log("[OTA-PUSH] role mismatch: LP=%u, bundle=%u — aborting before Begin\r\n",
+                DebugP_log("[OTA-PUSH] Begin step=3 FAIL (role mismatch): LP=%u, bundle=%u\r\n",
                            (unsigned)bi.current_role, (unsigned)expected_role);
                 if (out_lp_error) *out_lp_error = 27u;   /* LP_OTA_ERR_ROLE_MISMATCH */
                 close_active_socket();
                 return NOVA_OTA_PUSH_ERR_LP_ERROR;
             }
+        } else {
+            /* Not fatal — fall through to Begin send. But log what we
+             * actually saw so we can tell BankInfo-missing from
+             * BankInfo-decode-error from wrong-tag. */
+            DebugP_log("[OTA-PUSH] Begin step=3 BankInfo soft-miss rfrc=%d tag=0x%02x len=%u errno=%d\r\n",
+                       rfrc, (unsigned)tag, (unsigned)body_len, errno);
         }
         /* Fall through whether we got BankInfo or not — soft gate. */
     }
@@ -538,23 +568,34 @@ int32_t NovaOtaPush_BeginToLp(uint32_t target_ip,
     size_t  flen = make_frame(frame, sizeof(frame),
                               LP_OTA_TAG_BEGIN, body, bpos);
     if (flen == 0u) {
-        DebugP_log("[OTA-PUSH] Begin: frame overflow\r\n");
+        DebugP_log("[OTA-PUSH] Begin step=4 FAIL frame overflow bpos=%u\r\n",
+                   (unsigned)bpos);
         close_active_socket();
         return NOVA_OTA_PUSH_ERR_TRANSPORT;
     }
+    DebugP_log("[OTA-PUSH] Begin step=4 send FwBeginUpdate flen=%u\r\n",
+               (unsigned)flen);
     if (!sock_send_all(sock, frame, flen)) {
-        DebugP_log("[OTA-PUSH] Begin: send failed errno=%d\r\n", errno);
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PUSH] Begin step=4 FAIL send errno=%d elapsed=%uus\r\n",
+                   errno, (unsigned)dt_us);
         close_active_socket();
         return NOVA_OTA_PUSH_ERR_TRANSPORT;
     }
 
     /* Wait for the LP's first Status — could take ~5 s on Bank B erase. */
+    DebugP_log("[OTA-PUSH] Begin step=5 await Status recvTo=%ds\r\n",
+               PUSH_BEGIN_RECV_TIMEOUT_S);
     LpStatus st;
     if (await_status(&st) != 0) {
-        DebugP_log("[OTA-PUSH] Begin: no Status (timeout/disconnect)\r\n");
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PUSH] Begin step=5 FAIL no Status (timeout/disconnect) elapsed=%uus\r\n",
+                   (unsigned)dt_us);
         close_active_socket();
         return NOVA_OTA_PUSH_ERR_TIMEOUT;
     }
+    DebugP_log("[OTA-PUSH] Begin step=6 Status received state=%u err=%u\r\n",
+               (unsigned)st.state, (unsigned)st.error_code);
     int32_t rc = status_to_rc(&st, out_lp_error, "Begin");
     if (rc != NOVA_OTA_PUSH_OK) {
         close_active_socket();
@@ -564,9 +605,11 @@ int32_t NovaOtaPush_BeginToLp(uint32_t target_ip,
     /* Switch to the shorter per-chunk recv timeout for the rest. */
     sock_set_recv_timeout(sock, PUSH_CHUNK_RECV_TIMEOUT_S);
 
-    DebugP_log("[OTA-PUSH] Begin OK state=%u (total=%u crc=0x%08x role=%u)\r\n",
+    uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+    DebugP_log("[OTA-PUSH] Begin OK state=%u (total=%u crc=0x%08x role=%u) elapsed=%uus\r\n",
                (unsigned)st.state, (unsigned)total_size,
-               (unsigned)image_crc, (unsigned)expected_role);
+               (unsigned)image_crc, (unsigned)expected_role,
+               (unsigned)dt_us);
     return NOVA_OTA_PUSH_OK;
 }
 
