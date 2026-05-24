@@ -25,6 +25,21 @@
  *     reconciles via post-reboot Heartbeat / VersionInfo). See
  *     `decode_component_begin` for the bundle-ordering constraint that
  *     keeps this safe.
+ *   - Phase 3.7 (2026-05-23) — concurrency split. Up through 3.6 every
+ *     decoder ran on the same task that owned UART RX and the 100 ms
+ *     heartbeat emit (`bridge_uart_task` in main.c). The leaf
+ *     operations (TCP push to remote LP via lwip_send/lwip_recv,
+ *     OSPI flash writes via hal_flash_write_dac) are synchronous and
+ *     block for seconds — long enough for the bridge to declare the
+ *     UART dead and reconnect-loop. This file now splits into:
+ *       (a) `NovaOtaBroker_OnEnvelope` runs on `bridge_uart_task` and
+ *           does only COPY-and-signal — sub-millisecond.
+ *       (b) `nova_ota_broker_task` (created in `NovaOtaBroker_Init`,
+ *           runs once the scheduler starts) drains the chunk ring +
+ *           command queue and performs ALL leaf I/O. Heartbeat keeps
+ *           flowing on `bridge_uart_task` regardless of install state.
+ *     Memory: 16-slot chunk ring × 1024 B per slot = 16 KB MSRAM.
+ *     Command queue depth 4, ≤256 B body each ≈ 1.1 KB.
  *
  * Invariants enforced here (per `CLAUDE.md`):
  *   1. proto3 zero-suppression — `pb_uint32_force` for 0-meaningful
@@ -37,6 +52,11 @@
  *      the rule.
  *   4. TX path goes through `NovaProto_SendRaw` only. We never bypass.
  *   8. No hardcoded sensor / setpoint / unit values — none introduced.
+ *   9. No DebugP_log before the scheduler starts — Init uses bb_uart0_puts
+ *      indirectly via the same pattern as main.c's banner. All decoder
+ *      DebugP_log calls now run on `nova_ota_broker_task` which is
+ *      created pre-scheduler but only RUNS post-scheduler-start, so the
+ *      logs are scheduler-safe.
  *
  * Wire reference:
  *   proto/agristar/envelope.proto         (envelope tags 130..142)
@@ -53,7 +73,11 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include <FreeRTOS.h>
+#include <task.h>
+#include <semphr.h>
 #include <kernel/dpl/DebugP.h>
+#include <kernel/dpl/ClockP.h>
 
 #include "nova_protocol.h"
 #include "nova_ota_push.h"
@@ -83,6 +107,9 @@
  * errors; 99 is "intentional Phase-3 scaffold gap" so Pi5 can surface a
  * distinct message ("broker leaf not implemented yet"). */
 #define BROKER_ERR_STUB_LEAF_NOT_IMPL    99u
+/* Phase 3.7: queue/ring overflow errors. ≥100 = runtime. */
+#define BROKER_ERR_CHUNK_RING_FULL      104u
+#define BROKER_ERR_CMD_QUEUE_FULL       105u
 
 /* ─── proto3 enum mirror (must track firmware.proto) ─────────────────── */
 typedef enum {
@@ -161,6 +188,110 @@ typedef struct {
 
 static NovaOtaBrokerState s_state;
 static NovaOtaBrokerCtx   s_ctx;
+
+/* Lock-free flag for `NovaOtaBroker_IsInInstallMode()`. Updated by the
+ * broker task on state transitions; read by main.c's per-tick
+ * broadcasters without needing the mutex. `volatile` ensures the
+ * compiler doesn't cache it in a register across the read. */
+static volatile bool s_install_active = false;
+
+/* ─── Concurrency primitives (Phase 3.7) ─────────────────────────────── */
+
+/* Recursive mutex protecting `s_ctx`, `s_state`, the chunk ring head/
+ * tail pointers, and the command queue head/tail. UART RX (enqueue
+ * side) takes it briefly per envelope; the broker task takes it during
+ * state transitions and to dequeue. Hold windows MUST be short — no
+ * I/O inside the locked region. Leaf operations run unlocked on the
+ * broker task. */
+static SemaphoreHandle_t s_ctx_mtx = NULL;
+static StaticSemaphore_t s_ctx_mtx_buf;
+
+/* Binary semaphore — UART RX gives, broker task takes (with timeout =
+ * tick period). One give covers any number of enqueues; broker drains
+ * everything it sees per wake. */
+static SemaphoreHandle_t s_wake_sem = NULL;
+static StaticSemaphore_t s_wake_sem_buf;
+
+/* Chunk ring. Each slot owns up to BROKER_CHUNK_MAX_BYTES of payload
+ * plus the envelope metadata. With chunk_size = 1024 and depth = 16
+ * we burn 16 KB MSRAM, sized to absorb a few-second Bank-B erase pause
+ * on the LP without ever back-pressuring the UART RX side. If the
+ * bridge somehow streams faster than the LP drains for the full
+ * 16-slot window, the next enqueue fails clean (see
+ * BROKER_ERR_CHUNK_RING_FULL).
+ *
+ * Today's bridge ships 1024-byte chunks; we cap at 2048 in case a
+ * future bridge negotiates larger chunks via the FwInstallBegin
+ * `chunk_size` hint. Reduce if MSRAM budget tightens. */
+#define BROKER_CHUNK_MAX_BYTES    2048u
+#define BROKER_CHUNK_RING_DEPTH   16u
+
+typedef struct {
+    uint32_t tag;                /* always 132 — kept for symmetry */
+    uint32_t envelope_seq;
+    uint32_t body_len;
+    uint8_t  body[BROKER_CHUNK_MAX_BYTES];
+} BrokerChunkSlot;
+
+static BrokerChunkSlot s_chunk_ring[BROKER_CHUNK_RING_DEPTH];
+static uint32_t        s_chunk_ring_head = 0;   /* next slot to write */
+static uint32_t        s_chunk_ring_tail = 0;   /* next slot to read  */
+static uint32_t        s_chunk_ring_count = 0;
+
+/* Command queue for the non-chunk envelopes (Begin / ComponentBegin /
+ * ComponentFinalize / Complete / Abort / FleetProbe). Body cap of 256
+ * bytes is generous — the largest payload here is FwInstallBegin which
+ * carries a 32-byte SHA + version string + a handful of varints. */
+#define BROKER_CMD_MAX_BYTES      256u
+#define BROKER_CMD_QUEUE_DEPTH    4u
+
+typedef struct {
+    uint32_t tag;                /* 130/131/133/134/135/136 */
+    uint32_t envelope_seq;
+    uint32_t body_len;
+    uint8_t  body[BROKER_CMD_MAX_BYTES];
+} BrokerCmdSlot;
+
+static BrokerCmdSlot s_cmd_queue[BROKER_CMD_QUEUE_DEPTH];
+static uint32_t      s_cmd_queue_head = 0;
+static uint32_t      s_cmd_queue_tail = 0;
+static uint32_t      s_cmd_queue_count = 0;
+
+/* Broker task. Mirrors lp_ota_task's sizing & priority (CLAUDE.md
+ * mention of the same TCP listener pattern). Priority lower than
+ * UART RX so RX always wins under contention; higher than idle. */
+#define BROKER_TASK_STACK_BYTES   (8u * 1024u)
+#define BROKER_TASK_STACK_WORDS   (BROKER_TASK_STACK_BYTES / sizeof(configSTACK_DEPTH_TYPE))
+#define BROKER_TASK_PRI           (configMAX_PRIORITIES - 6)
+
+static StackType_t   s_broker_task_stack[BROKER_TASK_STACK_WORDS] __attribute__((aligned(32)));
+static StaticTask_t  s_broker_task_obj;
+static TaskHandle_t  s_broker_task_handle = NULL;
+
+static void nova_ota_broker_task(void *args);
+
+/* ─── Mutex helpers — short, named, never-fail at runtime ─────────────── */
+static inline void broker_lock(void)
+{
+    if (s_ctx_mtx != NULL) {
+        (void)xSemaphoreTakeRecursive(s_ctx_mtx, portMAX_DELAY);
+    }
+}
+static inline void broker_unlock(void)
+{
+    if (s_ctx_mtx != NULL) {
+        (void)xSemaphoreGiveRecursive(s_ctx_mtx);
+    }
+}
+
+/* Mark install-active state. Called only from the broker task on state
+ * transitions; readers (main.c gates + IsInInstallMode) read the
+ * volatile flag lock-free. */
+static inline void broker_set_state_locked(NovaOtaBrokerState st)
+{
+    s_state = st;
+    s_install_active = (st == BROKER_INSTALLING) || (st == BROKER_ERROR);
+}
 
 /* ─── Local varint helpers (don't share `static` ones from main.c) ───── */
 static size_t bk_encode_varint(uint8_t *buf, uint32_t value)
@@ -244,7 +375,9 @@ static size_t bk_pb_string(uint8_t *buf, uint32_t field, const char *s)
 
 /* Build full Envelope { fw_install_progress = { … } } and ship via
  * NovaProto_SendRaw. Returns bytes pushed to the TX path, or 0 on
- * encode overflow. */
+ * encode overflow. NovaProto_SendRaw is mutex-serialized per CLAUDE.md
+ * invariant #4 — safe to call from the broker task alongside heartbeat
+ * emissions from bridge_uart_task. */
 static size_t emit_install_progress(uint32_t            component_index,
                                     const char         *component_name,
                                     const char         *target_host,
@@ -406,7 +539,8 @@ static size_t emit_fleet_snapshot(const NovaFwFleetMember *members,
 /* Ensure the cached fleet is populated. Idempotent: only probes if
  * `fleet_probed` is false. Called lazily on the first component begin
  * of each install so a fleet-less install (controller-only) doesn't
- * pay the probe cost. */
+ * pay the probe cost. Runs on the broker task — the underlying probe
+ * does multiple lwip_connect calls and may block for `timeout_ms`. */
 static void ensure_fleet_snapshot(uint32_t timeout_ms)
 {
     if (s_ctx.fleet_probed) return;
@@ -476,6 +610,10 @@ static uint32_t broker_crc32_continue(uint32_t state,
  * `error_code` in FwInstallProgress(state=FAILED)). Push paths translate
  * NOVA_OTA_PUSH_ERR_* into the corresponding LP_OTA_ERR_* via out_lp_err;
  * the self path returns NovaFwUpdate_* error codes directly (1..5).
+ *
+ * Phase 3.7: these now run exclusively on `nova_ota_broker_task`, so
+ * blocking lwip_send/lwip_recv / hal_flash_write_dac calls no longer
+ * starve the heartbeat.
  */
 static uint32_t target_begin(uint32_t total_size, uint32_t chunk_size,
                              uint32_t role, bool allow_downgrade,
@@ -575,7 +713,7 @@ static void bk_copy_string(char *dst, size_t dst_max,
     dst[cp] = '\0';
 }
 
-/* Decode FwInstallBegin (envelope 130). */
+/* Decode FwInstallBegin (envelope 130). Runs on the broker task. */
 static void decode_install_begin(const uint8_t *body, size_t len)
 {
     char     bundle_version[48] = {0};
@@ -620,11 +758,13 @@ static void decode_install_begin(const uint8_t *body, size_t len)
     }
 
     /* Reset state for the new bundle — including fleet cache. */
+    broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.component_count = component_count;
     s_ctx.chunk_size      = chunk_size;
     s_ctx.allow_downgrade = allow_downgrade;
-    s_state = BROKER_INSTALLING;
+    broker_set_state_locked(BROKER_INSTALLING);
+    broker_unlock();
 
     DebugP_log("[OTA-BROKER] InstallBegin bundle=\"%s\" components=%u "
                "chunk=%u downgrade=%d\r\n",
@@ -632,7 +772,7 @@ static void decode_install_begin(const uint8_t *body, size_t len)
                (unsigned)chunk_size, (int)allow_downgrade);
 }
 
-/* Decode FwInstallComponentBegin (envelope 131). */
+/* Decode FwInstallComponentBegin (envelope 131). Runs on the broker task. */
 static void decode_component_begin(const uint8_t *body, size_t len)
 {
     uint32_t component_index = 0;
@@ -685,7 +825,10 @@ static void decode_component_begin(const uint8_t *body, size_t len)
         }
     }
 
-    /* Stage the per-component scratch. */
+    /* Stage the per-component scratch. Locked because the UART RX side
+     * peeks at cur_component_index / cur_is_self for the chunk-enqueue
+     * gate (see NovaOtaBroker_OnEnvelope). */
+    broker_lock();
     s_ctx.cur_component_index = component_index;
     s_ctx.cur_role            = role;
     s_ctx.cur_total_size      = total_size;
@@ -723,6 +866,7 @@ static void decode_component_begin(const uint8_t *body, size_t len)
      */
     OrbitRole own_role = (OrbitRole)LpDeviceConfig_Get()->role;
     s_ctx.cur_is_self = ((uint32_t)own_role == role);
+    broker_unlock();
 
     DebugP_log("[OTA-BROKER] ComponentBegin idx=%u name=\"%s\" "
                "role=%u total=%u is_self=%d ver=\"%s\"\r\n",
@@ -732,10 +876,12 @@ static void decode_component_begin(const uint8_t *body, size_t len)
 
     if (s_ctx.cur_is_self) {
         /* Synthetic target_host so Pi5's progress-row key is unique. */
+        broker_lock();
         bk_copy_string(s_ctx.cur_target_host,
                        sizeof(s_ctx.cur_target_host),
                        (const uint8_t *)BROKER_SELF_HOST,
                        strlen(BROKER_SELF_HOST));
+        broker_unlock();
     } else {
         /* Remote-LP path: ensure the fleet is probed, find the target. */
         ensure_fleet_snapshot(500u);
@@ -747,14 +893,18 @@ static void decode_component_begin(const uint8_t *body, size_t len)
                                   FW_INSTALL_FAILED, 0u, total_size,
                                   100u, "no reachable LP for component role",
                                   FW_INSTALL_OVERALL_FAILED);
+            broker_lock();
             s_ctx.cur_failed = true;
             s_ctx.cur_state  = FW_INSTALL_FAILED;
-            s_state          = BROKER_ERROR;
+            broker_set_state_locked(BROKER_ERROR);
+            broker_unlock();
             return;
         }
+        broker_lock();
         bk_copy_string(s_ctx.cur_target_host,
                        sizeof(s_ctx.cur_target_host),
                        (const uint8_t *)m->host, strlen(m->host));
+        broker_unlock();
     }
 
     /* Emit BEGIN so Pi5's UI moves off "queued". The image_crc and the
@@ -793,13 +943,17 @@ static void decode_component_begin(const uint8_t *body, size_t len)
                                   ? "self-update Begin failed"
                                   : "push Begin failed",
                               FW_INSTALL_OVERALL_FAILED);
+        broker_lock();
         s_ctx.cur_failed = true;
         s_ctx.cur_state  = FW_INSTALL_FAILED;
-        s_state          = BROKER_ERROR;
+        broker_set_state_locked(BROKER_ERROR);
+        broker_unlock();
         return;
     }
+    broker_lock();
     if (s_ctx.cur_is_self) s_ctx.cur_self_active = true;
     else                    s_ctx.cur_push_active = true;
+    broker_unlock();
 
     /* Begin succeeded → emit ERASING / PUSHING in quick succession so
      * Pi5's UI animation is faithful. (Self path: NovaFwUpdate_Begin
@@ -816,9 +970,11 @@ static void decode_component_begin(const uint8_t *body, size_t len)
                           FW_INSTALL_PUSHING, 0u, total_size,
                           0u, "",
                           FW_INSTALL_OVERALL_INSTALLING);
+    broker_lock();
     s_ctx.cur_state = FW_INSTALL_PUSHING;
     /* First PUSHING progress threshold. */
     s_ctx.cur_next_progress = (total_size * BROKER_PROGRESS_PCT) / 100u;
+    broker_unlock();
 }
 
 /* CRC-32 (Ethernet/zlib polynomial — matches firmware + orbitOtaPush.ts). */
@@ -839,7 +995,10 @@ static uint32_t broker_crc32_continue(uint32_t state,
  * remote LP via the push state machine; on LP error, marks the
  * component FAILED and surfaces the error code. Subsequent chunks
  * for a FAILED component are dropped silently — Pi5 needs ~one UART
- * round-trip to react to our FAILED progress envelope. */
+ * round-trip to react to our FAILED progress envelope.
+ *
+ * Phase 3.7: runs on the broker task; `body` points into the broker-
+ * owned chunk ring slot, which is stable until we return. */
 static void decode_chunk(const uint8_t *body, size_t len)
 {
     uint32_t component_index = 0;
@@ -924,11 +1083,13 @@ static void decode_chunk(const uint8_t *body, size_t len)
                                   ? "self-update chunk failed"
                                   : "chunk push failed",
                               FW_INSTALL_OVERALL_FAILED);
+        broker_lock();
         s_ctx.cur_failed = true;
         s_ctx.cur_state  = FW_INSTALL_FAILED;
         s_ctx.cur_push_active = false;
         s_ctx.cur_self_active = false;
-        s_state          = BROKER_ERROR;
+        broker_set_state_locked(BROKER_ERROR);
+        broker_unlock();
         return;
     }
 
@@ -1029,9 +1190,13 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
              * but the FwBankHeader for Bank B is left invalid by
              * Finalize-time abort regardless.) */
             NovaFwUpdate_Abort();
+            broker_lock();
             s_ctx.cur_self_active = false;
+            broker_unlock();
         } else {
+            broker_lock();
             s_ctx.cur_push_active = false;
+            broker_unlock();
         }
         emit_install_progress(s_ctx.cur_component_index,
                               s_ctx.cur_component_name,
@@ -1043,9 +1208,11 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
                                   ? "self-update finalize/verify failed"
                                   : "finalize/activate failed",
                               FW_INSTALL_OVERALL_FAILED);
+        broker_lock();
         s_ctx.cur_failed = true;
         s_ctx.cur_state  = FW_INSTALL_FAILED;
-        s_state          = BROKER_ERROR;
+        broker_set_state_locked(BROKER_ERROR);
+        broker_unlock();
         return;
     }
 
@@ -1071,8 +1238,10 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
                               0u, "",
                               FW_INSTALL_OVERALL_INSTALLING);
 
+        broker_lock();
         s_ctx.cur_rebooting = true;
         s_ctx.cur_state     = FW_INSTALL_REBOOTING;
+        broker_unlock();
 
         DebugP_log("[OTA-BROKER] self-update Activate (warm reset imminent)\r\n");
         uint32_t arc = NovaFwUpdate_Activate(true);
@@ -1080,7 +1249,9 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
          * which normally never returns. If we *do* see control again,
          * the reset failed; treat that as a hard error so Pi5 isn't
          * left waiting for a heartbeat that won't change. */
+        broker_lock();
         s_ctx.cur_self_active = false;
+        broker_unlock();
         if (arc != 0u) {
             DebugP_log("[OTA-BROKER] self-update Activate returned rc=%u (reset failed?)\r\n",
                        (unsigned)arc);
@@ -1092,9 +1263,11 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
                                   arc,
                                   "self-update Activate failed (no reset)",
                                   FW_INSTALL_OVERALL_FAILED);
+            broker_lock();
             s_ctx.cur_failed = true;
             s_ctx.cur_state  = FW_INSTALL_FAILED;
-            s_state          = BROKER_ERROR;
+            broker_set_state_locked(BROKER_ERROR);
+            broker_unlock();
             return;
         }
 
@@ -1118,7 +1291,9 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
 
     /* Orbit-push path: the push module already did Activate inline.
      * Emit the externally-visible tail states around its single call. */
+    broker_lock();
     s_ctx.cur_push_active = false;
+    broker_unlock();
     emit_install_progress(s_ctx.cur_component_index,
                           s_ctx.cur_component_name,
                           s_ctx.cur_target_host,
@@ -1147,7 +1322,9 @@ static void decode_component_finalize(const uint8_t *body, size_t len)
                           s_ctx.cur_bytes_written, s_ctx.cur_total_size,
                           0u, "",
                           FW_INSTALL_OVERALL_INSTALLING);
+    broker_lock();
     s_ctx.cur_state = FW_INSTALL_DONE;
+    broker_unlock();
 }
 
 /* Decode FwInstallComplete (envelope 134). Body has no fields today;
@@ -1186,8 +1363,10 @@ static void decode_complete(const uint8_t *body, size_t len)
     }
     /* Bundle is done as far as Pi5 is concerned; return to IDLE so
      * non-essential broadcasts resume. */
+    broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
-    s_state = BROKER_IDLE;
+    broker_set_state_locked(BROKER_IDLE);
+    broker_unlock();
 }
 
 /* Decode FwInstallAbort (envelope 135). */
@@ -1229,14 +1408,13 @@ static void decode_abort(const uint8_t *body, size_t len)
     /* Nova doesn't reboot for an abort; emit the result envelope normally. */
     emit_install_result(FW_INSTALL_OVERALL_ABORTED,
                         reason[0] ? reason : "aborted by Pi5");
+    broker_lock();
     memset(&s_ctx, 0, sizeof(s_ctx));
-    s_state = BROKER_IDLE;
+    broker_set_state_locked(BROKER_IDLE);
+    broker_unlock();
 }
 
-/* Decode FwFleetProbe (envelope 136). Phase-3 reply is an empty
- * snapshot — Pi5's `orbitFleetResolver.ts` already falls back to its
- * TCP probe path on an empty snapshot, so the airgap migration step
- * here doesn't regress today's UX. */
+/* Decode FwFleetProbe (envelope 136). */
 static void decode_fleet_probe(const uint8_t *body, size_t len)
 {
     uint32_t timeout_ms = 0;
@@ -1265,12 +1443,107 @@ static void decode_fleet_probe(const uint8_t *body, size_t len)
 
     DebugP_log("[OTA-BROKER] FleetProbe timeout=%u\r\n",
                (unsigned)timeout_ms);
+    broker_lock();
+    /* Probing is transient — don't promote install_active for this. */
     s_state = BROKER_PROBING;
+    broker_unlock();
     NovaFwFleetMember members[BROKER_FLEET_MAX];
     size_t count = NovaOtaPush_ProbeFleet(members, BROKER_FLEET_MAX,
                                           timeout_ms);
     emit_fleet_snapshot(members, count);
-    s_state = BROKER_IDLE;
+    broker_lock();
+    /* Only fall back to IDLE if no install slipped in while we were
+     * probing (rare — bridge serialises envelopes — but cheap to gate). */
+    if (s_state == BROKER_PROBING) {
+        broker_set_state_locked(BROKER_IDLE);
+    }
+    broker_unlock();
+}
+
+/* ─── Broker task — drains chunk ring + command queue (Phase 3.7) ─────
+ *
+ * Wakes on s_wake_sem (one give per enqueue from UART RX) with a 100 ms
+ * fallback timeout that also serves as the periodic tick. Drains
+ * chunks first (they're the high-rate path), then commands, then
+ * loops back to wait. Leaf I/O happens unlocked — the mutex is only
+ * held for short queue-pointer manipulation and state writes.
+ */
+static bool chunk_ring_pop_locked(BrokerChunkSlot *out)
+{
+    if (s_chunk_ring_count == 0u) return false;
+    *out = s_chunk_ring[s_chunk_ring_tail];
+    s_chunk_ring_tail = (s_chunk_ring_tail + 1u) % BROKER_CHUNK_RING_DEPTH;
+    s_chunk_ring_count--;
+    return true;
+}
+
+static bool cmd_queue_pop_locked(BrokerCmdSlot *out)
+{
+    if (s_cmd_queue_count == 0u) return false;
+    *out = s_cmd_queue[s_cmd_queue_tail];
+    s_cmd_queue_tail = (s_cmd_queue_tail + 1u) % BROKER_CMD_QUEUE_DEPTH;
+    s_cmd_queue_count--;
+    return true;
+}
+
+static void dispatch_cmd(const BrokerCmdSlot *slot)
+{
+    switch (slot->tag) {
+    case 130u: decode_install_begin      (slot->body, slot->body_len); break;
+    case 131u: decode_component_begin    (slot->body, slot->body_len); break;
+    case 133u: decode_component_finalize (slot->body, slot->body_len); break;
+    case 134u: decode_complete           (slot->body, slot->body_len); break;
+    case 135u: decode_abort              (slot->body, slot->body_len); break;
+    case 136u: decode_fleet_probe        (slot->body, slot->body_len); break;
+    default:
+        DebugP_log("[OTA-BROKER] dispatch_cmd: unknown tag %u\r\n",
+                   (unsigned)slot->tag);
+        break;
+    }
+}
+
+static void nova_ota_broker_task(void *args)
+{
+    (void)args;
+
+    DebugP_log("[OTA-BROKER] task entered (stack=%uB pri=%d)\r\n",
+               (unsigned)BROKER_TASK_STACK_BYTES, (int)BROKER_TASK_PRI);
+
+    while (1) {
+        /* Block on the wake semaphore; the 100 ms timeout also acts as
+         * the periodic tick for any future time-driven maintenance.
+         * Today's broker has no internal timers (Activate returns or
+         * the SoC resets — there's nothing the broker needs to nudge
+         * on the wall clock), so this is essentially a wait-for-work. */
+        (void)xSemaphoreTake(s_wake_sem, pdMS_TO_TICKS(100));
+
+        /* Drain everything currently visible. Chunks first — they're
+         * the bulk-throughput path and the bridge will already be
+         * back-pressured if we let them sit. Commands second. The
+         * UART RX side may concurrently push more while we drain;
+         * the next semaphore-give wakes us again. */
+        for (;;) {
+            BrokerChunkSlot ch;
+            bool got_chunk = false;
+            broker_lock();
+            got_chunk = chunk_ring_pop_locked(&ch);
+            broker_unlock();
+            if (!got_chunk) break;
+
+            decode_chunk(ch.body, ch.body_len);
+        }
+
+        for (;;) {
+            BrokerCmdSlot cmd;
+            bool got_cmd = false;
+            broker_lock();
+            got_cmd = cmd_queue_pop_locked(&cmd);
+            broker_unlock();
+            if (!got_cmd) break;
+
+            dispatch_cmd(&cmd);
+        }
+    }
 }
 
 /* ─── Public API ─────────────────────────────────────────────────────── */
@@ -1278,19 +1551,45 @@ static void decode_fleet_probe(const uint8_t *body, size_t len)
 void NovaOtaBroker_Init(void)
 {
     memset(&s_ctx, 0, sizeof(s_ctx));
-    s_state = BROKER_IDLE;
-    /* No DebugP_log here — Init may run pre-scheduler (called from
-     * main() alongside NovaFwUpdate_Init), and DebugP_log uses the
-     * FreeRTOS mutex which is undefined before vTaskStartScheduler.
-     * Per CLAUDE.md hard-invariant #9 (lp_am2434 README). */
+    s_state          = BROKER_IDLE;
+    s_install_active = false;
+
+    s_chunk_ring_head  = s_chunk_ring_tail  = s_chunk_ring_count  = 0u;
+    s_cmd_queue_head   = s_cmd_queue_tail   = s_cmd_queue_count   = 0u;
+
+    s_ctx_mtx = xSemaphoreCreateRecursiveMutexStatic(&s_ctx_mtx_buf);
+    configASSERT(s_ctx_mtx != NULL);
+
+    s_wake_sem = xSemaphoreCreateBinaryStatic(&s_wake_sem_buf);
+    configASSERT(s_wake_sem != NULL);
+
+    /* Create the task. It will sit in xSemaphoreTake until the
+     * scheduler starts. Mirrors lp_ota_task's xTaskCreateStatic
+     * pattern in main.c, but the storage is local to this file so
+     * main.c doesn't need to know our internal sizing. */
+    s_broker_task_handle = xTaskCreateStatic(
+        nova_ota_broker_task,
+        "ota_broker",
+        BROKER_TASK_STACK_WORDS,
+        NULL,
+        BROKER_TASK_PRI,
+        s_broker_task_stack,
+        &s_broker_task_obj);
+    configASSERT(s_broker_task_handle != NULL);
+
+    /* No DebugP_log here — Init runs pre-scheduler (called from main()
+     * alongside NovaFwUpdate_Init), and DebugP_log uses the FreeRTOS
+     * mutex which is undefined before vTaskStartScheduler.
+     * Per CLAUDE.md hard-invariant #9. main.c logs the banner. */
 }
 
 bool NovaOtaBroker_IsInInstallMode(void)
 {
-    /* PROBING is bounded (one envelope round-trip) and shouldn't gate
-     * the periodic emitters. Only INSTALLING (and the sticky ERROR
-     * tail, which clears on the next Begin/Abort/Complete) suspend. */
-    return (s_state == BROKER_INSTALLING) || (s_state == BROKER_ERROR);
+    /* Lock-free volatile read; the broker task updates this on state
+     * transitions. PROBING is bounded (one envelope round-trip) and
+     * intentionally doesn't promote the flag — only INSTALLING and
+     * the sticky ERROR tail suspend the broadcasters. */
+    return s_install_active;
 }
 
 void NovaOtaBroker_OnEnvelope(uint32_t tag,
@@ -1298,29 +1597,134 @@ void NovaOtaBroker_OnEnvelope(uint32_t tag,
                               size_t len,
                               uint32_t envelope_seq)
 {
-    s_ctx.last_envelope_seq = envelope_seq;
+    /* Runs on bridge_uart_task. MUST be lightweight: copy + signal.
+     * No leaf I/O, no logging on the hot path, no broker_lock during
+     * a slow operation. */
+    if (body == NULL && len != 0u) return;
 
-    switch (tag) {
-    case 130u: decode_install_begin       (body, len); break;
-    case 131u: decode_component_begin     (body, len); break;
-    case 132u: decode_chunk               (body, len); break;
-    case 133u: decode_component_finalize  (body, len); break;
-    case 134u: decode_complete            (body, len); break;
-    case 135u: decode_abort               (body, len); break;
-    case 136u: decode_fleet_probe         (body, len); break;
-    default:
-        DebugP_log("[OTA-BROKER] OnEnvelope: unhandled tag %u (len=%u)\r\n",
-                   (unsigned)tag, (unsigned)len);
-        break;
+    if (tag == 132u) {
+        /* Chunk path — copy into ring. Reject if it wouldn't fit; the
+         * bridge sees one FwInstallProgress(FAILED, error=104) instead
+         * of a silent drop, and the broker state machine aborts cleanly
+         * on the next drain pass. */
+        if (len > BROKER_CHUNK_MAX_BYTES) {
+            /* Body bigger than any slot — protocol bug or chunk_size
+             * negotiation drift. Fail clean. */
+            broker_lock();
+            s_install_active = true;  /* gate broadcasts until we surface */
+            broker_unlock();
+            /* Defer the FAILED emission to the broker task by stuffing
+             * a synthetic abort into the command queue would be more
+             * symmetrical, but the same emit path is mutex-serialized
+             * already; emit directly here. Heartbeat keeps flowing on
+             * bridge_uart_task because emit_install_progress only takes
+             * the TX mutex (microseconds). */
+            emit_install_progress(0, "", "",
+                                  FW_INSTALL_FAILED, 0u, 0u,
+                                  BROKER_ERR_CHUNK_RING_FULL,
+                                  "chunk body exceeds broker slot size",
+                                  FW_INSTALL_OVERALL_FAILED);
+            return;
+        }
+
+        broker_lock();
+        /* Quick gate — if no install is in progress, swallow. Pi5
+         * shouldn't send chunks outside an install but the early-drop
+         * here keeps the ring from filling with orphans. */
+        if (s_state != BROKER_INSTALLING) {
+            broker_unlock();
+            return;
+        }
+        if (s_chunk_ring_count >= BROKER_CHUNK_RING_DEPTH) {
+            /* Ring full. Mark failed; the broker drain pass will emit
+             * the FAILED progress. We DON'T queue a chunk that would
+             * overflow. */
+            uint32_t idx = s_ctx.cur_component_index;
+            uint32_t total = s_ctx.cur_total_size;
+            uint32_t wrote = s_ctx.cur_bytes_written;
+            char name[BROKER_NAME_MAX];
+            char host[BROKER_TARGET_HOST_MAX];
+            memcpy(name, s_ctx.cur_component_name, sizeof(name));
+            memcpy(host, s_ctx.cur_target_host,    sizeof(host));
+            s_ctx.cur_failed = true;
+            broker_set_state_locked(BROKER_ERROR);
+            broker_unlock();
+            emit_install_progress(idx, name, host,
+                                  FW_INSTALL_FAILED, wrote, total,
+                                  BROKER_ERR_CHUNK_RING_FULL,
+                                  "broker chunk ring full",
+                                  FW_INSTALL_OVERALL_FAILED);
+            /* Wake the broker so it observes the new state quickly. */
+            (void)xSemaphoreGive(s_wake_sem);
+            return;
+        }
+        BrokerChunkSlot *slot = &s_chunk_ring[s_chunk_ring_head];
+        slot->tag          = tag;
+        slot->envelope_seq = envelope_seq;
+        slot->body_len     = (uint32_t)len;
+        if (len > 0u) memcpy(slot->body, body, len);
+        s_chunk_ring_head = (s_chunk_ring_head + 1u) % BROKER_CHUNK_RING_DEPTH;
+        s_chunk_ring_count++;
+        s_ctx.last_envelope_seq = envelope_seq;
+        broker_unlock();
+        (void)xSemaphoreGive(s_wake_sem);
+        return;
     }
+
+    /* Non-chunk path — small command queue. */
+    if (tag != 130u && tag != 131u && tag != 133u &&
+        tag != 134u && tag != 135u && tag != 136u) {
+        /* Not a broker tag; the caller in main.c gates 130..136, so
+         * this is a safety net only. */
+        return;
+    }
+    if (len > BROKER_CMD_MAX_BYTES) {
+        /* Body too big for the command slot. Fail clean if we're mid-
+         * install; otherwise silently drop. */
+        broker_lock();
+        bool installing = (s_state == BROKER_INSTALLING);
+        broker_unlock();
+        if (installing) {
+            emit_install_progress(0, "", "",
+                                  FW_INSTALL_FAILED, 0u, 0u,
+                                  BROKER_ERR_CMD_QUEUE_FULL,
+                                  "command body exceeds broker slot size",
+                                  FW_INSTALL_OVERALL_FAILED);
+        }
+        return;
+    }
+
+    broker_lock();
+    if (s_cmd_queue_count >= BROKER_CMD_QUEUE_DEPTH) {
+        /* Queue full. With depth=4 and these envelopes being rare
+         * (Begin / ComponentBegin / etc., one each per component +
+         * one Begin/Complete per bundle), this is essentially
+         * impossible in normal operation. If it does fire, the install
+         * is already wedged — emit FAILED. */
+        broker_unlock();
+        emit_install_progress(0, "", "",
+                              FW_INSTALL_FAILED, 0u, 0u,
+                              BROKER_ERR_CMD_QUEUE_FULL,
+                              "broker command queue full",
+                              FW_INSTALL_OVERALL_FAILED);
+        return;
+    }
+    BrokerCmdSlot *cslot = &s_cmd_queue[s_cmd_queue_head];
+    cslot->tag          = tag;
+    cslot->envelope_seq = envelope_seq;
+    cslot->body_len     = (uint32_t)len;
+    if (len > 0u) memcpy(cslot->body, body, len);
+    s_cmd_queue_head = (s_cmd_queue_head + 1u) % BROKER_CMD_QUEUE_DEPTH;
+    s_cmd_queue_count++;
+    s_ctx.last_envelope_seq = envelope_seq;
+    broker_unlock();
+    (void)xSemaphoreGive(s_wake_sem);
 }
 
 void NovaOtaBroker_Tick(uint32_t now_ms)
 {
-    /* Phase 3 scaffold has no time-driven work — chunks are stubbed,
-     * fleet probe replies inline, and reboot/probe phases don't run.
-     * Reserved entry point so main.c's per-tick block can call us; the
-     * cost is one function-call frame when IDLE. Phase 3.5 fills this
-     * in (PUSHING progress cadence, REBOOTING wait, post-reboot probe). */
+    /* Phase 3.7: the broker task now ticks itself on a 100 ms
+     * xSemaphoreTake timeout. Retained as a no-op for any caller that
+     * hasn't been updated; safe to remove from main.c entirely. */
     (void)now_ms;
 }

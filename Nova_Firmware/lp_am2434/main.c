@@ -2200,13 +2200,17 @@ int main(void)
         bb_uart0_puts("[BB] NovaFwUpdate_Init ok\r\n");
     }
 
-    /* Phase 3 OTA broker — Pi5 install-orchestration scaffold. Reads
-     * envelope tags 130..136, emits 140..142. Leaf operations are
-     * stubbed (FAILED with error_code=99); Phase 3.5 wires the real
-     * bytes through. See docs/uart-airgap-architecture.md. Init is
-     * pure memset on a static struct, safe pre-scheduler. */
+    /* Phase 3.7 OTA broker — Pi5 install-orchestration. Reads envelope
+     * tags 130..136, emits 140..142. NovaOtaBroker_Init() resets
+     * state, creates the chunk ring + command queue + mutex + wake
+     * semaphore, and statically allocates `ota_broker` task (created
+     * here pre-scheduler, runs once vTaskStartScheduler() starts). All
+     * leaf I/O (TCP push to remote LP via lwIP, local OSPI writes for
+     * controller self-update) runs on the broker task so heartbeats
+     * keep flowing from bridge_uart_task during a multi-minute install.
+     * See docs/uart-airgap-architecture.md. */
     NovaOtaBroker_Init();
-    bb_uart0_puts("[BB] NovaOtaBroker_Init ok\r\n");
+    bb_uart0_puts("[BB] NovaOtaBroker_Init ok (task created)\r\n");
 
     OrbitState_Init();
     bb_uart0_puts("[BB] OrbitState_Init ok\r\n");
@@ -5262,10 +5266,10 @@ static void bridge_uart_task(void *args)
             }
         }
 
-        /* Per-tick broker tick — drives reboot wait / post-reboot
-         * probe timers and PUSHING-state progress cadence. Phase 3
-         * scaffold is a no-op; Phase 3.5 fills it in. */
-        NovaOtaBroker_Tick((uint32_t)(ClockP_getTimeUsec() / 1000ULL));
+        /* Phase 3.7: broker now runs on its own task (`ota_broker`)
+         * and ticks itself on a 100 ms xSemaphoreTake timeout. The
+         * NovaOtaBroker_Tick() entry point is retained as a no-op for
+         * back-compat but no longer needs to be called from here. */
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
