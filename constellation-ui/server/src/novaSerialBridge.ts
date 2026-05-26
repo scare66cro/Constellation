@@ -14,7 +14,32 @@
  */
 
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { NovaProtocol, NOVA_PROTOCOL_VERSION, type NovaProtocolStats } from './novaProtocol.js';
+
+/* ──────────────────────────────────────────────────────────────────────── *
+ *  Phase D — LP settings vault file backing                                *
+ *                                                                          *
+ *  The LP-AM2434 example does not yet expose OSPI in its syscfg, so the    *
+ *  firmware-side LpSettings store keeps two ping-pong banks in MSRAM.      *
+ *  Banks survive soft resets but not power cycles. This bridge maintains   *
+ *  a file mirror so the user perceives persistence:                        *
+ *                                                                          *
+ *    LP → bridge: envelope field 32 (MSG_SETTINGS_BLOB) carries the active *
+ *      bank's [LpBankHeader || blob] bytes verbatim. Written here to       *
+ *      LP_SETTINGS_FILE atomically (write tmp → rename).                   *
+ *    bridge → LP: on the disconnected → connected edge, if the file       *
+ *      exists, encode it as envelope field 91 and SendRaw it back. The    *
+ *      LP RX handler calls LpSettings_Restore() to seed bank A.           *
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const LP_SETTINGS_DIR  = path.join(os.homedir(), '.constellation');
+const LP_SETTINGS_FILE = path.join(LP_SETTINGS_DIR, 'lp_settings.bin');
+/* Panel-default snapshot — separate file mirroring the LP's panel
+ * snapshot bank. LP→bridge env field 33, bridge→LP env field 92. */
+const LP_PANEL_DEFAULTS_FILE = path.join(LP_SETTINGS_DIR, 'lp_panel_defaults.bin');
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Minimal protobuf encode/decode helpers                                  *
@@ -219,6 +244,16 @@ const MSG_ACCOUNT_SETTINGS   = 29;
 // Firmware → Bridge: responses
 const MSG_LOG_CHUNK          = 30;
 const MSG_PASSWORD_RESPONSE  = 31;
+/* Field 32 — LP settings blob push (Phase D, RAM ping-pong replay).
+ * Body = LpBankHeader (24B) || blob bytes from LpSettings_TakeBlob.
+ * Bridge writes payload verbatim to ~/.constellation/lp_settings.bin
+ * and replays it on firmware-ready as envelope field 91.            */
+const MSG_SETTINGS_BLOB      = 32;
+/* Field 33 — LP panel-default snapshot push.
+ * Body = LpBankHeader (24B) || blob bytes from LpSettings_TakePanelBlob.
+ * Bridge writes payload verbatim to ~/.constellation/lp_panel_defaults.bin
+ * and replays it on firmware-ready as envelope field 92.           */
+const MSG_PANEL_DEFAULTS_BLOB = 33;
 
 // Firmware → Bridge: settings pages (40-65)
 const MSG_PLENUM_SETTINGS    = 40;
@@ -251,6 +286,8 @@ const MSG_NETWORK_NODES      = 65;
 // Firmware → Bridge: log data push
 const MSG_LOG_RECORD         = 70;
 const MSG_ACTIVITY_EVENT     = 71;
+const MSG_PID_LOG_RECORD     = 72;
+const MSG_LOAD_LOG_RECORD    = 73;
 
 // Bridge → Firmware: commands
 const MSG_EQUIPMENT_CMD      = 80;
@@ -277,10 +314,26 @@ const MSG_FW_ACTIVATE_BANK   = 113;
 const MSG_FW_UPDATE_STATUS   = 114;
 const MSG_FW_BANK_INFO       = 115;
 
+// Pi5↔Nova install-orchestration (UART airgap migration, Phase 2 — see
+// docs/uart-airgap-architecture.md and proto/agristar/firmware.proto §Pi5↔Nova).
+// Envelope tags landed in Phase 2; full bridge↔broker wiring is Phase 4.
+const MSG_FW_INSTALL_BEGIN              = 130;
+const MSG_FW_INSTALL_COMPONENT_BEGIN    = 131;
+const MSG_FW_INSTALL_CHUNK              = 132;
+const MSG_FW_INSTALL_COMPONENT_FINALIZE = 133;
+const MSG_FW_INSTALL_COMPLETE           = 134;
+const MSG_FW_INSTALL_ABORT              = 135;
+const MSG_FW_FLEET_PROBE                = 136;
+const MSG_FW_INSTALL_PROGRESS           = 140;
+const MSG_FW_INSTALL_RESULT             = 141;
+const MSG_FW_FLEET_SNAPSHOT             = 142;
+
 // Orbit module management (120-129)
 const MSG_ORBIT_STATUS       = 120;
 const MSG_ORBIT_DISCOVERY    = 121;
 const MSG_ORBIT_ROLE_ASSIGN  = 122;
+const MSG_AO_EQUIP_ASSIGN    = 123;
+const MSG_TRITON_REG_WRITE   = 125;
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Message name map for logging                                           *
@@ -305,8 +358,12 @@ const MSG_NAMES: Record<number, string> = {
   [MSG_SENSOR_LABELS]:    'SensorLabels',
   [MSG_ACCOUNT_SETTINGS]: 'AccountSettings',
   [MSG_LOG_CHUNK]:        'LogChunk',
+  [MSG_SETTINGS_BLOB]:    'SettingsBlob',
+  [MSG_PANEL_DEFAULTS_BLOB]: 'PanelDefaultsBlob',
   [MSG_LOG_RECORD]:       'LogRecord',
   [MSG_ACTIVITY_EVENT]:   'ActivityEvent',
+  [MSG_PID_LOG_RECORD]:   'PidLogRecord',
+  [MSG_LOAD_LOG_RECORD]:  'LoadLogRecord',
   [MSG_ACK]:              'Ack',
   [MSG_HEARTBEAT]:        'Heartbeat',
   [MSG_PLENUM_SETTINGS]:  'PlenumSettings',
@@ -317,19 +374,37 @@ const MSG_NAMES: Record<number, string> = {
   [MSG_CLIMACELL_SETTINGS]: 'ClimacellSettings',
   [MSG_FW_UPDATE_STATUS]:   'FwUpdateStatus',
   [MSG_FW_BANK_INFO]:       'FwBankInfo',
+  [MSG_FW_INSTALL_PROGRESS]: 'FwInstallProgress',
+  [MSG_FW_INSTALL_RESULT]:   'FwInstallResult',
+  [MSG_FW_FLEET_SNAPSHOT]:   'FwFleetSnapshot',
   [MSG_ORBIT_STATUS]:       'OrbitStatus',
   [MSG_ORBIT_DISCOVERY]:    'OrbitDiscovery',
+  [MSG_AO_EQUIP_ASSIGN]:    'AoEquipAssign',
+  [MSG_TRITON_REG_WRITE]:   'TritonRegWrite',
 };
 
 // Export MSG IDs so the firmware update manager can reference them
 export {
   MSG_FW_BEGIN_UPDATE, MSG_FW_DATA_CHUNK, MSG_FW_FINALIZE_UPDATE,
   MSG_FW_ACTIVATE_BANK, MSG_FW_UPDATE_STATUS, MSG_FW_BANK_INFO,
-  MSG_ORBIT_STATUS, MSG_ORBIT_DISCOVERY, MSG_ORBIT_ROLE_ASSIGN,
+  MSG_ORBIT_STATUS, MSG_ORBIT_DISCOVERY, MSG_ORBIT_ROLE_ASSIGN, MSG_AO_EQUIP_ASSIGN,
+  MSG_TRITON_REG_WRITE,
 };
 
 // Re-export PB helpers for use by the firmware update manager
-export { pbDecodeFields, pbGetVarint, pbGetString, pbGetSubmsg };
+export { pbDecodeFields, pbGetVarint, pbGetString, pbGetSubmsg, pbGetAllSubmsg };
+
+// Exported for the Phase-2 OTA-broker debug endpoint
+// (`GET /api/_debug/broker-fleet-probe`).
+export { MSG_FW_FLEET_PROBE, MSG_FW_FLEET_SNAPSHOT };
+
+// Phase 4 (UART-airgap migration). Exported for the install-orchestration
+// callers in `firmwareInstaller.ts` (and the pre-Phase-4 debug endpoints
+// in `index.ts` — those will be deleted in Phase 5).
+export {
+  MSG_FW_INSTALL_BEGIN, MSG_FW_INSTALL_COMPONENT_BEGIN,
+  MSG_FW_INSTALL_ABORT, MSG_FW_INSTALL_PROGRESS, MSG_FW_INSTALL_RESULT,
+};
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Pending command tracking                                                *
@@ -359,6 +434,19 @@ export class NovaSerialBridge extends EventEmitter {
   private seqCounter = 0;
   private pendingCmds: Map<number, PendingCmd> = new Map();
   private connected = false;
+  /** Last envelope-seq seen from the firmware, keyed by oneof msgId.
+   * The LP-AM2434 bringup firmware (`lp_am2434/main.c`) gives every
+   * periodic broadcast its OWN ++_seq counter (refrig_seq, plenum_seq,
+   * version_seq, …) instead of the single global `s_seq_counter` used
+   * by the higher-rate streams in `nova_messages.c`. So the bridge sees
+   * N independent monotonic streams interleaved on UART, and a single
+   * global `lastEnvelopeSeq` would false-positive on every slow stream
+   * frame. A real firmware reset resets ALL streams simultaneously, so
+   * the per-msgId regression test still fires correctly on actual
+   * reboots. UART transports never see `socket.close`, so without this
+   * we'd stay stuck `connected=true` across a firmware reboot and never
+   * replay the settings blob. */
+  private lastEnvelopeSeqByMsg: Map<number, number> = new Map();
   private serialPort: any = null;
   private tcpSocket: import('net').Socket | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -394,7 +482,9 @@ export class NovaSerialBridge extends EventEmitter {
     // Request all settings from firmware
     this.sendDataRequest(0 /* REQ_ALL_SETTINGS */);
 
-    // Heartbeat watchdog
+    // Heartbeat watchdog — clear any prior timer from a reconnect cycle
+    // to prevent orphaned intervals accumulating.
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.lastFirmwareMsg = Date.now();
     this.heartbeatTimer = setInterval(() => {
       const elapsed = (Date.now() - this.lastFirmwareMsg) / 1000;
@@ -455,6 +545,69 @@ export class NovaSerialBridge extends EventEmitter {
       .varint(2, param)
       .encode();
     return this.sendCommand(MSG_SYSTEM_CMD, inner);
+  }
+
+  /**
+   * Assign an Orbit slot's zone role and persist it to firmware OSPI.
+   *
+   * Both `slot` and `role` use varintForce because 0 is a meaningful
+   * value for both (slot 0 is the main board, role 0 is UNASSIGNED —
+   * which the operator may legitimately want to pick to clear a slot).
+   *
+   * Optional fields (zone_id, legacy_slot, refrig_stage) are only sent
+   * when the caller provides them; firmware applies sensible defaults.
+   */
+  async sendOrbitRoleAssign(
+    slot: number,
+    role: number,
+    opts: { zoneId?: number; legacySlot?: number; refrigStage?: number } = {},
+  ): Promise<number> {
+    const enc = new PbEncoder()
+      .varintForce(1, slot)
+      .varintForce(2, role);
+    if (opts.zoneId !== undefined)     enc.varintForce(3, opts.zoneId);
+    if (opts.legacySlot !== undefined) enc.varintForce(4, opts.legacySlot);
+    if (opts.refrigStage !== undefined) enc.varintForce(5, opts.refrigStage);
+    return this.sendCommand(MSG_ORBIT_ROLE_ASSIGN, enc.encode());
+  }
+
+  /**
+   * Assign a per-AO equipment program (which equipment a given orbit
+   * AO drives). Persists to OSPI Settings.AoEquip[slot][channel] and
+   * takes effect on the next nova_fan_output_tick pass.
+   *
+   * All three fields use varintForce because 0 is a meaningful value
+   * for each (slot 0 is the main board, channel 0 is AO1, equip 0 is
+   * AO_EQUIP_UNUSED — the default the operator can re-pick).
+   */
+  async sendAoEquipAssign(slot: number, channel: number, equip: number): Promise<number> {
+    const inner = new PbEncoder()
+      .varintForce(1, slot)
+      .varintForce(2, channel)
+      .varintForce(3, equip)
+      .encode();
+    return this.sendCommand(MSG_AO_EQUIP_ASSIGN, inner);
+  }
+
+  /**
+   * Forward a single Modbus holding-register write to a Triton orbit.
+   *
+   * Wraps a TritonRegWrite { slot, addr, value } envelope (tag 125) and
+   * ships it to the LP firmware, which calls
+   * `OrbitClient_WriteHoldingRegister` against its existing Modbus TCP
+   * client. Used by the `/iot/triton/{slot}/{manual,setpoints,ioconfig,
+   * failures,ack}` REST routes.
+   *
+   * All three fields use varintForce because 0 is a meaningful value
+   * (slot 0 is the main board, addr 0 is HR[0], value 0 clears a bit).
+   */
+  async sendTritonRegWrite(slot: number, addr: number, value: number): Promise<number> {
+    const inner = new PbEncoder()
+      .varintForce(1, slot)
+      .varintForce(2, addr)
+      .varintForce(3, value & 0xFFFF)
+      .encode();
+    return this.sendCommand(MSG_TRITON_REG_WRITE, inner);
   }
 
   /**
@@ -579,6 +732,68 @@ export class NovaSerialBridge extends EventEmitter {
   }
 
   /**
+   * DEBUG — Phase-2 OTA broker probe. Sends FwFleetProbe (envelope tag 136,
+   * empty body / timeout_ms=0 → broker's default) and waits for the
+   * matching FwFleetSnapshot (tag 142) reply. Returns the raw inner bytes
+   * for the caller to decode; remove when Phase 4 (firmwareInstaller wiring)
+   * lands. See docs/uart-airgap-architecture.md §"Phase 2".
+   */
+  async sendFleetProbe(timeoutMs = 5000): Promise<Buffer> {
+    return new Promise<Buffer>((resolve, reject) => {
+      const onMessage = (msgId: number, data: Buffer) => {
+        if (msgId !== MSG_FW_FLEET_SNAPSHOT) return;
+        clearTimeout(timer);
+        this.off('message', onMessage);
+        resolve(data);
+      };
+      const timer = setTimeout(() => {
+        this.off('message', onMessage);
+        reject(new Error(`FwFleetSnapshot timeout after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.on('message', onMessage);
+      // Empty inner = timeout_ms field absent → broker uses its default.
+      this.sendEnvelope(MSG_FW_FLEET_PROBE, Buffer.alloc(0));
+    });
+  }
+
+  /**
+   * DEBUG — remove when Phase 4 lands. Fire-and-forget senders for the
+   * Phase-2 OTA-install envelopes, used by
+   * `GET /api/_debug/broker-install-fail-test`. Replies arrive
+   * asynchronously as FwInstallProgress (140) / FwInstallResult (141)
+   * envelopes, observed via the bridge's generic `'message'` event.
+   */
+  sendFwInstallBegin(inner: Buffer): void {
+    this.sendEnvelope(MSG_FW_INSTALL_BEGIN, inner);
+  }
+  sendFwInstallComponentBegin(inner: Buffer): void {
+    this.sendEnvelope(MSG_FW_INSTALL_COMPONENT_BEGIN, inner);
+  }
+  sendFwInstallAbort(inner: Buffer): void {
+    this.sendEnvelope(MSG_FW_INSTALL_ABORT, inner);
+  }
+
+  /**
+   * Phase 4 (UART-airgap migration) — fire-and-forget senders for the
+   * streaming-side install envelopes. firmwareInstaller.ts uses these
+   * to ship the per-component chunk stream + Finalize + Complete. The
+   * broker reports terminal state via FwInstallProgress / FwInstallResult
+   * on the bridge's generic `'message'` event (no per-envelope ack
+   * expected — see firmware.proto §"Memory model" for the open-loop
+   * streaming rationale).
+   */
+  sendFwInstallChunk(inner: Buffer): void {
+    this.sendEnvelope(MSG_FW_INSTALL_CHUNK, inner);
+  }
+  sendFwInstallComponentFinalize(inner: Buffer): void {
+    this.sendEnvelope(MSG_FW_INSTALL_COMPONENT_FINALIZE, inner);
+  }
+  sendFwInstallComplete(): void {
+    // FwInstallComplete carries no fields — empty inner is correct.
+    this.sendEnvelope(MSG_FW_INSTALL_COMPLETE, Buffer.alloc(0));
+  }
+
+  /**
    * Request orbit discovery from firmware.
    * Fire-and-forget — firmware will push OrbitDiscovery message.
    */
@@ -593,25 +808,14 @@ export class NovaSerialBridge extends EventEmitter {
    * @param zoneId - Zone index (0=Room A, 1=Room B, ...)
    * @param legacySlot - IoBoard[] mapping (0-2), or -1 for none
    * @param refrigStage - Compressor stage for REFRIG role (1-8)
+   *
+   * NOTE: superseded by the options-bag overload above.  Kept as a
+   * doc-only stub so the JSDoc metadata isn't lost.  Do NOT re-add
+   * a body here — duplicate methods silently override each other in
+   * TypeScript and the wrong one wins (verified during the orbit-
+   * topology bring-up: encoding `opts` object as varint gave NaN and
+   * firmware never received MSG 122).
    */
-  async sendOrbitRoleAssign(
-    slot: number,
-    role: number,
-    zoneId: number,
-    legacySlot: number,
-    refrigStage: number
-  ): Promise<number> {
-    // Encode legacy_slot as zigzag for signed int32
-    const zigzag = legacySlot >= 0 ? legacySlot << 1 : ((-legacySlot) << 1) - 1;
-    const inner = new PbEncoder()
-      .varint(1, slot)
-      .varint(2, role)
-      .varint(3, zoneId)
-      .varint(4, zigzag)
-      .varint(5, refrigStage)
-      .encode();
-    return this.sendCommand(MSG_ORBIT_ROLE_ASSIGN, inner);
-  }
 
   /**
    * Send a system-wide emergency stop (CMD_SYSTEM_STOP = 5).
@@ -628,6 +832,29 @@ export class NovaSerialBridge extends EventEmitter {
    */
   async clearSystemStop(): Promise<number> {
     return this.sendSystemCmd(1 /* CMD_CLEAR_ALARM */);
+  }
+
+  /**
+   * Request a controller-SoC warm reset (CMD_REBOOT_SOC = 50).
+   *
+   * Firmware acks then calls Sciclient_pmDeviceReset(SystemP_WAIT_FOREVER)
+   * after a brief UART-drain delay. DMSC tears down the SoC, ROM re-runs,
+   * SBL loads OSPI 0x80000 — same path the JTAG auto-flasher uses.
+   *
+   * The Ack typically lands before the disconnect; if it doesn't, the
+   * bridge's existing reconnect logic still picks the firmware back up
+   * once it re-handshakes (~30 s end-to-end).
+   *
+   * Used by:
+   *   - POST /iot/system/reboot (operator-initiated)
+   *   - The OTA Activate step (orbitOtaPush.ts → activate firmware that
+   *     was just written to OSPI Bank B).
+   *
+   * Returns the seq number of the outgoing envelope (the Ack with that
+   * seq is the success signal).
+   */
+  async sendRebootSoc(): Promise<number> {
+    return this.sendSystemCmd(50 /* CMD_REBOOT_SOC */);
   }
 
   /**
@@ -727,14 +954,48 @@ export class NovaSerialBridge extends EventEmitter {
       return;
     }
 
-    // Handle data load status — marks successful connection
+    // Phase D — LP settings vault: cache blob to disk for cold-boot replay.
+    if (msgId === MSG_SETTINGS_BLOB && msgData) {
+      this.persistSettingsBlob(msgData);
+      // Fall through so listeners can also observe (no-op today).
+    }
+
+    // Panel-default snapshot — separate cache file, replayed on
+    // firmware-ready as envelope field 92.
+    if (msgId === MSG_PANEL_DEFAULTS_BLOB && msgData) {
+      this.persistPanelDefaultsBlob(msgData);
+    }
+
+    // Firmware-reset detection. UART transports never raise
+    // socket.close, so without this we'd stay `connected=true` across
+    // a reboot and never re-fire replaySettingsBlob — operator
+    // settings would silently be replaced by firmware defaults on
+    // every reset. Each msgId in the LP firmware has its own ++_seq
+    // counter (see `lp_am2434/main.c`), so we track regression PER
+    // msgId. A real reset zeroes every counter simultaneously, so the
+    // per-stream test still fires correctly. Tolerance of 8 absorbs
+    // out-of-order / dropped frames at steady state.
+    const lastForMsg = this.lastEnvelopeSeqByMsg.get(msgId) ?? 0;
+    if (seq > 0 && this.connected && seq + 8 < lastForMsg) {
+      console.log(`[NovaBridge] Firmware reset detected (seq ${seq} << ${lastForMsg} on msg=${msgName}/${msgId}) — re-arming connect/replay`);
+      this.connected = false;
+      this.lastEnvelopeSeqByMsg.clear();
+    }
+    if (seq > lastForMsg) this.lastEnvelopeSeqByMsg.set(msgId, seq);
+
+    // Handle data load status — marks successful connection.
+    // The firmware re-broadcasts DataLoadStatus(ready=true) at the tail
+    // of every UI_SendAllSettings burst (~50s), so suppress repeats —
+    // only fire 'connected' / log on the disconnected → connected edge.
     if (msgId === MSG_DATA_LOAD_STATUS && msgData) {
       const dlFields = pbDecodeFields(msgData);
       const ready = pbGetVarint(dlFields, 1);
-      if (ready) {
+      if (ready && !this.connected) {
         this.connected = true;
         this.emit('connected');
         console.log(`[NovaBridge] Connected — firmware ready`);
+        this.replaySettingsBlob();
+        this.replayPanelDefaultsBlob();
       }
     }
 
@@ -759,6 +1020,107 @@ export class NovaSerialBridge extends EventEmitter {
   }
 
   /* ════════════════════════════════════════════════════════════════════ *
+   *  Phase D — LP settings vault file backing                            *
+   *                                                                      *
+   *  Wire layout reference:                                              *
+   *    LP→bridge envelope field 32 (MSG_SETTINGS_BLOB) body =            *
+   *      LpBankHeader(24B) || blob bytes                                 *
+   *    bridge→LP envelope field 91 body = same bytes verbatim            *
+   *                                                                      *
+   *  We store the inner sub-msg bytes (header+blob) so the file is       *
+   *  symmetric: same payload going out as came in.                       *
+   * ════════════════════════════════════════════════════════════════════ */
+
+  private persistSettingsBlob(blob: Buffer): void {
+    try {
+      if (!fs.existsSync(LP_SETTINGS_DIR)) {
+        fs.mkdirSync(LP_SETTINGS_DIR, { recursive: true });
+      }
+      const tmp = LP_SETTINGS_FILE + '.tmp';
+      fs.writeFileSync(tmp, blob);
+      fs.renameSync(tmp, LP_SETTINGS_FILE);
+      console.log(`[NovaBridge] LP settings cached: ${blob.length} B → ${LP_SETTINGS_FILE}`);
+    } catch (err) {
+      console.error(`[NovaBridge] Failed to persist LP settings blob:`, err);
+    }
+  }
+
+  private replaySettingsBlob(): void {
+    let blob: Buffer;
+    try {
+      if (!fs.existsSync(LP_SETTINGS_FILE)) {
+        console.log(`[NovaBridge] LP settings: no cached blob to replay`);
+        return;
+      }
+      blob = fs.readFileSync(LP_SETTINGS_FILE);
+    } catch (err) {
+      console.error(`[NovaBridge] Failed to read LP settings blob:`, err);
+      return;
+    }
+    if (blob.length < 24) {
+      console.warn(`[NovaBridge] LP settings blob too short (${blob.length} B), skipping replay`);
+      return;
+    }
+    // Build envelope manually with field 91 length-delimited.
+    // We do NOT use sendEnvelope() because that consumes a sequence
+    // counter slot; restore is bridge-internal and never expects an Ack.
+    const seq = this.nextSeq();
+    const envelope = new PbEncoder()
+      .varint(1, NOVA_PROTOCOL_VERSION)
+      .varint(2, seq)
+      .submsg(91, blob)
+      .encode();
+    const frame = this.protocol.buildFrame(envelope);
+    this.writeRaw(frame);
+    console.log(`[NovaBridge] LP settings replayed: ${blob.length} B (seq=${seq})`);
+  }
+
+  /* Panel-default snapshot persistence. Mirrors the active-bank pair
+   * (persistSettingsBlob / replaySettingsBlob) but uses a separate file
+   * and envelope fields 33/92 so the operator's saved baseline survives
+   * power cycles independently of the live editable settings. */
+  private persistPanelDefaultsBlob(blob: Buffer): void {
+    try {
+      if (!fs.existsSync(LP_SETTINGS_DIR)) {
+        fs.mkdirSync(LP_SETTINGS_DIR, { recursive: true });
+      }
+      const tmp = LP_PANEL_DEFAULTS_FILE + '.tmp';
+      fs.writeFileSync(tmp, blob);
+      fs.renameSync(tmp, LP_PANEL_DEFAULTS_FILE);
+      console.log(`[NovaBridge] LP panel default cached: ${blob.length} B → ${LP_PANEL_DEFAULTS_FILE}`);
+    } catch (err) {
+      console.error(`[NovaBridge] Failed to persist LP panel default blob:`, err);
+    }
+  }
+
+  private replayPanelDefaultsBlob(): void {
+    let blob: Buffer;
+    try {
+      if (!fs.existsSync(LP_PANEL_DEFAULTS_FILE)) {
+        console.log(`[NovaBridge] LP panel default: no cached blob to replay`);
+        return;
+      }
+      blob = fs.readFileSync(LP_PANEL_DEFAULTS_FILE);
+    } catch (err) {
+      console.error(`[NovaBridge] Failed to read LP panel default blob:`, err);
+      return;
+    }
+    if (blob.length < 24) {
+      console.warn(`[NovaBridge] LP panel default blob too short (${blob.length} B), skipping replay`);
+      return;
+    }
+    const seq = this.nextSeq();
+    const envelope = new PbEncoder()
+      .varint(1, NOVA_PROTOCOL_VERSION)
+      .varint(2, seq)
+      .submsg(92, blob)
+      .encode();
+    const frame = this.protocol.buildFrame(envelope);
+    this.writeRaw(frame);
+    console.log(`[NovaBridge] LP panel default replayed: ${blob.length} B (seq=${seq})`);
+  }
+
+  /* ════════════════════════════════════════════════════════════════════ *
    *  Transport layer (TCP or serial)                                     *
    * ════════════════════════════════════════════════════════════════════ */
 
@@ -775,11 +1137,25 @@ export class NovaSerialBridge extends EventEmitter {
     const host = url.hostname;
     const port = parseInt(url.port, 10);
 
+    // Tear down any prior socket before opening a new one. Otherwise the
+    // old (zombie) connection can survive a transient error and keep the
+    // QEMU `tcp::9000,server,nowait` chardev attached to it, while the
+    // new socket we're about to create gets accepted but ignored. Bridge
+    // writes then disappear into the new socket while QEMU still reads
+    // from the old one. Symptom: txFrames climbs but firmware RX bytes
+    // counter is frozen and every sendCommand times out.
+    if (this.tcpSocket) {
+      try { this.tcpSocket.removeAllListeners(); this.tcpSocket.destroy(); } catch {}
+      this.tcpSocket = null;
+    }
+
     const net = await import('net');
     return new Promise((resolve, reject) => {
+      let settled = false;
       const socket = net.createConnection({ host, port }, () => {
         console.log(`[NovaBridge] TCP connected to ${host}:${port}`);
         this.tcpSocket = socket;
+        settled = true;
         resolve();
       });
 
@@ -790,6 +1166,9 @@ export class NovaSerialBridge extends EventEmitter {
       socket.on('close', () => {
         console.log('[NovaBridge] TCP disconnected');
         this.connected = false;
+        // Drop our reference if this was the active socket — guards
+        // against a stale reference being reused by writeRaw.
+        if (this.tcpSocket === socket) this.tcpSocket = null;
         this.emit('disconnected');
         this.scheduleReconnect();
       });
@@ -797,7 +1176,10 @@ export class NovaSerialBridge extends EventEmitter {
       socket.on('error', (err: Error) => {
         console.error(`[NovaBridge] TCP error: ${err.message}`);
         this.emit('error', err);
-        reject(err);
+        // Destroy the failed socket so it can't linger half-open and
+        // race the next connect attempt (see comment above).
+        try { socket.destroy(); } catch {}
+        if (!settled) { settled = true; reject(err); }
       });
     });
   }
@@ -811,6 +1193,10 @@ export class NovaSerialBridge extends EventEmitter {
         dataBits: 8,
         parity: 'none',
         stopBits: 1,
+        rtscts: false,
+        xon: false,
+        xoff: false,
+        xany: false,
       }, (err) => {
         if (err) {
           reject(err);
@@ -820,9 +1206,20 @@ export class NovaSerialBridge extends EventEmitter {
         resolve();
       });
 
-      this.serialPort.on('data', (data: Buffer) => {
+      // Log the first chunk of raw bytes received to diagnose framing issues.
+      // This fires once per open, then removes itself.
+      const diagHandler = (data: Buffer) => {
+        console.log(`[NovaBridge] First ${data.length} raw bytes: ${data.toString('hex')}`);
+        this.serialPort?.removeListener('data', diagHandler);
+        this.serialPort?.on('data', normalHandler);
+        // Also feed these bytes through the protocol
         this.protocol.feedBytes(data);
-      });
+      };
+      const normalHandler = (data: Buffer) => {
+        this.protocol.feedBytes(data);
+      };
+
+      this.serialPort.on('data', diagHandler);
 
       this.serialPort.on('close', () => {
         this.connected = false;
