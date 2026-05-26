@@ -1052,6 +1052,8 @@ static uint32_t broker_crc32_continue(uint32_t state,
  * owned chunk ring slot, which is stable until we return. */
 static void decode_chunk(const uint8_t *body, size_t len)
 {
+    /* DIAG 2026-05-26: chunk-decode entry trace. */
+    DebugP_log("[OTA-BROKER] decode_chunk entered len=%u\r\n", (unsigned)len);
     uint32_t component_index = 0;
     uint32_t offset          = 0;
     const uint8_t *data      = NULL;   /* pointer into `body` — no copy */
@@ -1146,25 +1148,23 @@ static void decode_chunk(const uint8_t *body, size_t len)
 
     s_ctx.cur_bytes_written = offset + data_len;
 
-    /* Throttled PUSHING progress: emit every ~5% of total_size. */
-    if (s_ctx.cur_total_size != 0u
-            && s_ctx.cur_bytes_written >= s_ctx.cur_next_progress) {
-        emit_install_progress(s_ctx.cur_component_index,
-                              s_ctx.cur_component_name,
-                              s_ctx.cur_target_host,
-                              FW_INSTALL_PUSHING,
-                              s_ctx.cur_bytes_written, s_ctx.cur_total_size,
-                              0u, "",
-                              FW_INSTALL_OVERALL_INSTALLING);
-        /* Advance threshold by 5% (clamped at total_size to fire the
-         * "100%" tick exactly once on the boundary). */
-        uint32_t step = (s_ctx.cur_total_size * BROKER_PROGRESS_PCT) / 100u;
-        if (step == 0u) step = 1u;
-        s_ctx.cur_next_progress += step;
-        if (s_ctx.cur_next_progress > s_ctx.cur_total_size) {
-            s_ctx.cur_next_progress = s_ctx.cur_total_size;
-        }
-    }
+    /* Per-chunk PUSHING progress emit. The 5%-throttled cadence (commented
+     * out below) interacts badly with Phase 4.1's closed-loop chunk pump
+     * on the bridge: bridge sends WINDOW=4 chunks, waits for ack, broker
+     * doesn't ack until 5% (~25 chunks), bridge times out. Per-chunk
+     * emit is ~30 bytes over UART = ~0.3 ms each — totally fine for the
+     * ~500-chunk install duration. See bench 2026-05-26.
+     *
+     *   uint32_t step = (s_ctx.cur_total_size * BROKER_PROGRESS_PCT) / 100u;
+     *   if (s_ctx.cur_bytes_written >= s_ctx.cur_next_progress) { emit; advance; }
+     */
+    emit_install_progress(s_ctx.cur_component_index,
+                          s_ctx.cur_component_name,
+                          s_ctx.cur_target_host,
+                          FW_INSTALL_PUSHING,
+                          s_ctx.cur_bytes_written, s_ctx.cur_total_size,
+                          0u, "",
+                          FW_INSTALL_OVERALL_INSTALLING);
 }
 
 /* Decode FwInstallComponentFinalize (envelope 133). */
@@ -1663,6 +1663,11 @@ void NovaOtaBroker_OnEnvelope(uint32_t tag,
     if (body == NULL && len != 0u) return;
 
     if (tag == 132u) {
+        /* DIAG 2026-05-26: chunk-entry trace — disambiguates "chunk
+         * never reached broker" vs "chunk arrived but silent-dropped". */
+        DebugP_log("[OTA-BROKER] OnEnvelope chunk len=%u seq=%u state=%u ring=%u\r\n",
+                   (unsigned)len, (unsigned)envelope_seq,
+                   (unsigned)s_state, (unsigned)s_chunk_ring_count);
         /* Chunk path — copy into ring. Reject if it wouldn't fit; the
          * bridge sees one FwInstallProgress(FAILED, error=104) instead
          * of a silent drop, and the broker state machine aborts cleanly
@@ -1693,6 +1698,8 @@ void NovaOtaBroker_OnEnvelope(uint32_t tag,
          * here keeps the ring from filling with orphans. */
         if (s_state != BROKER_INSTALLING) {
             broker_unlock();
+            DebugP_log("[OTA-BROKER] OnEnvelope chunk DROPPED — state=%u not INSTALLING\r\n",
+                       (unsigned)s_state);
             return;
         }
         if (s_chunk_ring_count >= BROKER_CHUNK_RING_DEPTH) {

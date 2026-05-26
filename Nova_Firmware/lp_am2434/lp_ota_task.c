@@ -1364,7 +1364,16 @@ static bool service_conn(ota_conn_t *c)
                         break;
                     }
                 }
-                DebugP_log("[OTA] FINALIZE ok (Bank B verified bit-exact)\r\n");
+                /* 2026-05-26: update expected CRC to the FINALIZE-time
+                 * value so stage-copy's Bank-A vs expected check uses
+                 * the correct reference. Broker passes image_crc=0 at
+                 * BEGIN (it accumulates running CRC during chunks and
+                 * doesn't know the final value upfront); without this
+                 * update, stage-copy would always fail its CRC check
+                 * even after a bit-exact byte copy. */
+                s_image_expected_crc = expected;
+                DebugP_log("[OTA] FINALIZE ok (Bank B verified bit-exact) — expected_crc=0x%08lX\r\n",
+                           (unsigned long)expected);
                 push_status_progress(c->fd);
                 break;
             }
