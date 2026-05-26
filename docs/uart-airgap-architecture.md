@@ -223,10 +223,69 @@ direct TCP to LPs.
 
 ### Phase 4 — Retire bridge-side direct-LP TCP
 
-When Phase 3 ships and is bench-verified:
+> **PARTIALLY LANDED 2026-05-26.** The full broker pipeline is proven
+> end-to-end on the bench: bridge → UART → Nova broker → TCP → orbit LP,
+> 523/523 chunks delivered, FINALIZE Bank-B CRC match, stage-copy
+> completes bit-exact for a single-orbit (.2 STORAGE) install. Three
+> related fixes landed today: LP stage-copy CRC vs broker-driven
+> `image_crc=0` ([`memories/repo/lp-ota-stage-copy-crc-finalize-fix.md`](../memories/repo/lp-ota-stage-copy-crc-finalize-fix.md),
+> 0.A.197), bridge chunk pump `WINDOW=4 → WINDOW=1` to fit Nova UART RX
+> ([`memories/repo/broker-window-burst-uart-rx-overrun.md`](../memories/repo/broker-window-burst-uart-rx-overrun.md)),
+> and broker per-chunk PUSHING progress emit (0.A.196). Two open issues
+> block production-shape declaration:
+>
+> 1. **Fleet-probe race at install-begin** — broker's internal
+>    `NovaOtaPush_ProbeFleet` consistently marks orbits 2..N unreachable
+>    in the same install where direct probes show all healthy
+>    (suspected lwIP TCP PCB TIME_WAIT exhaustion).
+>    [`memories/repo/broker-install-begin-fleet-probe-race.md`](../memories/repo/broker-install-begin-fleet-probe-race.md).
+> 2. **Post-OTA Bank-A boot failure** — stage-copy reports success
+>    and broker reports DONE, but the LP is unbootable after warm-reset
+>    even through a power-cycle. Likely cause: stage-copy doesn't update
+>    Bank A's FwBankHeader at 0x060000, so SBL chooser rejects the
+>    just-copied image. Recovery via `Recover-Fleet.ps1` (JTAG re-flash).
+>    [`memories/repo/lp-ota-bank-a-post-ota-corruption-incomplete-fix.md`](../memories/repo/lp-ota-bank-a-post-ota-corruption-incomplete-fix.md).
+>
+> Phase 4b deletion of `orbitOtaPush.ts` / `orbitFleetResolver.ts` /
+> `probe_fleet.ts` remains deferred until both opens close. Bench
+> currently iterates on single-orbit bundles to .2 STORAGE only.
+>
+> _Phase 4a architecture detail retained below for context._
 
+**Phase 4a — install path rewired (LANDED 2026-05-23).**
+`constellation-ui/server/src/firmwareInstaller.ts` no longer touches
+`orbitOtaPush.ts` / `orbitFleetResolver.ts`. The new `installBundle()`:
+- Pre-sorts manifest components so orbits go first and the controller
+  goes LAST (when the controller activates Nova reboots, dropping
+  install state — anything queued after would never reach the broker).
+- Sends `FwInstallBegin` → per-component `FwInstallComponentBegin` +
+  open-loop chunk stream + `FwInstallComponentFinalize` → `FwInstallComplete`.
+  Bridge-side helpers: `NovaSerialBridge.sendFwInstallChunk`,
+  `sendFwInstallComponentFinalize`, `sendFwInstallComplete` (new).
+- Mirrors broker `FwInstallProgress` events onto the existing
+  `firmware-progress` WS channel shape — UI didn't change.
+- Builds a `Map<component_index, lastProgress>` keyed by wire index
+  (Observation O1 from the previous bench round) so the per-component
+  terminal-state lookup survives result envelopes that omit failed
+  pre-Begin entries.
+- Controller post-reboot reconciliation: waits for the bridge's
+  `connected` edge + the first `VersionInfo` envelope, matches it
+  against the manifest's controller version (prefix-match across
+  `+git-sha` and `-dirty` suffixes), then emits a synthetic `done`.
+- `InstallOptions.fleet` and the `ORBIT_FLEET` env var are ignored
+  on the bridge side now (broker discovers); kept on the API for
+  back-compat until Phase 4b deletion.
+- The three pre-Phase-4 debug endpoints (`/api/_debug/broker-fleet-probe`,
+  `/api/_debug/broker-install-fail-test`,
+  `/api/_debug/broker-install-begin-abort`) are still mounted —
+  delete in Phase 4b together with the now-dead Phase-1B files.
+
+**Phase 4b — delete the dead direct-TCP modules.** When the install
+path has cooked on the bench for a week:
 - Delete `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
   `probe_fleet.ts` from the bridge.
+- Drop the three `/api/_debug/broker-*` debug endpoints from `index.ts`.
+- Drop `InstallOptions.fleet` and `ORBIT_FLEET` env handling.
 - Move `vfdClient.ts` and `orbitMbtcp.ts` Modbus-TCP logic INTO Nova.
   Today these run on the Pi5 because that was the dev shortcut.
   Production: Nova polls the orbit LPs and VFD over Modbus, then
