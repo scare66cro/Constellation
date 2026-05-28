@@ -17,24 +17,55 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ─── Flash offsets (within OSPI, relative to 0x50000000) ─────────────── */
-#define FW_HEADER_OFFSET      0x000000
-#define FW_HEADER_SIZE        0x010000   /* 64 KB */
-#define FW_BANK_A_OFFSET      0x010000
-#define FW_BANK_B_OFFSET      0x200000
-#define FW_GOLDEN_OFFSET      0x400000
-#define FW_SETTINGS_OFFSET    0x600000
-#define FW_BANK_MAX_SIZE      0x1F0000   /* ~2 MB minus header region */
-#define FW_SECTOR_SIZE        4096
+/* ─── Flash offsets (within OSPI, byte addresses) ─────────────────── */
+/*
+ * Canonical OSPI map (W25Q64JV, 8 MB) — finalised May 2026 alongside
+ * the F2c stage-2 SBL chooser. Full design + migration plan in
+ * docs/lp-am2434-f2c-sbl-chooser-design.md §2.
+ *
+ *   0x000000-0x05FFFF (384 KB)  custom sbl_chooser (TI HS_FS signed)
+ *   0x060000-0x06FFFF ( 64 KB)  FwBootMeta + Bank A FwBankHeader
+ *   0x070000-0x07FFFF ( 64 KB)  Bank B FwBankHeader (separate sector
+ *                                so updates to one bank never erase
+ *                                the other's metadata)
+ *   0x080000-0x1FFFFF (1.5 MB)  Bank A app image (mcelf.hs_fs) — also
+ *                                where TI's stock SBL hardloads, so
+ *                                first F2c flash needs no app move
+ *   0x200000-0x37FFFF (1.5 MB)  Bank B app image
+ *   0x380000-0x4FFFFF (1.5 MB)  Golden recovery image
+ *   0x500000-0x5FFFFF ( 1   MB) RESERVED
+ *   0x600000-0x61FFFF (128 KB)  lp_device_config ping-pong banks
+ *   0x620000-0x7FFFFF (~2 MB)   LpSettings vault (future, MSRAM today)
+ */
+#define FW_HEADER_OFFSET      0x060000U  /* Boot meta + bank A header */
+#define FW_HEADER_SIZE        0x010000U  /* 64 KB */
+#define FW_BANK_B_HDR_SECTOR  0x070000U  /* Separate sector for bank B header */
+#define FW_BANK_A_OFFSET      0x080000U
+/* 0.A.102: FW_BANK_B moved to 0x900000 (9 MB into the 64 MB chip).
+ * 0x200000 failed (0.A.78-82). 0x400000 failed (0.A.83+). Both inside
+ * the 16 MB 3-byte address region. Variant-D probe wrote successfully
+ * at 0x700000. Auto-flasher writes at 0x80000 (bank A) successfully.
+ * Trying 0x900000 — past the 8 MB mark, well into 4-byte-only region.
+ * Forces 4-byte addressing path explicitly, as a different test
+ * vector from prior failed attempts. */
+#define FW_BANK_B_OFFSET      0x900000U
+#define FW_GOLDEN_OFFSET      0xC00000U
+#define FW_SETTINGS_OFFSET    0x620000U  /* future use; MSRAM today */
+#define FW_BANK_MAX_SIZE      0x180000U  /* 1.5 MB per bank */
+#define FW_SECTOR_SIZE        4096U
 
-/* ─── Bank header (stored at FW_HEADER_OFFSET) ────────────────────────── */
-/* 128 bytes per bank entry, two entries, total 256 bytes.
- * The rest of the 64 KB header sector is reserved for future use. */
+/* ─── Bank header (per-bank, in its own erase sector) ────────────── */
+/* 128-byte FwBankHeader. Bank A's lives at FW_HEADER_OFFSET + 0x80
+ * (the first 128 B at FW_HEADER_OFFSET hold FwBootMeta). Bank B's
+ * lives in its own sector at FW_BANK_B_HDR_SECTOR so updating one
+ * bank's metadata cannot accidentally erase the other's. The 64 KB
+ * sector around each header is otherwise reserved for future per-
+ * bank metadata (signed manifest, dependency graph, etc.). */
 
-#define FW_BANK_MAGIC         0x4E4F5641   /* "NOVA" */
-#define FW_BANK_A_HDR_OFFSET  0x000000
-#define FW_BANK_B_HDR_OFFSET  0x000080     /* +128 bytes */
-#define FW_BOOT_META_OFFSET   0x000100     /* +256 bytes: boot counter + reason */
+#define FW_BANK_MAGIC         0x4E4F5641U  /* "NOVA" */
+#define FW_BOOT_META_OFFSET   0x000000U   /* in FW_HEADER_OFFSET sector, first 128 B */
+#define FW_BANK_A_HDR_OFFSET  0x000080U   /* in FW_HEADER_OFFSET sector, +128 B */
+#define FW_BANK_B_HDR_OFFSET  0x000000U   /* in FW_BANK_B_HDR_SECTOR sector, first 128 B */
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;           /* Must be FW_BANK_MAGIC */

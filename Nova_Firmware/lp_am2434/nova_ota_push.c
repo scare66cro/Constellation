@@ -774,7 +774,17 @@ static uint32_t ipstr_to_host(const char *ip)
          | ((c & 0xFFu) <<  8) | ( d & 0xFFu);
 }
 
-/* Single-host probe — open TCP, recv BankInfo, fill member, close. */
+/* Single-host probe — open TCP, recv BankInfo, fill member, close.
+ *
+ * Per-step `[OTA-PROBE]` diagnostics added 2026-05-26 to root the
+ * install-begin fleet-probe race: first orbit probed succeeds, .3/.4
+ * consistently mark unreachable in the same install where direct
+ * probes show all healthy. Suspected lwIP TCP PCB pool exhaustion
+ * (TIME_WAIT). Each step logs rc + errno + elapsed_us-from-probe-
+ * entry; comparing across sequential probes in COM9 capture pinpoints
+ * which socket primitive trips on probes 2..N.
+ * See: memories/repo/broker-install-begin-fleet-probe-race.md.
+ */
 static void probe_one_host(const char *ipstr, uint32_t timeout_ms,
                            NovaFwFleetMember *out)
 {
@@ -784,13 +794,22 @@ static void probe_one_host(const char *ipstr, uint32_t timeout_ms,
     memcpy(out->host, ipstr, hostlen);
     out->host[hostlen] = '\0';
 
+    uint64_t t_enter = ClockP_getTimeUsec();
+    DebugP_log("[OTA-PROBE] step=0 enter target=%s timeoutMs=%u\r\n",
+               ipstr, (unsigned)timeout_ms);
+
     int sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PROBE] step=1 FAIL socket errno=%d elapsed=%uus\r\n",
+                   errno, (unsigned)dt_us);
         out->reachable = false;
         snprintf(out->error, sizeof(out->error), "socket errno=%d", errno);
         return;
     }
-    /* Translate timeout_ms → struct timeval. Bound at 1 s minimum
+    DebugP_log("[OTA-PROBE] step=1 socket fd=%d\r\n", sock);
+
+    /* Translate timeout_ms → struct timeval. Bound at 100 ms minimum
      * (lwIP doesn't like sub-tick timeouts on slow links). */
     if (timeout_ms < 100u) timeout_ms = 100u;
     struct timeval tv;
@@ -807,19 +826,93 @@ static void probe_one_host(const char *ipstr, uint32_t timeout_ms,
     dst.sin_port   = lwip_htons(LP_OTA_PORT);
     dst.sin_addr.s_addr = ipaddr_addr(ipstr);
 
-    if (lwip_connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
+    /* 0.A.206: NON-BLOCKING connect with select() so the per-host
+     * timeout actually bounds the connect attempt. `SO_RCVTIMEO` /
+     * `SO_SNDTIMEO` set above DO NOT apply to lwIP's blocking
+     * `lwip_connect` — it returns when the TCP stack's own timer fires
+     * (~20 s on this build), regardless of our 300 ms target. Bench-
+     * 2026-05-27 evidence: probing a down orbit cost connectUs ≈
+     * 20240589us = 20 s, blocking the broker task while bridge sent
+     * InstallBegin + Chunk 0, which arrived during broker's pre-
+     * INSTALLING state and got silently DROPPED. Switching to
+     * non-blocking + `lwip_select` honors the 300 ms timeout and
+     * lets the broker finish probing fast enough to receive chunks.
+     * Closes the open issue in
+     * `memories/repo/broker-install-begin-fleet-probe-race.md`. */
+    int flags = lwip_fcntl(sock, F_GETFL, 0);
+    lwip_fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    uint64_t t_connect = ClockP_getTimeUsec();
+    int crc_rc = lwip_connect(sock, (struct sockaddr *)&dst, sizeof(dst));
+    /* Non-blocking connect returns -1 with errno=EINPROGRESS for the
+     * in-flight case (normal). 0 means it connected synchronously
+     * (loopback or already-cached route). Anything else is an error. */
+    if (crc_rc < 0 && errno != EINPROGRESS) {
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PROBE] step=2 FAIL connect-start errno=%d elapsed=%uus\r\n",
+                   errno, (unsigned)dt_us);
         snprintf(out->error, sizeof(out->error), "connect errno=%d", errno);
         out->reachable = false;
         lwip_close(sock);
         return;
     }
 
+    if (crc_rc < 0) {
+        /* EINPROGRESS path — wait for writable with bounded timeout. */
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        struct timeval ctv = tv;     /* reuse the configured timeout */
+        int sel_rc = lwip_select(sock + 1, NULL, &wfds, NULL, &ctv);
+        if (sel_rc <= 0) {
+            uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+            DebugP_log("[OTA-PROBE] step=2 FAIL connect-timeout sel=%d "
+                       "errno=%d elapsed=%uus\r\n",
+                       sel_rc, errno, (unsigned)dt_us);
+            snprintf(out->error, sizeof(out->error),
+                     "connect timeout sel=%d", sel_rc);
+            out->reachable = false;
+            lwip_close(sock);
+            return;
+        }
+        /* Socket became writable — check SO_ERROR to confirm connect OK. */
+        int so_err = 0;
+        socklen_t so_err_len = sizeof(so_err);
+        lwip_getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &so_err_len);
+        if (so_err != 0) {
+            uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+            DebugP_log("[OTA-PROBE] step=2 FAIL connect-so_err=%d elapsed=%uus\r\n",
+                       so_err, (unsigned)dt_us);
+            snprintf(out->error, sizeof(out->error),
+                     "connect SO_ERROR=%d", so_err);
+            out->reachable = false;
+            lwip_close(sock);
+            return;
+        }
+    }
+
+    /* Connect succeeded — restore blocking mode for the recv that follows
+     * (recv_frame uses the configured SO_RCVTIMEO, which only applies
+     * in blocking mode). */
+    lwip_fcntl(sock, F_SETFL, flags);
+
+    uint64_t dt_connect = ClockP_getTimeUsec() - t_connect;
+    DebugP_log("[OTA-PROBE] step=2 connect ok connectUs=%u\r\n",
+               (unsigned)dt_connect);
+
     /* Expect FwBankInfo immediately. */
     uint8_t body[PUSH_RX_FRAME_MAX];
     uint8_t tag = 0;
     size_t body_len = 0;
-    if (recv_frame(sock, &tag, body, &body_len) != 0
-            || tag != LP_OTA_TAG_BANK_INFO) {
+    uint64_t t_recv = ClockP_getTimeUsec();
+    int rfrc = recv_frame(sock, &tag, body, &body_len);
+    uint64_t dt_recv = ClockP_getTimeUsec() - t_recv;
+    if (rfrc != 0 || tag != LP_OTA_TAG_BANK_INFO) {
+        uint64_t dt_us = ClockP_getTimeUsec() - t_enter;
+        DebugP_log("[OTA-PROBE] step=3 FAIL recv rfrc=%d tag=0x%02x "
+                   "len=%u errno=%d recvUs=%u elapsed=%uus\r\n",
+                   rfrc, (unsigned)tag, (unsigned)body_len, errno,
+                   (unsigned)dt_recv, (unsigned)dt_us);
         snprintf(out->error, sizeof(out->error),
                  "no BankInfo (tag=0x%02x)", (unsigned)tag);
         out->reachable = false;
@@ -840,6 +933,15 @@ static void probe_one_host(const char *ipstr, uint32_t timeout_ms,
     strncpy(out->active_version, src, sizeof(out->active_version) - 1u);
     out->active_version[sizeof(out->active_version) - 1u] = '\0';
     lwip_close(sock);
+
+    uint64_t dt_total = ClockP_getTimeUsec() - t_enter;
+    DebugP_log("[OTA-PROBE] OK target=%s role=%u active=%u ver=\"%s\" "
+               "boot=%u connectUs=%u recvUs=%u totalUs=%u\r\n",
+               ipstr, (unsigned)out->current_role,
+               (unsigned)out->active_bank, out->active_version,
+               (unsigned)out->boot_count,
+               (unsigned)dt_connect, (unsigned)dt_recv,
+               (unsigned)dt_total);
 }
 
 size_t NovaOtaPush_ProbeFleet(NovaFwFleetMember *out_members,
@@ -849,11 +951,21 @@ size_t NovaOtaPush_ProbeFleet(NovaFwFleetMember *out_members,
     if (out_members == NULL || max_members == 0u) return 0u;
     if (timeout_ms == 0u) timeout_ms = PUSH_PROBE_DEFAULT_MS;
 
-    size_t count = 0;
     size_t orbits = OrbitClient_Count();
+    uint64_t t_enter = ClockP_getTimeUsec();
+    DebugP_log("[OTA-PROBE] fleet enter orbits=%u maxMembers=%u "
+               "timeoutMs=%u\r\n",
+               (unsigned)orbits, (unsigned)max_members,
+               (unsigned)timeout_ms);
+
+    size_t count = 0;
     for (size_t i = 0; i < orbits && count < max_members; i++) {
         const char *ip = OrbitClient_GetIpv4((uint8_t)i);
         if (ip == NULL || ip[0] == '\0') continue;
+        uint64_t t_slot = ClockP_getTimeUsec();
+        DebugP_log("[OTA-PROBE] fleet slot=%u ip=%s startUs=%u\r\n",
+                   (unsigned)i, ip,
+                   (unsigned)(t_slot - t_enter));
         probe_one_host(ip, timeout_ms, &out_members[count]);
         count++;
     }
@@ -861,5 +973,14 @@ size_t NovaOtaPush_ProbeFleet(NovaFwFleetMember *out_members,
      * controller-self-update path is Phase 3.6; the broker's fleet
      * snapshot today is the set of routable orbit IPs only. */
     (void)ipstr_to_host;   /* reserved for future caller-specified hosts */
+
+    uint64_t dt_total = ClockP_getTimeUsec() - t_enter;
+    size_t reachable_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (out_members[i].reachable) reachable_count++;
+    }
+    DebugP_log("[OTA-PROBE] fleet exit probed=%u reachable=%u totalUs=%u\r\n",
+               (unsigned)count, (unsigned)reachable_count,
+               (unsigned)dt_total);
     return count;
 }
