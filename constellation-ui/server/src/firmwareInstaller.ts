@@ -49,11 +49,12 @@
  * Concurrency: ONE install at a time. A second install attempt while
  * the first is in flight returns `InstallError('already_running')`.
  *
- * Retired in this phase (kept on disk for Phase 5 deletion, see #6 in
- * the Phase 4 plan): `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
- * `probe_fleet.ts`. `InstallOptions.fleet` is now ignored (broker
- * discovers); `ORBIT_FLEET` env var is also ignored bridge-side. Both
- * options stay on the API for back-compat until Phase 5.
+ * Phase 4b cleanup (2026-05-29): the legacy direct-TCP modules
+ * (`orbitOtaPush.ts`, `orbitFleetResolver.ts`, `probe_fleet.ts`) are
+ * deleted; `InstallOptions.fleet` is removed from the public surface;
+ * `ORBIT_FLEET` env var is no longer read on the bridge side. The
+ * broker on Nova discovers the fleet via UART-side `FwFleetProbe` and
+ * routes per-component by role.
  */
 
 import {
@@ -158,9 +159,6 @@ export interface InstallOptions {
      *  is unconditional. The flag still short-circuits the post-reboot
      *  reconciliation logic for orbit components though. */
     skipReboot?: boolean;
-    /** RETIRED Phase 4 — broker discovers the fleet. Ignored on the
-     *  bridge side; pre-Phase-4 callers that set this get back-compat. */
-    fleet?: string[];
     /** Allow downgrade by version-string comparison. Default false. */
     allowDowngrade?: boolean;
 }
