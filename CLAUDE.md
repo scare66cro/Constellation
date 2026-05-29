@@ -101,24 +101,25 @@ mechanical, not a research project.
     envelopes) on the Pi5 side and Ethernet on the LP side. Every
     bit of bridge↔LP communication must traverse Nova.
     **TODAY'S BENCH HAS THE PI5 DUAL-HOMED ON `10.47.27.108` FOR
-    DEV CONVENIENCE.** That breaks the airgap and is the reason
-    `orbitOtaPush.ts` / `orbitFleetResolver.ts` / `probe_fleet.ts` /
-    `vfdClient.ts` / `orbitMbtcp.ts` still exist — they open TCP
-    sockets directly to LPs. **OTA migration (Phase 4) is partially
-    landed as of 2026-05-26:** the bridge's `firmwareInstaller.ts`
-    now drives a Nova-side broker over UART envelopes
-    (`FwInstallBegin/ComponentBegin/Chunk/ComponentFinalize/Complete`)
-    instead of opening TCP to LP `:5503` directly. End-to-end proven
-    bench for a single-orbit install. Open issues: broker fleet-probe
-    race + post-OTA Bank-A boot failure (see
-    [`docs/uart-airgap-architecture.md`](docs/uart-airgap-architecture.md)
-    Phase 4 status block). The legacy direct-TCP modules above stay
-    on disk for Phase 4b deletion once both opens close. `vfdClient.ts`
-    and `orbitMbtcp.ts` (Modbus paths) have not started migration yet
-    and remain on borrowed time. If you are writing new bridge↔LP
-    code and you see TCP-from-Pi5-to-LP in your design, that is the
-    migration target, not the production pattern — design the
-    envelope, not the socket.
+    DEV CONVENIENCE.** That breaks the airgap, but the legacy
+    direct-TCP-to-LP modules that USED to depend on it are gone now
+    on the OTA side. **OTA migration (Phase 4) FULLY LANDED 2026-05-29:**
+    `firmwareInstaller.ts` drives the Nova-side broker exclusively over
+    UART envelopes (`FwInstallBegin/ComponentBegin/Chunk/ComponentFinalize/
+    Complete`); the broker forwards to orbits via Nova-side `nova_ota_push.c`.
+    End-to-end validated 2026-05-29 across STORAGE / GDC / TRITON /
+    CONTROLLER on the 4-board fleet (`overallState: "done"`, `.1
+    active=bankB banks=AB`). The 7th-layer SBL-wipe bug that hid
+    behind the 6-layer fix from 2026-05-26 was the last gating issue;
+    fixed in 0.A.208 by relocating `FW_HEADER_OFFSET` from `0x60000`
+    to `0x300000`. Memory: [`memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md`](memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md).
+    Phase 4b deletion of `orbitOtaPush.ts` / `orbitFleetResolver.ts`
+    / `probe_fleet.ts` LANDED 2026-05-29 (commit `5465ab5`, 816 lines).
+    `vfdClient.ts` and `orbitMbtcp.ts` (Modbus paths) HAVE NOT started
+    migration and remain on borrowed time. If you are writing new
+    bridge↔LP code and you see TCP-from-Pi5-to-LP in your design,
+    that is the migration target, not the production pattern — design
+    the envelope, not the socket.
 
 # Doc map (single source of truth for "where is X?")
 

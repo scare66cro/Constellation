@@ -246,9 +246,24 @@ direct TCP to LPs.
 >    just-copied image. Recovery via `Recover-Fleet.ps1` (JTAG re-flash).
 >    [`memories/repo/lp-ota-bank-a-post-ota-corruption-incomplete-fix.md`](../memories/repo/lp-ota-bank-a-post-ota-corruption-incomplete-fix.md).
 >
+> **RESOLVED 2026-05-29** — Both opens are closed:
+>   1. broker fleet-probe race → fixed in 0.A.206 via non-blocking
+>      `lwip_connect` + `lwip_select` in `probe_one_host`.
+>   2. post-OTA Bank-A boot failure → was the SEVENTH-layer SBL-wipe bug,
+>      not a stage-copy issue at all. `write_meta_block_atomic` erased
+>      the SBL tail at `0x40000-0x4BE2D` every Activate. Fixed in 0.A.208
+>      by relocating `FW_HEADER_OFFSET` from `0x060000` to `0x300000`.
+>      Phase 4 OTA end-to-end validated 2026-05-29 on the 4-board fleet
+>      — STORAGE / GDC / TRITON / CONTROLLER all reach `state: "done"`,
+>      `.1 active=bankB banks=AB`. Memory:
+>      [`memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md`](../memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md).
+>
 > Phase 4b deletion of `orbitOtaPush.ts` / `orbitFleetResolver.ts` /
-> `probe_fleet.ts` remains deferred until both opens close. Bench
-> currently iterates on single-orbit bundles to .2 STORAGE only.
+> `probe_fleet.ts` LANDED 2026-05-29 (commit `5465ab5`, 816 lines).
+> `/api/_debug/broker-fleet-probe` is the surviving diagnostic
+> replacement for `probe_fleet.ts`. `vfdClient.ts` and `orbitMbtcp.ts`
+> remain on disk — their Modbus-into-Nova migration is a separate
+> session per the Phase 4b plan below.
 >
 > _Phase 4a architecture detail retained below for context._
 
@@ -280,19 +295,22 @@ direct TCP to LPs.
   `/api/_debug/broker-install-begin-abort`) are still mounted —
   delete in Phase 4b together with the now-dead Phase-1B files.
 
-**Phase 4b — delete the dead direct-TCP modules.** When the install
-path has cooked on the bench for a week:
-- Delete `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
-  `probe_fleet.ts` from the bridge.
-- Drop the three `/api/_debug/broker-*` debug endpoints from `index.ts`.
-- Drop `InstallOptions.fleet` and `ORBIT_FLEET` env handling.
-- Move `vfdClient.ts` and `orbitMbtcp.ts` Modbus-TCP logic INTO Nova.
+**Phase 4b — delete the dead direct-TCP modules.**
+- ☑ Delete `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
+  `probe_fleet.ts` from the bridge. **DONE 2026-05-29 (`5465ab5`).**
+- ☐ Drop the three `/api/_debug/broker-*` debug endpoints from `index.ts`.
+  Kept for now because `/api/_debug/broker-fleet-probe` is the operator
+  diagnostic replacement for `probe_fleet.ts`. Drop the other two
+  (`broker-install-fail-test`, `broker-install-begin-abort`) whenever
+  there's a focused cleanup pass.
+- ☐ Drop `InstallOptions.fleet` and `ORBIT_FLEET` env handling.
+- ☐ Move `vfdClient.ts` and `orbitMbtcp.ts` Modbus-TCP logic INTO Nova.
   Today these run on the Pi5 because that was the dev shortcut.
   Production: Nova polls the orbit LPs and VFD over Modbus, then
   publishes the results to the Pi5 via envelopes (today's
   `FrontMatter` and friends).
-- Update the bridge env: drop `ORBIT_FLEET`, drop `VFD_HOST`.
-- Update Pi5 deployment: bind only to `192.168.10.108` (or whatever
+- ☐ Update the bridge env: drop `ORBIT_FLEET`, drop `VFD_HOST`.
+- ☐ Update Pi5 deployment: bind only to `192.168.10.108` (or whatever
   customer-side address), explicitly NOT to `10.47.27.0/24`.
 
 ### Phase 5 — Move the dev Pi5 off the equipment LAN
