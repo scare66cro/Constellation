@@ -583,7 +583,14 @@ int32_t NovaOtaPush_BeginToLp(uint32_t target_ip,
         return NOVA_OTA_PUSH_ERR_TRANSPORT;
     }
 
-    /* Wait for the LP's first Status — could take ~5 s on Bank B erase. */
+    /* Wait for the LP's first Status — could take ~5 s on Bank B erase.
+     * 2026-05-29 bug fix: the BankInfo drain at step=3 set recv timeout to
+     * PUSH_BANK_INFO_TIMEOUT_S (3 s). Step 5's log message claimed 120 s
+     * but the socket still had the shorter timeout, so any real Begin
+     * (with a real total_size that forces a real Bank-B erase ~5 s) failed
+     * at step 5 while the synthetic 1024-byte debug Begin completed in
+     * <3 s. Restore the long Begin timeout before await_status. */
+    sock_set_recv_timeout(sock, PUSH_BEGIN_RECV_TIMEOUT_S);
     DebugP_log("[OTA-PUSH] Begin step=5 await Status recvTo=%ds\r\n",
                PUSH_BEGIN_RECV_TIMEOUT_S);
     LpStatus st;

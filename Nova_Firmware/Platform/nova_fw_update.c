@@ -135,20 +135,41 @@ static void read_bank_header(uint32_t bank, FwBankHeader *hdr)
  * Bank A header, Bank B header) rewrites the entire 256-KB block in one
  * atomic transaction. The in-memory cache (`s_boot_meta`, `s_bank_a_hdr`,
  * `s_bank_b_hdr`) is the source of truth; flash is reconstructed from
- * it. Other 252 KB of the block (`0x40000-0x5FFFF`, `0x61000-0x6FFFF`,
- * `0x71000-0x7FFFF`) stays 0xFF — currently unused by anything per the
- * canonical OSPI map in `nova_fw_update.h`. */
+ * it.
+ *
+ * 2026-05-29 (0.A.208) — SEVENTH-layer controller self-update brick:
+ *   The 0.A.200 design comment claimed "Other 252 KB of the block
+ *   (0x40000-0x5FFFF, 0x61000-0x6FFFF, 0x71000-0x7FFFF) stays 0xFF —
+ *   currently unused by anything per the canonical OSPI map in
+ *   nova_fw_update.h." **That assumption was wrong** until the F2c
+ *   stage-2 SBL chooser ships (Gap 6 of docs/lp-am2434-ota-hardening-
+ *   plan.md). We currently run TI's stock sbl_ospi.release.hs_fs.tiimage
+ *   (~311 KB / 0x4BE2D) at OSPI 0x0. Its tail extends into 0x40000-
+ *   0x4BE2D — well inside our metadata block. Every write_meta_block_-
+ *   atomic call wiped that SBL tail to 0xFF; next warm-reset, ROM
+ *   rejected the truncated SBL and fell into BOOT ROM = Nova OFFLINE
+ *   forever. This is what caused the 0.A.200-207 brick saga. Each
+ *   individual fix was real but layered on top of this latent SBL-
+ *   erase bug; stage-copy verified Bank A bit-perfect, then Activate
+ *   wiped SBL.
+ *
+ *   Fix: relocate FW_HEADER_OFFSET from 0x060000 to 0x300000 (RESERVED
+ *   1.5 MB region per the OSPI map — 0x300000-0x4FFFFF was unused).
+ *   The 256-KB erase block at 0x300000-0x33FFFF is now completely
+ *   outside both SBL (0x0-0x4BE2D) and Bank A (0x80000-0x1FFFFF) and
+ *   the watchdog (0x180000). Nothing else needs to change in the erase
+ *   logic — block-aligned addresses still work.
+ *
+ *   Backward compat: existing boards have stale metadata at the OLD
+ *   0x060000 location. After the 0.A.208 self-update or JTAG reflash,
+ *   NovaFwUpdate_Init reads from the NEW 0x300000 location. First
+ *   read is 0xFF (erased) — magic check fails, defaults to Bank A.
+ *   That's correct because TI stock SBL hard-loaded Bank A anyway. */
 static void write_meta_block_atomic(void)
 {
-    static uint8_t s_sec_a[FW_SECTOR_SIZE];   /* sector at FW_HEADER_OFFSET = 0x60000 */
-    static uint8_t s_sec_b[FW_SECTOR_SIZE];   /* sector at FW_BANK_B_HDR_SECTOR = 0x70000 */
+    static uint8_t s_sec_a[FW_SECTOR_SIZE];   /* sector at FW_HEADER_OFFSET = 0x300000 */
+    static uint8_t s_sec_b[FW_SECTOR_SIZE];   /* sector at FW_BANK_B_HDR_SECTOR = 0x310000 */
 
-    /* 0.A.202: granular bracketing to root the Finalize hang on
-     * controller self-update. Bench-2026-05-26 with 0.A.201 wedged
-     * silently somewhere inside this function (no `[FwUpd] Finalize:
-     * write_bank_header returned` log after `Finalize: calling
-     * write_bank_header`). One of erase / DAC-write-A / DAC-write-B
-     * is hanging. Removing once rooted. */
     debug_printf("[FwUpd] write_meta_block: enter\r\n");
 
     memset(s_sec_a, 0xFF, sizeof(s_sec_a));
@@ -158,22 +179,16 @@ static void write_meta_block_atomic(void)
     memset(s_sec_b, 0xFF, sizeof(s_sec_b));
     memcpy(s_sec_b + FW_BANK_B_HDR_OFFSET, &s_bank_b_hdr, sizeof(s_bank_b_hdr));
 
-    /* Erase the 256-KB block at 0x40000-0x80000 (covers both sectors).
-     * 0.A.205: bare-metal STIG erase via `hal_flash_erase_block_dac`
-     * (was SDK `hal_flash_erase_sector` → `Flash_eraseBlk` which hangs
-     * inside `Flash_norOspiWaitReady` in CPSW-active context). Same
-     * family as the read/write wedges fixed in 0.A.199/0.A.204.
-     * `hal_flash_erase_block_dac` requires block-aligned addr; align
-     * `FW_HEADER_OFFSET=0x60000` down to its containing 256-KB block
-     * (`0x40000`). */
+    /* Erase the 256-KB block. 0.A.208: FW_HEADER_OFFSET = 0x300000, so the
+     * containing block is 0x300000-0x33FFFF — well outside SBL (0-0x4BE2D),
+     * Bank A (0x80000-0x1FFFFF), and watchdog (0x180000). */
     uint32_t meta_block = FW_HEADER_OFFSET & ~(FW_OTA_ERASE_BLOCK - 1U);
     debug_printf("[FwUpd] write_meta_block: erase block @0x%06lx (DAC-STIG)\r\n",
                  (unsigned long)meta_block);
     int erc = hal_flash_erase_block_dac(meta_block);
     debug_printf("[FwUpd] write_meta_block: erase rc=%d\r\n", erc);
 
-    /* Write both sectors back via DAC (0.A.199 migration — SDK
-     * INDIRECT_WRITE_XFER wedges in CPSW-active context). */
+    /* Write both sectors back via DAC. */
     debug_printf("[FwUpd] write_meta_block: write sec_a @0x%06lx (4KB)\r\n",
                  (unsigned long)FW_HEADER_OFFSET);
     int rca = hal_flash_write_dac(FW_HEADER_OFFSET, s_sec_a, sizeof(s_sec_a));

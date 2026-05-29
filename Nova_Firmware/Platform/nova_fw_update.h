@@ -23,23 +23,35 @@
  * the F2c stage-2 SBL chooser. Full design + migration plan in
  * docs/lp-am2434-f2c-sbl-chooser-design.md §2.
  *
- *   0x000000-0x05FFFF (384 KB)  custom sbl_chooser (TI HS_FS signed)
- *   0x060000-0x06FFFF ( 64 KB)  FwBootMeta + Bank A FwBankHeader
- *   0x070000-0x07FFFF ( 64 KB)  Bank B FwBankHeader (separate sector
- *                                so updates to one bank never erase
- *                                the other's metadata)
+ *   0x000000-0x05FFFF (384 KB)  custom sbl_chooser placeholder; today
+ *                                TI's stock sbl_ospi (~311 KB) lives
+ *                                here, its tail extending to ~0x4BE2D
  *   0x080000-0x1FFFFF (1.5 MB)  Bank A app image (mcelf.hs_fs) — also
  *                                where TI's stock SBL hardloads, so
  *                                first F2c flash needs no app move
- *   0x200000-0x37FFFF (1.5 MB)  Bank B app image
- *   0x380000-0x4FFFFF (1.5 MB)  Golden recovery image
+ *   0x180000-0x1FFFFF ( 512 KB) Watchdog R5FSS1_0 mcelf (overlaps end
+ *                                of Bank A footprint by design — app
+ *                                images stay well under 1 MB)
+ *   0x200000-0x2FFFFF (1.0 MB)  Bank B app image (NOTE: moved to
+ *                                0x900000 in 0.A.102 — see below)
+ *   0x300000-0x33FFFF (256 KB)  FwBootMeta + Bank A/B FwBankHeader
+ *                                (0.A.208: relocated from 0x060000
+ *                                to escape the SBL footprint; the
+ *                                old location wiped SBL tail every
+ *                                metadata update — see write_meta_-
+ *                                block_atomic comments)
+ *   0x340000-0x4FFFFF (1.75 MB) Reserved / unused
  *   0x500000-0x5FFFFF ( 1   MB) RESERVED
  *   0x600000-0x61FFFF (128 KB)  lp_device_config ping-pong banks
  *   0x620000-0x7FFFFF (~2 MB)   LpSettings vault (future, MSRAM today)
+ *   0x900000-0xA7FFFF (1.5 MB)  Bank B app image (0.A.102 relocation)
  */
-#define FW_HEADER_OFFSET      0x060000U  /* Boot meta + bank A header */
+#define FW_HEADER_OFFSET      0x300000U  /* Boot meta + bank A header
+                                          * (0.A.208: was 0x060000, see
+                                          * write_meta_block_atomic) */
 #define FW_HEADER_SIZE        0x010000U  /* 64 KB */
-#define FW_BANK_B_HDR_SECTOR  0x070000U  /* Separate sector for bank B header */
+#define FW_BANK_B_HDR_SECTOR  0x310000U  /* Bank B header sector
+                                          * (0.A.208: was 0x070000) */
 #define FW_BANK_A_OFFSET      0x080000U
 /* 0.A.102: FW_BANK_B moved to 0x900000 (9 MB into the 64 MB chip).
  * 0x200000 failed (0.A.78-82). 0x400000 failed (0.A.83+). Both inside
