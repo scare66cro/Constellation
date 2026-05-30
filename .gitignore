@@ -118,3 +118,25 @@ Nova_Firmware/lp_am2434/ti-arm-clang/.last-build-role.json
 
 # Local-only scratch memory notes (per-machine, not for git history)
 memories/
+
+# ─── Claude Code / agent harness ─────────────────────────────────────────
+# Per-machine assistant session state — worktrees, settings.local.json,
+# scheduled task locks. Never goes in git history.
+.claude/
+
+# ─── Built firmware OTA bundles ──────────────────────────────────────────
+# Regenerable via Nova_Firmware/lp_am2434/Build-Cfu.ps1 + scripts/Build-CfuBundle.ps1.
+# Bundles are large (~700 KB each) and rotate with every firmware bump.
+firmware-bundles/
+
+# ─── Runtime tool output ─────────────────────────────────────────────────
+nohup.out
+flash_log.txt
+
+# ─── Universal backup-file pattern ───────────────────────────────────────
+# Catches *.bak (one-off "before-this-change" snapshots) and the
+# *.bak.pre-<tag> convention used in Nova_Firmware/lp_am2434 for
+# pre-rework checkpoints (e.g. example.syscfg.bak.pre-enet,
+# main.c.bak.pre-enet, makefile.bak.pre-enet).
+*.bak
+*.bak.*
