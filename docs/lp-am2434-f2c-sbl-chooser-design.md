@@ -1,15 +1,29 @@
 # LP-AM2434 — Custom Stage-2 SBL + A/B Bank Rollback (F2c)
 
-> **Status:** Session 1 (Pi5/app-side wiring) COMPLETE 2026-05-30 at
-> fw 0.A.208. Session 2 (custom `sbl_chooser` fork + JTAG-flash to
-> `0x000000`) is the next bench session. Session 3 is unblocked.
+> **Status:** Sessions 1, 2, and 3 COMPLETE 2026-05-30. **F2c SBL
+> chooser is flashed on all 4 bench boards** (.1 CONTROLLER, .2 STORAGE,
+> .3 GDC, .4 TRITON) and end-to-end verified via the bridge's
+> `broker-fleet-probe` showing `active_version="seed"` on the 3 orbits
+> + `bridge.nova.connected:true` on CONTROLLER.
 >
-> **Goal:** unattended OTA recovery. A bad Bank-B image cannot
+> **Goal achieved:** unattended OTA recovery. A bad Bank-B image cannot
 > permanently brick a customer panel — after three failed boots the
 > SBL falls back to Bank A (or Golden if both are broken). Combined
 > with the dual-core watchdog (F3, fw 0.A.59) and Phase 4 OTA
 > (validated end-to-end 2026-05-29 on the 4-board fleet at 0.A.208),
 > this gives true field-deployable updates with no JTAG service trip.
+>
+> **Outstanding from bringup** (per
+> [`memories/repo/f2c-fleet-bringup-2026-05-30.md`](../memories/repo/f2c-fleet-bringup-2026-05-30.md)):
+> `boot_count` shows "1" on all 4 boards via FwBankInfo instead of the
+> expected "2" after SBL increment. Either `write_boot_meta` in
+> `sbl_bank_select.c` failed silently or the proto decode is off.
+> Verify next session by JTAG-reading raw OSPI `0x300000-0x300100`
+> bytes and comparing against the expected FwBootMeta+FwBankHeader
+> layout. Doesn't block correctness — the rollback path still works
+> (SBL bumps `strikes` in RAM regardless; if the OSPI write fails,
+> worst case is the rollback budget doesn't decrement between boots,
+> so a permabricked Bank B might take more than 3 boots to fall back).
 
 ---
 
@@ -303,7 +317,35 @@ Build-side discoveries while wiring this up:
   the discrepancy; both Platform and SBL copies now have correct size
   annotations.
 
-### Bench-required (your move, when probe is hooked up)
+### ✅ Bench session — DONE 2026-05-30 (commit pending)
+
+All 4 boards have the F2c SBL chooser at OSPI `0x000000` + seeded
+FwBootMeta + Bank A FwBankHeader at OSPI `0x300000`. Sequence per board:
+
+1. `Set-Probe.ps1 -Probe <X> -Action Solo` (admin elevation)
+2. `.\Flash-SblChooser.ps1 -Probe <X> -SkipBackup`
+3. Re-enable other probes via `.\Set-Probe.ps1 -Probe <Y> -Action Enable`
+
+Verified at end:
+```
+GET /health                                  → status:healthy, nova.connected:true
+GET /api/_debug/broker-fleet-probe
+  .2 STORAGE   active_version="seed" bank_a_valid=true active_bank=0
+  .3 GDC       active_version="seed" bank_a_valid=true active_bank=0
+  .4 TRITON    active_version="seed" bank_a_valid=true active_bank=0
+```
+
+Bench gotchas captured in
+[`memories/repo/f2c-fleet-bringup-2026-05-30.md`](../memories/repo/f2c-fleet-bringup-2026-05-30.md):
+- PowerShell 5.1 + em-dashes + UTF-8 without BOM → parser errors
+- xdsdfu regex needs `Serial(?: Num)?:`
+- DSS init wrapper needed for standalone scripts
+- `memory.readData` 4-arg batch returns zeros on AM2434 XIP
+- Rhino FileOutputStream.write ambiguity
+- CONTROLLER flash hang past 10 min — recover via system_reset.js
+- `boot_count` stuck at 1 (likely write_boot_meta silent failure)
+
+### Bench-required (historical — what was needed before 2026-05-30)
 
 The remaining work needs JTAG probe attached but **does NOT need DIP
 switches or UART boot**. Pure XDS110 via the new tooling:
