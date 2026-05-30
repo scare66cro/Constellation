@@ -29,13 +29,13 @@
 #include <string.h>
 #include <kernel/dpl/DebugP.h>
 #include <kernel/dpl/SystemP.h>
-#include <drivers/flash.h>
+#include <board/flash.h>
 
 /* Compile-time invariant: struct sizes must match Platform/nova_fw_update.h. */
-_Static_assert(sizeof(SblFwBankHeader) == 128,
-               "SblFwBankHeader must be 128 bytes (matches FwBankHeader)");
+_Static_assert(sizeof(SblFwBankHeader) == 136,
+               "SblFwBankHeader must be 136 bytes (24 fixed + 32 version + 80 reserved)");
 _Static_assert(sizeof(SblFwBootMeta)   == 128,
-               "SblFwBootMeta must be 128 bytes (matches FwBootMeta)");
+               "SblFwBootMeta must be 128 bytes (12 fixed + 116 reserved)");
 
 /* ─── Read helpers (indirect-mode OSPI via Flash driver) ─────────────── */
 

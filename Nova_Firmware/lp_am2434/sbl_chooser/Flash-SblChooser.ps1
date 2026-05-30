@@ -82,7 +82,7 @@ param(
     [switch]$SkipSeed,
     [switch]$InvalidateBankA,
 
-    [string]$SblImagePath = "F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang\sbl_chooser.release.tiimage",
+    [string]$SblImagePath = "F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang\sbl_chooser.release.hs_fs.tiimage",
 
     [string]$BackupDir = "F:\Constellation\backups"
 )
@@ -90,7 +90,6 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LpDir     = Split-Path -Parent $ScriptDir
-$RepoRoot  = "F:\Constellation"
 
 # ─── Probe mapping (matches Flash-LP.ps1) ──────────────────────────────
 $probeMap = @{

@@ -38,7 +38,7 @@
 #include <drivers/bootloader/soc/bootloader_soc.h>
 #include <drivers/bootloader.h>
 #include <drivers/bootloader/bootloader_flash.h>
-#include <drivers/flash.h>
+#include <board/flash.h>
 #include <kernel/dpl/ClockP.h>
 #include "sbl_bank_select.h"  /* F2c bank selection */
 

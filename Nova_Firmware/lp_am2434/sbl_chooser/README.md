@@ -82,40 +82,42 @@ seed, and the negative test as one-button operations.
    (STORAGE, S24L0417) so a worst-case brick doesn't affect the
    controller.
 
-### Step 1 — Wire SysConfig for the Flash driver
+### Step 1 — Build (no SysConfig GUI step needed)
 
-The TI stock `sbl_ospi` `example.syscfg` opens the OSPI driver via
-`Drivers_open()` but does NOT open a `Flash` driver instance — the
-stock SBL talks to OSPI directly via the `Bootloader_FlashArgs` path.
+**Correction from an earlier draft of this README:** TI's stock
+`sbl_ospi` `example.syscfg` already has a Flash driver instance
+declared (`CONFIG_FLASH0` — used by the bootloader's image-loading
+path). `Board_driversOpen()` populates `gFlashHandle[CONFIG_FLASH0]`
+before our bank-select call runs, so no GUI step is required.
 
-We need a Flash driver instance so `sbl_bank_select.c` can call
-`Flash_read` / `Flash_eraseBlk` / `Flash_write`. Add it to
-`example.syscfg`:
-
-1. Open SysConfig GUI on `r5fss0-0_nortos/example.syscfg`.
-2. **TI DRIVERS → Flash → ADD**.
-3. Match the OSPI configuration of the running Nova app (W25Q128JV
-   or W25Q64JV depending on the board — check `flash_log.txt` from
-   the last `Flash-LP.ps1` run if unsure).
-4. Save. The generated `ti_drivers_config.c` will now declare
-   `gFlashHandle[CONFIG_FLASH0]`.
-
-### Step 2 — Build
+Build with the SDK toolchain (verified working 2026-05-30, fw-side
+state at 0.A.208):
 
 ```powershell
 cd F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang
 $env:MCU_PLUS_SDK_PATH = "C:\ti\mcu_plus_sdk_am243x_12_00_00_26"
 $env:SYSCFG_PATH       = "C:\ti\sysconfig_1.27.0"
 $env:CG_TOOL_ROOT      = "C:\ti\ti-cgt-armllvm_4.0.4.LTS"
-gmake -s PROFILE=release all
-# → sbl_chooser.release.tiimage   (signed for HS_FS boot)
+& "C:\ti\ccs2050\ccs\utils\bin\gmake.exe" -s PROFILE=release all
+# → sbl_chooser.release.hs_fs.tiimage   (HS-FS signed, ~305 KB)
 ```
 
-Common build failures:
-- `gFlashHandle[CONFIG_FLASH0]` undefined → SysConfig step 1 skipped.
-- Linker can't find `sbl_bank_select.o` → makefile `FILES_common` is wrong.
-- `Bootloader_FlashArgs` undefined → missing `#include
-  <drivers/bootloader/bootloader_flash.h>` in main.c (already in ours).
+Build size budget: TI's stock `sbl_ospi.release.hs_fs.tiimage` is
+~311 KB. Our chooser adds the bank-selection logic but the signed
+output ends up at the same ~305-312 KB envelope (the security cert +
+RPRC overhead dominates the binary). Well within the 384 KB SBL
+region at OSPI `0x000000 – 0x05FFFF`.
+
+Headers + structure caveats discovered while bringing up the build:
+
+- `Flash_read` / `Flash_eraseBlk` / `Flash_write` live in
+  `<board/flash.h>`, not `<drivers/flash.h>`.
+- `FwBankHeader` is **136 bytes**, not 128 (the original Platform/
+  comment claimed "Pad to 128" but the math 6×4 + 32 + 80 = 136
+  always added up to 136). The SBL port's `_Static_assert` caught
+  this; both files now have correct sizes annotated.
+- The Platform `nova_fw_update.h` comment was fixed in the same
+  commit as the SBL port's `_Static_assert(... == 136)`.
 
 ### Step 3 — JTAG-flash the SBL chooser, seed metadata, and verify (one command)
 

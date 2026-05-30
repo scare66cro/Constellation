@@ -284,17 +284,36 @@ auto-flash the SBL today (deferred — see §8 below); instead:
   manufacturing pipelines that need a single shippable artifact
   containing both the app and the SBL.
 
+### ✅ Build verified — 2026-05-30 (commit pending)
+
+`sbl_chooser.release.hs_fs.tiimage` builds cleanly out of the SDK at
+**311,685 bytes (~305 KB)** — same envelope as TI's stock `sbl_ospi`.
+Fits comfortably in the 384 KB region at OSPI `0x000000 – 0x05FFFF`.
+
+Build-side discoveries while wiring this up:
+- TI's stock `sbl_ospi` `example.syscfg` already has a Flash driver
+  instance (`CONFIG_FLASH0`) — the SysConfig GUI step the README
+  originally called out is NOT needed.
+- `Flash_read` / `Flash_eraseBlk` / `Flash_write` live in
+  `<board/flash.h>`, not `<drivers/flash.h>` (corrected in main.c +
+  sbl_bank_select.{c,h}).
+- `FwBankHeader` is actually **136 bytes**, not 128. The Platform/
+  comment claimed "Pad to 128" but never matched the field math. The
+  SBL port's `_Static_assert(sizeof(SblFwBankHeader) == 136)` caught
+  the discrepancy; both Platform and SBL copies now have correct size
+  annotations.
+
 ### Bench-required (your move, when probe is hooked up)
 
 The remaining work needs JTAG probe attached but **does NOT need DIP
 switches or UART boot**. Pure XDS110 via the new tooling:
 
-1. **SysConfig GUI**: add a Flash driver instance to
-   `sbl_chooser/r5fss0-0_nortos/example.syscfg`. Save. Regenerated
-   `ti_drivers_config.c` will declare `gFlashHandle[CONFIG_FLASH0]`.
-2. **Build**: `gmake -s PROFILE=release all` from
-   `sbl_chooser/r5fss0-0_nortos/ti-arm-clang`. Produces
-   `sbl_chooser.release.tiimage`.
+1. **(Skipped — already done.)** The SysConfig GUI step the previous
+   draft of this doc called out is unnecessary; the TI stock
+   `example.syscfg` already wires up `CONFIG_FLASH0`.
+2. **Build** (✅ verified 2026-05-30): `gmake -s PROFILE=release all`
+   from `sbl_chooser/r5fss0-0_nortos/ti-arm-clang`. Produces
+   `sbl_chooser.release.hs_fs.tiimage` (~305 KB).
 3. **First flash** (one board): `.\Commission-LP.ps1 -Probe A` from
    `Nova_Firmware/lp_am2434/sbl_chooser/`. Backup stock SBL → install
    chooser → seed Bank A → flash Nova app → write device-config. Power-

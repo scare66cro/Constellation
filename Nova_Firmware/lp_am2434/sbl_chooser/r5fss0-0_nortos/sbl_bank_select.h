@@ -21,7 +21,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <drivers/flash.h>
+#include <board/flash.h>
 
 /* ─── OSPI layout (must match Nova_Firmware/Platform/nova_fw_update.h) ── */
 #define SBL_FW_HEADER_OFFSET       0x300000U  /* FwBootMeta + Bank A header sector */
@@ -47,7 +47,11 @@ typedef struct __attribute__((packed)) {
     uint32_t active;           /* 1 = this is the active bank */
     uint32_t sequence;         /* Monotonic: higher = newer */
     char     version[32];
-    uint8_t  reserved[80];     /* Pad to 128 */
+    uint8_t  reserved[80];     /* Total struct: 24 + 32 + 80 = 136 bytes.
+                                * Platform/nova_fw_update.h's "Pad to 128"
+                                * comment is wrong; the actual on-flash
+                                * record is 136 bytes. Header sector at
+                                * FW_HEADER_OFFSET has 64 KB to fit it. */
 } SblFwBankHeader;
 
 typedef struct __attribute__((packed)) {

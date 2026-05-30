@@ -268,11 +268,11 @@ try {
     }
     # ─── F2c: optional SBL chooser inclusion (manufacturing bundles) ───
     if ($IncludeSbl) {
-        $sblBuild = "$RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang\sbl_chooser.release.tiimage"
+        $sblBuild = "$RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang\sbl_chooser.release.hs_fs.tiimage"
         if (-not (Test-Path $sblBuild)) {
-            throw "IncludeSbl requested but sbl_chooser.release.tiimage not found at $sblBuild. Build it first: cd $RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang ; gmake -s PROFILE=release all"
+            throw "IncludeSbl requested but sbl_chooser.release.hs_fs.tiimage not found at $sblBuild. Build it first: cd $RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang ; gmake -s PROFILE=release all"
         }
-        $stagedSbl = Join-Path $tmp 'sbl_chooser.release.tiimage'
+        $stagedSbl = Join-Path $tmp 'sbl_chooser.release.hs_fs.tiimage'
         Copy-Item $sblBuild $stagedSbl -Force
         $sblSha  = (Get-FileHash $stagedSbl -Algorithm SHA256).Hash.ToLowerInvariant()
         $sblSize = (Get-Item $stagedSbl).Length
@@ -288,7 +288,7 @@ try {
         # Commission-LP.ps1 workstation script reads this entry, extracts
         # the binary, and JTAG-flashes via Flash-SblChooser.ps1.
         $manifestObj.components['sbl_chooser'] = [ordered]@{
-            file   = 'sbl_chooser.release.tiimage'
+            file   = 'sbl_chooser.release.hs_fs.tiimage'
             kind   = 'sbl_chooser'   # tag so the installer can recognize + skip
             target = 'ospi_offset_0x000000'
             sha256 = $sblSha

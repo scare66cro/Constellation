@@ -100,7 +100,12 @@ typedef struct __attribute__((packed)) {
     uint32_t active;          /* 1 = this is the active bank */
     uint32_t sequence;        /* Monotonic: higher = newer */
     char     version[32];     /* Version string, null-terminated */
-    uint8_t  reserved[80];    /* Pad to 128 bytes */
+    uint8_t  reserved[80];    /* Total struct: 24 + 32 + 80 = 136 bytes
+                               * (the pre-2026-05-30 comment claimed
+                               * "Pad to 128" but the math doesn't add
+                               * up — actual on-flash record is 136
+                               * bytes; the F2c sbl_bank_select port
+                               * caught this via _Static_assert) */
 } FwBankHeader;
 
 typedef struct __attribute__((packed)) {

@@ -21,14 +21,14 @@ endif
 PROFILE?=release
 ConfigName:=$(PROFILE)
 
-OUTNAME:=sbl_ospi.$(PROFILE).out
-COREOUTNAME:=sbl_ospi.$(PROFILE).optishare.out
+OUTNAME:=sbl_chooser.$(PROFILE).out
+COREOUTNAME:=sbl_chooser.$(PROFILE).optishare.out
 
 BOOTIMAGE_PATH=$(abspath .)
-BOOTIMAGE_NAME_GP:=sbl_ospi.$(PROFILE).tiimage
-BOOTIMAGE_NAME_HS:=sbl_ospi.$(PROFILE).hs.tiimage
-BOOTIMAGE_NAME_HS_FS:=sbl_ospi.$(PROFILE).hs_fs.tiimage
-BOOTIMAGE_BIN_NAME:=sbl_ospi.$(PROFILE).bin
+BOOTIMAGE_NAME_GP:=sbl_chooser.$(PROFILE).tiimage
+BOOTIMAGE_NAME_HS:=sbl_chooser.$(PROFILE).hs.tiimage
+BOOTIMAGE_NAME_HS_FS:=sbl_chooser.$(PROFILE).hs_fs.tiimage
+BOOTIMAGE_BIN_NAME:=sbl_chooser.$(PROFILE).bin
 
 ifeq ($(DEVICE_TYPE),HS)
 	BOOTIMAGE_NAME=$(BOOTIMAGE_NAME_HS)
@@ -303,12 +303,12 @@ endif
 
 .PHONY: coverage
 coverage:
-	@echo Creating Coverage Report for sbl_ospi.$(PROFILE) ...
+	@echo Creating Coverage Report for sbl_chooser.$(PROFILE) ...
 	$(MKDIR) coverage
-	$(PROFDATA) merge -sparse -obj-file=$(OUTNAME) $(OUTNAME).cnt -o sbl_ospi.$(PROFILE).profdata
-	$(COV) show --format=html --show-expansions --show-instantiations --show-branches=count --object=$(OUTNAME) -instr-profile=sbl_ospi.$(PROFILE).profdata --output-dir=$(COVERAGE_PATH)/coverage --ignore-filename-regex=build_jenkins
-	$(COV) export --format=text --object=$(OUTNAME) --instr-profile=sbl_ospi.$(PROFILE).profdata > coverage/sbl_ospi.$(PROFILE).profdata.json
-	node $(MCU_PLUS_SDK_PATH)/tools/smart_placement/clang_coverage_analyse.js --input=coverage/sbl_ospi.$(PROFILE).profdata.json --output-json=coverage/sbl_ospi.$(PROFILE).analysis.json --output=../sbl_ospi.annotations.$(PROFILE).S --top-function-count=500
+	$(PROFDATA) merge -sparse -obj-file=$(OUTNAME) $(OUTNAME).cnt -o sbl_chooser.$(PROFILE).profdata
+	$(COV) show --format=html --show-expansions --show-instantiations --show-branches=count --object=$(OUTNAME) -instr-profile=sbl_chooser.$(PROFILE).profdata --output-dir=$(COVERAGE_PATH)/coverage --ignore-filename-regex=build_jenkins
+	$(COV) export --format=text --object=$(OUTNAME) --instr-profile=sbl_chooser.$(PROFILE).profdata > coverage/sbl_chooser.$(PROFILE).profdata.json
+	node $(MCU_PLUS_SDK_PATH)/tools/smart_placement/clang_coverage_analyse.js --input=coverage/sbl_chooser.$(PROFILE).profdata.json --output-json=coverage/sbl_chooser.$(PROFILE).analysis.json --output=../sbl_ospi.annotations.$(PROFILE).S --top-function-count=500
 	@echo Coverage Report Generated at $(COVERAGE_PATH)/coverage folder !!!
 
 -include $(addprefix $(OBJDIR)/, $(DEPS))
