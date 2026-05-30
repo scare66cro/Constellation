@@ -1,16 +1,16 @@
-<#
+﻿<#
 .SYNOPSIS
   One-button commissioning of a fresh / newly-allocated LP board with
-  the F2c SBL chooser + Nova app + per-board role/IP. JTAG-only — no
+  the F2c SBL chooser + Nova app + per-board role/IP. JTAG-only -- no
   DIP switches, no UART boot mode required.
 
 .DESCRIPTION
   The full "first install" pipeline for a new board going from
   "stock TI SBL" to "F2c-enabled production firmware":
 
-    1. Flash-SblChooser.ps1 — back up stock SBL, install F2c chooser,
+    1. Flash-SblChooser.ps1 -- back up stock SBL, install F2c chooser,
        seed Bank A metadata at OSPI 0x300000
-    2. Flash-LP.ps1         — build (if needed) + flash the Nova app
+    2. Flash-LP.ps1         -- build (if needed) + flash the Nova app
        with the requested role baked in, write per-board OSPI device-
        config at 0x600000
 
@@ -31,7 +31,7 @@
     - Re-commissioning after a probe-routing accident (the SBL stays
       put; only the app + device-config need re-flashing)
 
-  Don't use this for routine app-only updates — use Flash-LP.ps1
+  Don't use this for routine app-only updates -- use Flash-LP.ps1
   directly for that (the SBL chooser persists across app re-flashes).
 
 .PARAMETER Probe
@@ -40,11 +40,11 @@
 
 .PARAMETER Role
   CONTROLLER / STORAGE / GDC / TRITON. Passed through to Flash-LP.ps1.
-  Optional — defaults to the probe's standard role per the bench map.
+  Optional -- defaults to the probe's standard role per the bench map.
 
 .PARAMETER Ip
   Per-board IP (10.47.27.x). Passed through to Flash-LP.ps1. Optional
-  — defaults from the role.
+  -- defaults from the role.
 
 .PARAMETER SkipSbl
   Skip the Flash-SblChooser.ps1 step. Use only if you've already
@@ -107,16 +107,16 @@ $LpDir     = Split-Path -Parent $ScriptDir
 
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Magenta
-Write-Host "  F2c Commission-LP — full first-install pipeline" -ForegroundColor Magenta
+Write-Host "  F2c Commission-LP -- full first-install pipeline" -ForegroundColor Magenta
 Write-Host "  Probe $Probe    Role $($Role ? $Role : '(default)')    IP $($Ip ? $Ip : '(default)')" -ForegroundColor Magenta
 Write-Host "================================================================" -ForegroundColor Magenta
 Write-Host ""
 
-# ─── Stage 1: SBL chooser ──────────────────────────────────────────────
+# --- Stage 1: SBL chooser ----------------------------------------------
 if ($SkipSbl) {
-    Write-Host "[stage 1] SKIPPED (-SkipSbl) — assuming F2c chooser is already installed" -ForegroundColor DarkGray
+    Write-Host "[stage 1] SKIPPED (-SkipSbl) -- assuming F2c chooser is already installed" -ForegroundColor DarkGray
 } else {
-    Write-Host "[stage 1] Flash-SblChooser.ps1 — backup, flash chooser, seed metadata" -ForegroundColor Cyan
+    Write-Host "[stage 1] Flash-SblChooser.ps1 -- backup, flash chooser, seed metadata" -ForegroundColor Cyan
     Write-Host ""
     $sblArgs = @{ Probe = $Probe }
     if ($SkipBackup) { $sblArgs.SkipBackup = $true }
@@ -129,13 +129,13 @@ if ($SkipSbl) {
     Write-Host "[stage 1] SBL chooser installed." -ForegroundColor Green
 }
 
-# ─── Stage 2: Nova app + role/IP ───────────────────────────────────────
+# --- Stage 2: Nova app + role/IP ---------------------------------------
 if ($SkipApp) {
     Write-Host ""
-    Write-Host "[stage 2] SKIPPED (-SkipApp) — leaving running app + device-config alone" -ForegroundColor DarkGray
+    Write-Host "[stage 2] SKIPPED (-SkipApp) -- leaving running app + device-config alone" -ForegroundColor DarkGray
 } else {
     Write-Host ""
-    Write-Host "[stage 2] Flash-LP.ps1 — build (if needed) + flash app + role/IP" -ForegroundColor Cyan
+    Write-Host "[stage 2] Flash-LP.ps1 -- build (if needed) + flash app + role/IP" -ForegroundColor Cyan
     Write-Host ""
     $appArgs = @{ Probe = $Probe }
     if ($Role)       { $appArgs.Role        = $Role }
@@ -151,10 +151,10 @@ if ($SkipApp) {
     Write-Host "[stage 2] Nova app + role/IP flashed." -ForegroundColor Green
 }
 
-# ─── Done ──────────────────────────────────────────────────────────────
+# --- Done --------------------------------------------------------------
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Green
-Write-Host "  Commission-LP COMPLETE — Probe $Probe" -ForegroundColor Green
+Write-Host "  Commission-LP COMPLETE -- Probe $Probe" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:"

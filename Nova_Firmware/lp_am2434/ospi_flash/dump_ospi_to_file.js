@@ -103,23 +103,30 @@ function go() {
     dsR5_0.target.halt();
     print("  Flasher halted in poll loop, OSPI XIP region live.");
 
-    print("=== Step 3: Read OSPI XIP region ===");
-    /* memory.readData(pageId, address, dataSize, count) returns int[]
-     * with each element holding `dataSize` bits. For byte-wise readback
-     * we use dataSize=8, count=dumpSize. */
-    var data = dsR5_0.memory.readData(0, xipAddr, 8, dumpSize);
-    print("  Read " + data.length + " bytes from 0x" + java.lang.Long.toHexString(xipAddr));
-
-    print("=== Step 4: Write to host file ===");
-    /* readData returns int[] where each int is a byte value 0..255. Cast
-     * to byte (Java byte is signed: cast wraps 128..255 to -128..-1, which
-     * is fine for FileOutputStream — it writes the raw 8-bit pattern). */
+    print("=== Step 3: Read OSPI XIP region (byte-by-byte) ===");
+    /* The 4-arg readData(pageId, addr, sizeBits, count) overload returns
+     * zeros on the AM2434 XIP region for reasons not yet diagnosed.
+     * The proven-working pattern from ospi_read_dump.js is to read one
+     * byte at a time with the 3-arg readData(pageId, addr, sizeBits).
+     * Slow (~30 s per 384 KB on this workstation) but reliable. */
     var fos = new FileOutputStream(fileStr);
-    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, dumpSize);
+    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 4096);
+    var bufIdx = 0;
+    var progressEvery = 0x10000;  // 64 KB
     for (var i = 0; i < dumpSize; i++) {
-        buf[i] = data[i];  // implicit narrow to byte
+        var b = dsR5_0.memory.readData(0, xipAddr + i, 8) & 0xff;
+        buf[bufIdx++] = b;
+        if (bufIdx == 4096) {
+            fos.write(buf, 0, 4096);
+            bufIdx = 0;
+        }
+        if ((i + 1) % progressEvery == 0) {
+            print("  ... " + ((i + 1) >> 10) + " KB / " + (dumpSize >> 10) + " KB");
+        }
     }
-    fos.write(buf);
+    if (bufIdx > 0) {
+        fos.write(buf, 0, bufIdx);
+    }
     fos.close();
     print("  Wrote " + dumpSize + " bytes to " + fileStr);
 
@@ -127,10 +134,28 @@ function go() {
     print("=== Done ===");
 }
 
-try {
-    go();
-} catch (e) {
-    print("[FATAL] " + e);
-    java.lang.System.exit(1);
+var ScriptingEnvironment =
+    Packages.com.ti.ccstudio.scripting.environment.ScriptingEnvironment;
+var ds, debugServer, script;
+var withinCCS = (ds !== undefined);
+if (!withinCCS) {
+    script = ScriptingEnvironment.instance();
+    debugServer = script.getServer("DebugServer.1");
+    debugServer.setConfig(ccxmlPath);
+    try {
+        go();
+    } catch (e) {
+        print("[FATAL] " + e);
+        java.lang.System.exit(1);
+    }
+    java.lang.System.exit(0);
+} else {
+    debugServer = ds;
+    script = env;
+    try {
+        go();
+    } catch (e) {
+        print("[FATAL] " + e);
+        java.lang.System.exit(1);
+    }
 }
-java.lang.System.exit(0);

@@ -1,8 +1,8 @@
-<#
+﻿<#
 .SYNOPSIS
   Constructs the F2c seed metadata block (FwBootMeta + Bank A FwBankHeader)
   and JTAG-flashes it to OSPI offset 0x300000 via the existing uniflash_run.js
-  infrastructure. No DIP switches, no UART boot, no USB cycling — pure JTAG.
+  infrastructure. No DIP switches, no UART boot, no USB cycling -- pure JTAG.
 
 .DESCRIPTION
   Sequence:
@@ -14,7 +14,7 @@
     3. Call uniflash_run.js with UNIFLASH_FILE=<temp>, UNIFLASH_OFFSET=0x300000
     4. Flasher's Flash_write does erase-then-program on the 64 KB sector.
        The remaining ~63.7 KB of the sector stays 0xFF (matches the post-
-       erase state — FwBootMeta and Bank A header are the only populated
+       erase state -- FwBootMeta and Bank A header are the only populated
        fields).
 
   After this runs, SblBankSelect_Choose on next boot will:
@@ -35,12 +35,12 @@
   fallback path (SBL should then pick Bank B if it exists, else Golden).
 
 .PARAMETER ImageSize
-  Optional. Bank A image size in bytes. Default 0 — informational only;
+  Optional. Bank A image size in bytes. Default 0 -- informational only;
   the SBL chooser does not CRC-verify, so a placeholder value is fine
   for boot-time correctness.
 
 .PARAMETER ImageCrc
-  Optional. Bank A image CRC32. Default 0 — same reasoning as ImageSize.
+  Optional. Bank A image CRC32. Default 0 -- same reasoning as ImageSize.
 
 .PARAMETER Version
   Optional. 32-byte (null-terminated) version string. Default "seed".
@@ -71,7 +71,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LpDir     = Split-Path -Parent $ScriptDir
 
-# ─── Build the 256-byte seed block ──────────────────────────────────────
+# --- Build the 256-byte seed block --------------------------------------
 $seed = New-Object byte[] 256
 
 # FwBootMeta at offset 0 (128 bytes)
@@ -105,17 +105,17 @@ $hdrBase = 0x80
 [System.BitConverter]::GetBytes([uint32]1).CopyTo(            $seed, $hdrBase + 16)
 [System.BitConverter]::GetBytes([uint32]1).CopyTo(            $seed, $hdrBase + 20)
 
-# version[32] — null-terminated string, null-padded
+# version[32] -- null-terminated string, null-padded
 $verBytes = [System.Text.Encoding]::ASCII.GetBytes($Version)
 $verLen   = [Math]::Min($verBytes.Length, 31)  # leave room for null
 for ($i = 0; $i -lt $verLen; $i++) { $seed[$hdrBase + 24 + $i] = $verBytes[$i] }
 $seed[$hdrBase + 24 + $verLen] = 0  # null terminator
-# Rest of version[32] stays 0 (initialized as such — note: not 0xFF)
+# Rest of version[32] stays 0 (initialized as such -- note: not 0xFF)
 
 # reserved[80] @ +56 = 0xFF
 for ($i = 56; $i -lt 128; $i++) { $seed[$hdrBase + $i] = 0xFF }
 
-# ─── Write to temp file ────────────────────────────────────────────────
+# --- Write to temp file ------------------------------------------------
 $tmpDir  = Join-Path $env:TEMP "constellation-f2c"
 if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir | Out-Null }
 $tmpFile = Join-Path $tmpDir "seed_meta_block.bin"
@@ -133,7 +133,7 @@ Write-Host "  OSPI offset: 0x300000"
 Write-Host "  Temp file:   $tmpFile"
 Write-Host ""
 
-# ─── Probe to ccxml mapping ────────────────────────────────────────────
+# --- Probe to ccxml mapping --------------------------------------------
 $ccxmlMap = @{
     'A' = "$LpDir\AM2434_LP_A.ccxml"     # STORAGE  S24L0417
     'N' = "$LpDir\AM2434_LP_NOVA.ccxml"  # CONTROLLER S24L0707
@@ -146,21 +146,23 @@ if (-not (Test-Path $ccxml)) {
     exit 1
 }
 
-# ─── xdsdfu single-probe check (invariant #7) ──────────────────────────
+# --- xdsdfu single-probe check (invariant #7) --------------------------
 $xdsdfu = "C:\ti\ccs2050\ccs\ccs_base\common\uscif\xds110\xdsdfu.exe"
 if (Test-Path $xdsdfu) {
-    $present = & $xdsdfu -e 2>&1 | Select-String 'Serial:\s+(\S+)' | ForEach-Object {
+    $present = @(& $xdsdfu -e 2>&1 | Select-String 'Serial(?: Num)?:\s*(\S+)' | ForEach-Object {
         $_.Matches[0].Groups[1].Value
-    }
+    })
     if ($present.Count -gt 1) {
         Write-Host "[ERROR] Multiple XDS110 probes attached. Unplug all but the target." -ForegroundColor Red
         Write-Host "        Present: $($present -join ', ')" -ForegroundColor Yellow
         exit 1
     }
-    Write-Host "  Single probe enumerated: $($present[0])" -ForegroundColor Green
+    if ($present.Count -eq 1) {
+        Write-Host "  Single probe enumerated: $($present[0])" -ForegroundColor Green
+    }
 }
 
-# ─── Drive uniflash_run.js ─────────────────────────────────────────────
+# --- Drive uniflash_run.js ---------------------------------------------
 $env:LP_CCXML        = $ccxml
 $env:UNIFLASH_FILE   = $tmpFile -replace '\\', '/'   # DSS Java wants forward slashes
 $env:UNIFLASH_OFFSET = "0x300000"
@@ -182,7 +184,7 @@ if ($dssExit -eq 0) {
     Write-Host "=== Seed metadata written ===" -ForegroundColor Green
     Write-Host "Next boot trace should show: [SBL] bank=A seq=1 off=0x080000 boots=2 strikes=2 reason=0"
     if (-not $Valid) {
-        Write-Host "  (NEGATIVE TEST — valid=0, so SBL should reject Bank A and fall back to Bank B if it exists, else Golden)" -ForegroundColor Yellow
+        Write-Host "  (NEGATIVE TEST -- valid=0, so SBL should reject Bank A and fall back to Bank B if it exists, else Golden)" -ForegroundColor Yellow
     }
 } else {
     Write-Host ""

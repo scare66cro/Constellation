@@ -1,11 +1,11 @@
-<#
+﻿<#
 .SYNOPSIS
   JTAG-only orchestration for F2c Session 2: back up stock SBL, flash
   sbl_chooser, write seed metadata, optionally invalidate Bank A for
   the negative test.
 
 .DESCRIPTION
-  Pure JTAG workflow — no DIP switches, no UART boot mode, no USB
+  Pure JTAG workflow -- no DIP switches, no UART boot mode, no USB
   cycling. Uses the existing flasher_uart + uniflash_run.js
   infrastructure that Flash-LP.ps1 already relies on.
 
@@ -20,12 +20,12 @@
     4. Write seed FwBootMeta + Bank A header at OSPI 0x300000
        Skip with -SkipSeed if you're flashing a fresh SBL without
        perturbing existing metadata.
-    5. (Optional) -InvalidateBankA — re-write seed with valid=0 to
+    5. (Optional) -InvalidateBankA -- re-write seed with valid=0 to
        trigger the negative-test fallback path
 
   When done, prompt the user to power-cycle the LP and connect to UART0
   to observe the boot trace. Doesn't auto-reset because the F2c chooser
-  is what we're TESTING — a clean cold boot from OSPI is the only
+  is what we're TESTING -- a clean cold boot from OSPI is the only
   meaningful verification.
 
 .PARAMETER Probe
@@ -91,7 +91,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LpDir     = Split-Path -Parent $ScriptDir
 
-# ─── Probe mapping (matches Flash-LP.ps1) ──────────────────────────────
+# --- Probe mapping (matches Flash-LP.ps1) ------------------------------
 $probeMap = @{
     'A' = @{ Ccxml = "$LpDir\AM2434_LP_A.ccxml";    Serial = 'S24L0417'; Com = 'COM5'; Role = 'STORAGE'    }
     'N' = @{ Ccxml = "$LpDir\AM2434_LP_NOVA.ccxml"; Serial = 'S24L0707'; Com = 'COM9'; Role = 'CONTROLLER' }
@@ -102,16 +102,16 @@ $probeCfg = $probeMap[$Probe]
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  F2c Session 2 — SBL Chooser JTAG-flash" -ForegroundColor Cyan
+Write-Host "  F2c Session 2 -- SBL Chooser JTAG-flash" -ForegroundColor Cyan
 Write-Host "  Probe $Probe  ($($probeCfg.Serial), $($probeCfg.Role) on $($probeCfg.Com))" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── Step 1: Single-probe check ────────────────────────────────────────
+# --- Step 1: Single-probe check ----------------------------------------
 Write-Host "[step 1] xdsdfu single-probe check (invariant #7)..." -ForegroundColor Yellow
 $xdsdfu = "C:\ti\ccs2050\ccs\ccs_base\common\uscif\xds110\xdsdfu.exe"
 if (-not (Test-Path $xdsdfu)) {
-    throw "xdsdfu.exe not found at $xdsdfu — install CCS or update path."
+    throw "xdsdfu.exe not found at $xdsdfu -- install CCS or update path."
 }
 $present = @(& $xdsdfu -e 2>&1 | Select-String 'Serial(?: Num)?:\s*(\S+)' |
              ForEach-Object { $_.Matches[0].Groups[1].Value })
@@ -121,9 +121,9 @@ if ($present.Count -ne 1) {
 if ($present[0] -ne $probeCfg.Serial) {
     throw "Only probe enumerated is '$($present[0])', not target '$($probeCfg.Serial)'. DSS would flash the wrong board."
 }
-Write-Host "  OK — $($probeCfg.Serial) is the sole enumerated XDS110" -ForegroundColor Green
+Write-Host "  OK -- $($probeCfg.Serial) is the sole enumerated XDS110" -ForegroundColor Green
 
-# ─── Step 2: Backup stock SBL ──────────────────────────────────────────
+# --- Step 2: Backup stock SBL ------------------------------------------
 if ($SkipBackup) {
     Write-Host ""
     Write-Host "[step 2] SKIPPED (-SkipBackup)" -ForegroundColor DarkGray
@@ -155,7 +155,7 @@ if ($SkipBackup) {
     Write-Host "  Recovery: re-flash with .\Flash-SblChooser.ps1 -Probe $Probe -SblImagePath `"$backupFile`" -SkipBackup -SkipSeed" -ForegroundColor DarkGray
 }
 
-# ─── Step 3: Flash sbl_chooser ─────────────────────────────────────────
+# --- Step 3: Flash sbl_chooser -----------------------------------------
 if ($SkipSblFlash) {
     Write-Host ""
     Write-Host "[step 3] SKIPPED (-SkipSblFlash)" -ForegroundColor DarkGray
@@ -185,14 +185,14 @@ if ($SkipSblFlash) {
     Write-Host "  SBL chooser written to OSPI 0x000000" -ForegroundColor Green
 }
 
-# ─── Step 4: Seed metadata ─────────────────────────────────────────────
+# --- Step 4: Seed metadata ---------------------------------------------
 if ($SkipSeed) {
     Write-Host ""
-    Write-Host "[step 4] SKIPPED (-SkipSeed) — board will boot in LEGACY mode (chooser unconditionally boots 0x080000)" -ForegroundColor DarkGray
+    Write-Host "[step 4] SKIPPED (-SkipSeed) -- board will boot in LEGACY mode (chooser unconditionally boots 0x080000)" -ForegroundColor DarkGray
 } else {
     Write-Host ""
     $seedMode = if ($InvalidateBankA) { "INVALIDATE Bank A (negative test)" } else { "seed Bank A valid=1" }
-    Write-Host "[step 4] Write seed FwBootMeta + Bank A header — $seedMode" -ForegroundColor Yellow
+    Write-Host "[step 4] Write seed FwBootMeta + Bank A header -- $seedMode" -ForegroundColor Yellow
 
     $seedArgs = @{ Probe = $Probe; Valid = (-not $InvalidateBankA) }
     & "$ScriptDir\Write-SeedMetaBlock.ps1" @seedArgs
@@ -201,7 +201,7 @@ if ($SkipSeed) {
     }
 }
 
-# ─── Done — prompt user for verification ───────────────────────────────
+# --- Done -- prompt user for verification -------------------------------
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "  F2c Session 2 JTAG steps complete." -ForegroundColor Green
@@ -220,7 +220,7 @@ Write-Host ""
 if ($InvalidateBankA) {
     Write-Host "Expected trace (negative test, valid=0 seed):" -ForegroundColor Yellow
     Write-Host "  [SBL] bank=GOLDEN off=0xC00000 ..." -ForegroundColor Gray
-    Write-Host "  (if no Golden image exists, SBL will spin in FATAL — that's the failure mode without Golden write)" -ForegroundColor DarkYellow
+    Write-Host "  (if no Golden image exists, SBL will spin in FATAL -- that's the failure mode without Golden write)" -ForegroundColor DarkYellow
     Write-Host ""
     Write-Host "Recovery: .\Flash-SblChooser.ps1 -Probe $Probe -SkipBackup -SkipSblFlash" -ForegroundColor Cyan
     Write-Host "  (re-runs step 4 with valid=1, restoring the seed)" -ForegroundColor DarkGray
