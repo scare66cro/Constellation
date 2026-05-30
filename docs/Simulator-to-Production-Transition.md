@@ -157,9 +157,11 @@ These are **identical** in dev and prod:
 - `dev-orbit-probe` / `DEV_ORBIT_PROBE` env â€” bridge does **not**
   populate `dataCache.getOrbitBoards()` from local code. Real boards do.
 - `.arm-settings-bank-{a,b}.json` â€” replaced by OSPI banks.
-- `QEMU_BUILD` / `am2434_qemu_r5f0.ld` â€” the LP firmware now targets
-  real silicon; the QEMU machine model in `qemu-constellation/` is a
-  separate research project, not part of the dev workflow.
+- `QEMU_BUILD` / `am2434_qemu_r5f0.ld` â€” the LP firmware targets real
+  silicon. The QEMU machine model that once lived in
+  `qemu-constellation/` is **fully retired** (deleted 2026-05-30,
+  commit `fd30841`). The directory was renamed to `rpi5/` and now
+  holds production rpi5 deployment assets only.
 - Bridge-side Modbus TCP polling of orbits (`syncEquipOutputsViaModbus`,
   `syncIoConfigToOrbit`). The CONTROLLER LP polls orbits directly.
 - Per-page `.arm-settings-bank-*.json` shims in `armSimulator`.

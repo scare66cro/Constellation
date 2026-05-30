@@ -123,7 +123,7 @@ F:\Constellation\.venv\Scripts\python.exe `
 # Set SW4 back to OSPI: switches 2 and 6 ON. Power cycle.
 ```
 
-There is also [`qemu-constellation/flash-lp.sh`](../qemu-constellation/flash-lp.sh)
+There is also [`rpi5/flash-lp.sh`](../rpi5/flash-lp.sh)
 to reflash the CONTROLLER LP from the rpi5 over `/dev/ttyAMA0` if the
 JTAG path is unavailable.
 

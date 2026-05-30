@@ -223,7 +223,7 @@ investigation). The customer OTA flow becomes:
    plumbing. Bridge verifies the signed mcelf using the same X.509 cert
    chain that ROM bootloader checks.
 2. **Bridge → LP.** Bridge runs an evolution of
-   [`qemu-constellation/flash-lp.sh`](../qemu-constellation/flash-lp.sh):
+   [`rpi5/flash-lp.sh`](../rpi5/flash-lp.sh):
    stops `agristar-bridge` to free `/dev/ttyAMA0` (or, in the dev rig,
    uses DSS over USB), runs `uart_uniflash.py` with the prebuilt
    `sbl_uart_uniflash.release.hs_fs.tiimage` flash-writer + the new

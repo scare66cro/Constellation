@@ -115,12 +115,12 @@ constants in OSPI, deploy scripts) need extra care.
 | [sensor-injector/src/index.ts](../sensor-injector/src/index.ts) | `ORBIT_HOST` default | `'10.1.2.200'` | `'10.47.27.200'` |
 | [sensor-injector/README.md](../sensor-injector/README.md) | example | `10.1.2.200` | `10.47.27.200` |
 
-### 3.4 rpi5 deploy / probe scripts (`qemu-constellation/`)
+### 3.4 rpi5 deploy / probe scripts (`rpi5/`)
 
 Bulk update — every `gellert@10.1.2.108` → `gellert@10.47.27.20`. Use:
 
 ```powershell
-Get-ChildItem F:\Constellation\qemu-constellation\*.sh |
+Get-ChildItem F:\Constellation\rpi5\*.sh |
   ForEach-Object {
     (Get-Content $_) -replace 'gellert@10\.1\.2\.108', 'gellert@10.47.27.20' |
       Set-Content $_

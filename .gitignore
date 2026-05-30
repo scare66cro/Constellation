@@ -21,7 +21,7 @@ out/
 # Firmware build artifacts
 Nova_Firmware/build/
 orbit-simulator/build/
-qemu-constellation/build/
+rpi5/build/
 **/*.elf
 **/*.bin
 **/*.hex

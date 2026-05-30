@@ -1,0 +1,5 @@
+nova_ospi.bin
+
+# RPi 5 QEMU images (~13 GB each — bring your own copy under images/)
+images/*.qcow2
+images/*.img
