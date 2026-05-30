@@ -27,9 +27,11 @@ qemu-constellation/build/
 **/*.hex
 **/*.map
 **/*.o
+**/*.obj
 **/*.d
 **/*.a
 **/*.lst
+**/*.lnkxml
 
 # TI ARM compiler / SDK build outputs (lp_am2434 + watchdog)
 **/*.mcelf
