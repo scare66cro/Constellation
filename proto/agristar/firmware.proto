@@ -122,6 +122,15 @@ message FwBankInfo {
                                   // that don't emit this field → bridge treats
                                   // "unknown role" and falls through to relying on
                                   // LP-side FwBeginUpdate.expected_role gate.
+  uint32   watchdog_strikes = 12;  // Consecutive failed-boot strike count read
+                                   // from FwBootMeta. Added 2026-05-30 for F2c
+                                   // Session 1 diagnostics. The watchdog client
+                                   // clears this once the boot has sustained all
+                                   // required alive bits for 30 s; the (future)
+                                   // F2c SBL chooser uses ≥3 to fall back to the
+                                   // previous bank. MUST be force-encoded by LP
+                                   // because 0 is the healthy-boot value and
+                                   // proto3 zero-suppression would otherwise hide it.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

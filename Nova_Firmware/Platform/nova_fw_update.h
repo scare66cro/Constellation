@@ -1,12 +1,25 @@
 /*
  * nova_fw_update.h — Firmware update manager for Nova (AM2434)
  *
- * Dual-bank OSPI flash layout:
- *   0x000000 - 0x00FFFF  Boot header + bank metadata (64 KB)
- *   0x010000 - 0x1FFFFF  Bank A firmware image (~2 MB)
- *   0x200000 - 0x3FFFFF  Bank B firmware image (~2 MB)
- *   0x400000 - 0x5FFFFF  Golden recovery image (~2 MB, write-once)
- *   0x600000 - 0x7FFFFF  Settings vault (~2 MB)
+ * Current OSPI flash layout (W25Q64JV / W25Q128JV, fw 0.A.208+):
+ *   0x000000 - 0x05FFFF  TI stock sbl_ospi (~311 KB) — F2c custom
+ *                        sbl_chooser will replace this
+ *   0x080000 - 0x1FFFFF  Bank A firmware image (mcelf.hs_fs)
+ *   0x300000 - 0x33FFFF  FwBootMeta + Bank A/B FwBankHeader (relocated
+ *                        from 0x060000 in 0.A.208 to escape the SBL
+ *                        footprint — see write_meta_block_atomic
+ *                        comments for the 7-layer SBL-wipe saga)
+ *   0x600000 - 0x61FFFF  lp_device_config ping-pong banks
+ *   0x620000 - 0x7FFFFF  LpSettings vault (future; MSRAM today)
+ *   0x900000 - 0xA7FFFF  Bank B firmware image (mcelf.hs_fs) — relocated
+ *                        from 0x200000 in 0.A.102 to force 4-byte
+ *                        addressing (variant-D probe)
+ *   0xC00000 - 0xD7FFFF  Golden recovery image (factory-flashed,
+ *                        write-once) — F2c fallback target
+ *
+ * The actual #define values below are authoritative; the layout
+ * comment above is a quick-reference summary. Full design + rationale
+ * in docs/lp-am2434-f2c-sbl-chooser-design.md §2.
  *
  * Copyright (c) 2026 Agristar
  * SPDX-License-Identifier: MIT

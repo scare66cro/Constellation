@@ -36,6 +36,7 @@
 #include <lwip/netif.h>
 
 #include "lp_watchdog_ipc.h"
+#include "nova_fw_update.h"  /* NovaFwUpdate_ConfirmBoot — F2c Session 1 */
 
 /* ─── Producer ping store ──────────────────────────────────────────
  * Per-bit "last time this subsystem reported alive" in ms (FreeRTOS
@@ -66,7 +67,24 @@ void LpWatchdog_Ping(uint32_t alive_bit)
 
 #define LP_WD_HEARTBEAT_PERIOD_MS  1000u
 
+/* F2c Session 1 — OTA healthy-boot confirmation.
+ *
+ * Once all required alive bits hold continuously for HEALTHY_THRESHOLD_MS,
+ * we clear the OSPI watchdog_strikes counter via NovaFwUpdate_ConfirmBoot().
+ * The (future) F2c stage-2 SBL chooser uses that counter to decide whether
+ * to fall back to the previous bank after 3 consecutive failed boots.
+ *
+ * Idempotent: NovaFwUpdate_ConfirmBoot itself returns early if strikes are
+ * already 0, AND we set s_ota_confirmed once per boot so we don't repeat
+ * the OSPI read inside ConfirmBoot every heartbeat after the first hit.
+ *
+ * Threshold per docs/lp-am2434-f2c-sbl-chooser-design.md §4: 30 s of
+ * sustained all-alive. Any single-tick dip resets the timer. */
+#define LP_WD_HEALTHY_THRESHOLD_MS  30000u
+
 static uint32_t s_counter = 0u;
+static uint32_t s_healthy_since_ms = 0u;   /* 0 = not currently sustained */
+static bool     s_ota_confirmed    = false;
 
 static uint32_t recompute_alive_bits(uint32_t now_ms)
 {
@@ -123,6 +141,25 @@ static void lp_watchdog_heartbeat_task(void *pvParameters)
         LP_WD_SHM_ADDR->alive_bits     = alive;
         LP_WD_SHM_ADDR->main_uptime_ms = now_ms;
         CacheP_wb((void *)LP_WD_SHM_ADDR, sizeof(LpWatchdogShm), CacheP_TYPE_ALL);
+
+        /* F2c Session 1 — OTA healthy confirmation. Track sustained
+         * all-required-bits-alive and clear OSPI strikes once the
+         * threshold is hit. Runs at most once per boot. */
+        if (!s_ota_confirmed) {
+            const uint32_t required = LP_WD_REQUIRED_DEFAULT;
+            if ((alive & required) == required) {
+                if (s_healthy_since_ms == 0u) {
+                    s_healthy_since_ms = now_ms;
+                } else if ((now_ms - s_healthy_since_ms) >= LP_WD_HEALTHY_THRESHOLD_MS) {
+                    NovaFwUpdate_ConfirmBoot();
+                    s_ota_confirmed = true;
+                    DebugP_log("[WD-CLIENT] OTA healthy after %u ms — strikes cleared\r\n",
+                               (unsigned)(now_ms - s_healthy_since_ms));
+                }
+            } else if (s_healthy_since_ms != 0u) {
+                s_healthy_since_ms = 0u;  /* any dip restarts the clock */
+            }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(LP_WD_HEARTBEAT_PERIOD_MS));
     }

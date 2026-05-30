@@ -295,6 +295,8 @@ static int pb_skip(pb_iter_t *it, uint32_t wt)
  *   9  uint32   boot_count
  *  10  uint32   boot_reason
  *  11  uint32   current_role       (OrbitRole; force-encoded since 0=CONTROLLER is valid)
+ *  12  uint32   watchdog_strikes   (F2c diagnostic; force-encoded since 0 is the
+ *                                   healthy-boot value)
  *
  * Phase 1B: read FwBankHeader / FwBootMeta from OSPI via the Platform
  * NovaFwUpdate API (Init populates a cached copy at boot, getters are
@@ -335,6 +337,12 @@ static uint16_t encode_bank_info(uint8_t *dst, uint16_t cap)
      * BEGIN. Force-encoded — 0 (CONTROLLER) is a valid role and proto3
      * zero-suppression would otherwise hide it. */
     n += pb_uint32_force(dst + n, 11, (uint32_t)LpDeviceConfig_Get()->role);
+    /* F2c Session 1 (2026-05-30): expose the watchdog strike count for
+     * UI diagnostics. 0 = healthy; ≥3 means the (future) SBL chooser
+     * will fall back to the previous bank on the next boot. Force-
+     * encoded because 0 is the desired-state value and proto3 zero-
+     * suppression would otherwise hide it. */
+    n += pb_uint32_force(dst + n, 12, meta.watchdog_strikes);
     (void)cap;
     return n;
 }

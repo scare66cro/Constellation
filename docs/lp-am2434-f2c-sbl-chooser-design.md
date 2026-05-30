@@ -1,94 +1,128 @@
 # LP-AM2434 — Custom Stage-2 SBL + A/B Bank Rollback (F2c)
 
-> **Status:** design + partial scaffold (May 5 2026, fw 0.A.59 baseline).
+> **Status:** Session 1 (Pi5/app-side wiring) COMPLETE 2026-05-30 at
+> fw 0.A.208. Session 2 (custom `sbl_chooser` fork + JTAG-flash to
+> `0x000000`) is the next bench session. Session 3 is unblocked.
 >
-> **Goal:** unattended OTA recovery. A bad Bank-B image can't permanently
-> brick the panel — after three failed boots the SBL falls back to
-> Bank A (or Golden if both are broken). Combined with the dual-core
-> watchdog (F3, fw 0.A.59), this gives true field-deployable updates.
+> **Goal:** unattended OTA recovery. A bad Bank-B image cannot
+> permanently brick a customer panel — after three failed boots the
+> SBL falls back to Bank A (or Golden if both are broken). Combined
+> with the dual-core watchdog (F3, fw 0.A.59) and Phase 4 OTA
+> (validated end-to-end 2026-05-29 on the 4-board fleet at 0.A.208),
+> this gives true field-deployable updates with no JTAG service trip.
 
 ---
 
-## 1. Boot stack today vs after F2c
+## 1. Why this matters now
 
-| Today | After F2c |
+Phase 4 OTA is **validated** — yesterday's run reached
+`overallState: "done"` on all 4 boards (.1 CONTROLLER self-update +
+.2/.3/.4 orbits), and `.1 active=bankB banks=AB` proves the
+controller-self-update Activate completed cleanly. But there is still
+**one hard-brick path**: if power fails between the SBL erase of
+Bank A's old image and the new image landing, the LP boots into a
+partially-written bank with no rollback. Today's recovery is a JTAG
+trip.
+
+F2c closes that path. After F2c:
+- Power loss mid-OTA → next boot detects the failed bank, falls back
+- Three consecutive failed boots of a newly-activated image → SBL
+  auto-rolls to the previous bank
+- Both A and B unusable → SBL boots the factory Golden image
+
+No JTAG required. This is the threshold between "bench-validated OTA"
+and "field-deployable OTA."
+
+---
+
+## 2. Boot stack today vs after F2c
+
+| Today (0.A.208) | After F2c |
 |---|---|
-| ROM (stage 1) → TI stock `sbl_ospi` (stage 2, hardloads `0x80000`) → Nova app | ROM → **our forked `sbl_chooser`** (stage 2, reads bank header → picks A/B/Golden by sequence + strikes) → Nova app |
+| ROM (stage 1) → TI stock `sbl_ospi` (stage 2, hardloads `0x080000`) → Nova app | ROM → **forked `sbl_chooser`** (stage 2, reads FwBankHeader → picks A/B/Golden by sequence + strikes) → Nova app |
 
-The "stage 2" we're replacing is TI's `sbl_ospi` example — a NoRTOS R5FSS0_0 image (~250 KB signed) that lives at flash offset `0x000000` and loads an MCELF from a hard-coded offset (`0x80000` today). We fork it once into
-`Nova_Firmware/lp_am2434/sbl_chooser/` and never touch it again.
-
-**Important:** the proto layout in `nova_fw_update.h` claimed "header at
-`0x000000`" — that's WRONG. The ROM hard-codes flash `0x000000` as the
-SBL load location; that's where our SBL itself lives. The bank-metadata
-region must move.
+The "stage 2" we're replacing is TI's `sbl_ospi` example — a NoRTOS
+R5FSS0_0 image (~311 KB signed) that lives at flash offset `0x000000`
+and loads an MCELF from a hard-coded offset (`0x080000`). We fork it
+once into `Nova_Firmware/lp_am2434/sbl_chooser/` and never touch it
+again.
 
 ---
 
-## 2. Canonical OSPI map (W25Q64JV, 8 MB)
+## 3. Current OSPI map (W25Q128JV, 16 MB — fw 0.A.208 authoritative)
+
+The "canonical map" in the original 0.A.59 version of this doc is
+**stale**; what actually shipped through Phase-C bringup, Phase 1
+OTA, the 0.A.102 4-byte addressing escape, and yesterday's 0.A.208
+SBL-preserve relocation is the table below. The authoritative values
+live as `FW_*` macros in `Nova_Firmware/Platform/nova_fw_update.h`;
+this table is the quick-reference summary.
 
 | Offset | Size | Owner | Notes |
 |---|---|---|---|
-| `0x000000` – `0x05FFFF` | 384 KB | **`sbl_chooser` (custom stage-2 SBL)** | Signed `tiboot3.bin`. ROM hard-loads from here. |
-| `0x060000` – `0x06FFFF` | 64 KB | **`FwBootMeta` + bank A header** | One sector for `FwBootMeta`, the rest is bank A's `FwBankHeader`. Edited every save → ping-pong with bank B header to avoid wear. |
-| `0x070000` – `0x07FFFF` | 64 KB | **`FwBankHeader` for Bank B** | Separate sector so updating one bank's metadata doesn't erase the other's. |
-| `0x080000` – `0x1FFFFF` | 1.5 MB | **Bank A app image** | mcelf.hs_fs. Same offset TI's stock SBL hardloads today → first-flash migration is just "flash our SBL to 0x000000" + write bank A header. The app at 0x80000 stays put. |
-| `0x200000` – `0x37FFFF` | 1.5 MB | **Bank B app image** | mcelf.hs_fs. Inactive bank target for OTA. |
-| `0x380000` – `0x4FFFFF` | 1.5 MB | **Golden image** | Manufacturing-flashed read-mostly. SBL falls back here if both A and B fail validation. Phase 4 of OTA plan. |
-| `0x500000` – `0x5FFFFF` | 1 MB | **RESERVED** | Future log buffers, asset files, larger Golden. |
-| `0x600000` – `0x61FFFF` | 128 KB | `lp_device_config` ping-pong banks | **already migrated here** (May 2026). Per-board role/IP/MAC. |
-| `0x620000` – `0x7FFFFF` | ~2 MB | `LpSettings` vault (future) | Currently MSRAM-only. When OSPI persistence lands, lives here. |
+| `0x000000` – `0x05FFFF` | 384 KB | TI stock `sbl_ospi` (today) → **custom `sbl_chooser`** (after F2c) | TI's stock is ~311 KB; tail extends to ~`0x4BE2D`. F2c chooser fits in the same envelope. |
+| `0x080000` – `0x1FFFFF` | 1.5 MB | **Bank A app image** (mcelf.hs_fs) | Same offset TI's stock SBL hardloads → migration-free first flash of F2c (existing app stays where it is). |
+| `0x180000` – `0x1FFFFF` | 512 KB | Watchdog R5FSS1_0 mcelf (overlaps end of Bank A footprint by design) | App images stay well under 1 MB so no real conflict. |
+| `0x300000` – `0x33FFFF` | 256 KB | **FwBootMeta + Bank A FwBankHeader + Bank B FwBankHeader** | Relocated 2026-05-29 in 0.A.208 from `0x060000` to escape the SBL footprint. The old location wiped the SBL tail on every metadata update — see [`memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md`](../memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md) for the 7-layer saga. |
+| `0x340000` – `0x4FFFFF` | 1.75 MB | Reserved (post-relocation slack) | Future per-bank manifests, signed dependency graphs, etc. |
+| `0x500000` – `0x5FFFFF` | 1 MB | Reserved | Future log buffers / asset files. |
+| `0x600000` – `0x61FFFF` | 128 KB | `lp_device_config` ping-pong banks | Per-board role/IP/MAC. Migrated here May 2026. |
+| `0x620000` – `0x7FFFFF` | ~2 MB | `LpSettings` vault (future) | Currently MSRAM-only. |
+| `0x900000` – `0xA7FFFF` | 1.5 MB | **Bank B app image** (mcelf.hs_fs) | Relocated 2026-05-15 in 0.A.102 from `0x200000` to force 4-byte addressing (variant-D probe). `0x200000` failed 0.A.78-82, `0x400000` failed 0.A.83+; both were inside the 16 MB 3-byte address region. `0x900000` is well into 4-byte-only territory. |
+| `0xC00000` – `0xD7FFFF` | 1.5 MB | **Golden recovery image** | Manufacturing-flashed, read-mostly. SBL falls back here if both A and B fail validation. |
 
-**Why these specific sizes:**
+### Why these offsets — historical:
 
-- 384 KB SBL: TI's stock `sbl_ospi_multi_partition` is ~256 KB unsigned,
-  ~340 KB after HS_FS signing. Round up to 6 sectors (96 × 4 KB) for
-  safety margin.
-- 64 KB header sectors: smallest unit is one 4 KB sector but we want
-  per-bank isolation — updating bank B's CRC must NEVER erase bank A's
-  header. Two separate 64 KB regions keep them on independent erase
-  blocks. (The remaining 60 KB per region is reserved for future
-  per-bank metadata: signed manifest, dependency graph, etc.)
-- 1.5 MB per bank: current `nova_lp.release.mcelf.hs_fs` is 525 KB
-  (3× margin). Future ethernet+USB+TLS could push it past 1 MB. Plenty
-  of room.
-- The `0x080000` Bank A offset is the **single biggest design decision**:
-  by matching it to TI's stock SBL load offset, we get a **migration-
-  free first flash**. Existing boards' app stays where it is; only the
-  SBL gets replaced. This eliminates "every existing board needs a
-  full re-flash" risk.
+- **`0x300000` metadata block (0.A.208):** the original
+  `0x060000` location landed inside the 256-KB erase block that
+  contains TI's stock SBL tail. `write_meta_block_atomic` erases that
+  block on every metadata update, wiping the SBL tail to 0xFF; next
+  warm-reset → ROM rejects the truncated SBL and falls into BOOT ROM.
+  Nova OFFLINE forever. New location at `0x300000-0x33FFFF` overlaps
+  nothing and lives in the reserved region.
+- **`0x900000` Bank B (0.A.102):** OSPI addressing mode tripwire.
+  AM2434's OSPI controller has separate code paths for 3-byte
+  (`< 0x1000000`) and 4-byte (`>= 0x1000000`) addressing on some
+  Cypress S25HL variants. The 3-byte path silently dropped page
+  writes past sub-PP boundaries (see invariant #11). `0x900000` is
+  beyond the 8 MB mark and forces 4-byte mode unconditionally.
+- **`0x080000` Bank A stays put:** matching TI's stock SBL hardload
+  offset means F2c first-flash needs no app re-flash. Boards already
+  in the field get an SBL replacement only; their existing app at
+  `0x080000` boots normally with the new chooser.
 
 ---
 
-## 3. Bank selection algorithm (executed by `sbl_chooser`)
+## 4. Bank selection algorithm (executed by `sbl_chooser`)
+
+Same as the original design; the algorithm is unchanged from 0.A.59:
 
 ```
-1. Read FwBootMeta from 0x060000.
-2. Read FwBankHeader[A] from 0x060000+0x80, FwBankHeader[B] from 0x070000.
-3. Increment boot_count.
-4. Increment watchdog_strikes (cleared by app once "healthy").
-5. Build candidates list, sorted by (sequence DESC, valid DESC):
-     A if A.magic OK AND A.valid AND A.crc==stored
-     B if B.magic OK AND B.valid AND B.crc==stored
+1. Read FwBootMeta from FW_HEADER_OFFSET (0x300000).
+2. Read FwBankHeader[A] from FW_HEADER_OFFSET + FW_BANK_A_HDR_OFFSET (+0x80).
+3. Read FwBankHeader[B] from FW_BANK_B_HDR_SECTOR (0x310000).
+4. Increment boot_count.
+5. Increment watchdog_strikes (cleared by app once "healthy" — see §5).
+6. Build candidates list, sorted by (sequence DESC, valid DESC):
+     A if A.magic == FW_BANK_MAGIC AND A.valid AND A.crc matches
+     B if B.magic == FW_BANK_MAGIC AND B.valid AND B.crc matches
      GOLDEN unconditionally
-6. For each candidate:
+7. For each candidate:
      If watchdog_strikes >= 3 AND this is the highest-sequence bank:
-       skip — assume previous boot bricked and we shouldn't try again.
+       skip — previous boot bricked, don't try again.
        Log boot_reason = FALLBACK.
-     Try to parse the mcelf at this candidate's offset.
-     On success: jump to it (and the app clears strikes within 30 s).
+     Try to parse the mcelf at this candidate's bank offset.
+     On success: jump (and the app clears strikes within 30 s via
+     NovaFwUpdate_ConfirmBoot).
      On failure: continue to next candidate.
-7. If no candidate boots: spin in SBL with [SBL] FATAL on UART.
+8. If no candidate boots: spin in SBL with [SBL] FATAL on UART.
 ```
 
-**Strike counting:**
-
-- SBL increments `watchdog_strikes` BEFORE jumping to the chosen bank.
-- App clears strikes via `NovaFwUpdate_ConfirmBoot()` once 30 s of
-  alive criteria hold (see watchdog F3 doc).
-- If the app hangs before 30 s, next boot's SBL sees `strikes=2`.
-  After three such boots, `strikes>=3` triggers fallback to the
-  previous bank (or Golden).
+`Nova_Firmware/Platform/nova_fw_update.c::NovaFwUpdate_BootValidation`
+already implements step 4 + 5 (lines 699-730) and is intended to be
+called from the SBL chooser — the function ports cleanly from FreeRTOS
+to NoRTOS bare metal because it touches only static variables and
+the OSPI driver (which the SBL also uses for boot image read).
 
 **Atomicity of the strike write:** SBL writes `FwBootMeta` BEFORE
 loading the app image. If power fails between strike-write and
@@ -96,140 +130,183 @@ bank-jump, next boot sees the higher count and proceeds normally —
 worst case is one extra strike accounted to a fault that wasn't a
 real hang. Acceptable.
 
-**Why `NovaFwUpdate_BootValidation` already in
-`Platform/nova_fw_update.c` lines 357-396 implements exactly this**
-— we can re-use it 95% as-is. The only changes are: offset constants
-move to `0x060000` for headers, `0x080000` / `0x200000` for banks
-(matching this map).
-
 ---
 
-## 4. Healthy milestone (= "the new image works")
+## 5. Healthy milestone (= "the new image works")
 
-Wired by main core's watchdog heartbeat task. From
-[`docs/lp-am2434-watchdog-design.md`](lp-am2434-watchdog-design.md) §5:
+Wired by the watchdog heartbeat task in
+[`Nova_Firmware/lp_am2434/lp_watchdog_client.c`](../Nova_Firmware/lp_am2434/lp_watchdog_client.c)
+as of 2026-05-30 (Session 1):
 
 | Bit | Source |
 |---|---|
-| ALIVE_MODBUS | orbit Modbus accept-loop heartbeat |
-| ALIVE_SYSTEMSTATUS | tick counter in main.c::data_exchange |
-| ALIVE_LWIP_LINK | netif_default flags |
-| ALIVE_ENGINE_TICK | lp_engine_tick last-ran timestamp |
-| ALIVE_WD_PEER | watchdog core's wd_counter advanced in last 2 s |
+| `LP_WD_ALIVE_MODBUS` | `orbit_modbus_tcp.c` accept-loop ping |
+| `LP_WD_ALIVE_SYSTEMSTATUS` | main.c data_exchange tick |
+| `LP_WD_ALIVE_LWIP_LINK` | `netif_default->flags & NETIF_FLAG_LINK_UP` |
+| `LP_WD_ALIVE_ENGINE_TICK` | `lp_engine_tick()` exit |
+| `LP_WD_ALIVE_WD_PEER` | watchdog core's `wd_counter` advanced in last 2 s |
 
-**Threshold:** all 5 bits must hold for 30 consecutive seconds. Once
-that hits, `NovaFwUpdate_ConfirmBoot()` writes `watchdog_strikes = 0`
-to OSPI. Idempotent — only writes if `strikes != 0`. No flash wear
-on healthy boots.
+**Threshold:** all bits in `LP_WD_REQUIRED_DEFAULT` must hold
+continuously for `LP_WD_HEALTHY_THRESHOLD_MS = 30000` ms. Any single
+tick dip resets the timer. Once 30 s of sustained all-alive elapses,
+`lp_watchdog_heartbeat_task` calls `NovaFwUpdate_ConfirmBoot()` once
+per boot. `ConfirmBoot` is **idempotent** (returns early if strikes
+are already 0) and gated by `s_ota_confirmed` so we don't repeat the
+OSPI read after the first hit — no flash wear on healthy boots.
 
 If the new firmware is broken in a way that prevents reaching healthy
 within 30 s × 3 boots, the SBL chooser falls back automatically.
 
 ---
 
-## 5. Migration plan (existing-board safe)
+## 6. Diagnostic surface (Session 1)
 
-The bench has 3 LP boards already provisioned with TI's stock SBL +
-fw 0.A.x at `0x080000`. The migration to F2c needs to be lossless —
-no required JTAG re-flash dance, no hardware-store trip.
+`FwBankInfo` proto (envelope tag 115) now exposes the F2c state so
+the UI version page can show it without needing JTAG:
 
-Per board, in this order:
-1. **Build & test new app at 0.A.60 (no SBL change yet).** Confirms
-   the new app codepath (which now links `nova_fw_update.c`) doesn't
-   break anything on a stock-SBL system.
-2. **JTAG-flash custom `sbl_chooser` to 0x000000.** This replaces TI's
-   stock SBL. The app at `0x080000` stays put.
-3. **JTAG-write FwBootMeta + bank-A FwBankHeader at 0x060000.** Set
-   sequence=1, magic=NOVA, valid=1, image_size and crc computed from
-   the existing image at `0x080000`. After this, the SBL chooser will
-   boot the existing app on the next reset.
-4. **Reset and verify.** Boot trace shows `[SBL] bank=A seq=1 strikes=1`
-   (the 1 is normal — clears within 30 s when app reports healthy).
-5. **First OTA push then writes Bank B at `0x200000`** with sequence=2.
-   Subsequent updates ping-pong between A and B.
+```proto
+message FwBankInfo {
+  FwBankId active_bank     = 1;
+  string   bank_a_version  = 2;
+  uint32   bank_a_crc      = 3;
+  bool     bank_a_valid    = 4;
+  string   bank_b_version  = 5;
+  uint32   bank_b_crc      = 6;
+  bool     bank_b_valid    = 7;
+  string   golden_version  = 8;
+  uint32   boot_count      = 9;
+  uint32   boot_reason     = 10;
+  uint32   current_role    = 11;  // (Gap 1, 2026-05-20)
+  uint32   watchdog_strikes = 12; // (F2c S1, 2026-05-30) NEW
+}
+```
 
-**Recovery path if `sbl_chooser` itself is broken:** flash TI's stock
-`sbl_ospi` back to `0x000000` via `Flash-LP.ps1 -Probe X -Sbl
-TI-stock` (a new flag). The app at `0x080000` is untouched and boots
-normally without bank metadata.
+The bridge decoder in
+[`constellation-ui/server/src/novaFwUpdateManager.ts`](../constellation-ui/server/src/novaFwUpdateManager.ts)
+unpacks both new fields. Health-row line on the bridge console now
+reads `boots=N, strikes=M` so a quick `journalctl -u agristar-bridge`
+shows the F2c state for any board emitting FwBankInfo.
 
 ---
 
-## 6. What gets implemented when
+## 7. Migration plan (existing-board safe)
 
-### Session 1 (this one) — non-flash-touching pieces
+The bench has 4 LP boards already provisioned with TI's stock SBL +
+fw 0.A.208 at `0x080000`. The migration to F2c needs to be lossless —
+no required JTAG re-flash dance.
 
-- ✅ This design doc.
-- Update `nova_fw_update.h` offsets to match canonical map.
-- Link `Platform/nova_fw_update.c` + `Platform/hal_flash.c` into the
-  LP build. Call `NovaFwUpdate_Init()` after `LpDeviceConfig_Init()`.
-- Wire `NovaFwUpdate_ConfirmBoot()` from the watchdog heartbeat task
-  once 30 s healthy.
-- Add diagnostic CGI / proto fields to expose `FwBootMeta` + both
-  bank headers to the bridge (UI debug only — read-only).
+Per board, in this order:
 
-These are reversible — none of them change what's flashed at any
-specific offset on the board. If the link fails or
-`NovaFwUpdate_ConfirmBoot` misbehaves, just revert the makefile +
-client-side hooks; the OSPI is untouched.
+1. **Already done in 0.A.208:** app at `0x080000` runs the
+   `nova_fw_update.c` codepath (Session 1 just wired the missing
+   ConfirmBoot heartbeat hook). The LP emits the F2c diagnostic
+   field via FwBankInfo. No bench-side regression risk.
+2. **JTAG-flash custom `sbl_chooser` to `0x000000`.** Replaces TI's
+   stock SBL. The app at `0x080000` stays put.
+3. **JTAG-write FwBootMeta + Bank-A FwBankHeader at `0x300000`.**
+   Set sequence=1, magic=NOVA, valid=1, image_size and crc computed
+   from the existing image at `0x080000`. After this, the SBL
+   chooser will boot the existing app on the next reset.
+4. **Reset and verify.** Boot trace shows
+   `[SBL] bank=A seq=1 strikes=1` (the 1 is normal — clears within
+   30 s when the app reports healthy via the heartbeat hook landed
+   in Session 1).
+5. **First OTA push then writes Bank B at `0x900000`** with
+   sequence=2. Subsequent updates ping-pong between A and B.
 
-### Session 2 (next bench session) — `sbl_chooser` fork
+**Recovery path if `sbl_chooser` itself is broken:** flash TI's stock
+`sbl_ospi` back to `0x000000` via the existing `Flash-LP.ps1` path.
+The app at `0x080000` is untouched and boots normally without bank
+metadata.
+
+---
+
+## 8. What's done (Session 1) vs what's next
+
+### ✅ Session 1 — DONE 2026-05-30 (this session)
+
+| Item | Status | Where |
+|---|---|---|
+| Update `FW_*` offsets to current map | ✅ already at 0.A.208 values | `nova_fw_update.h` |
+| Refresh `nova_fw_update.h` docblock | ✅ rewritten to current layout | `nova_fw_update.h` lines 1-27 |
+| Link `nova_fw_update.c` + `hal_flash.c` into LP build | ✅ already linked (0.A.208 ships with both) | confirmed via `.obj` artifacts |
+| Call `NovaFwUpdate_Init()` after `LpDeviceConfig_Init()` | ✅ already at `main.c:2199` | n/a |
+| Wire `NovaFwUpdate_ConfirmBoot()` from watchdog heartbeat after 30 s | ✅ NEW — added to `lp_watchdog_heartbeat_task` | `lp_watchdog_client.c` |
+| Expose `FwBootMeta.watchdog_strikes` to bridge | ✅ NEW — proto field 12, encoder, decoder | `firmware.proto`, `lp_ota_task.c`, `novaFwUpdateManager.ts` |
+
+All Session 1 work is reversible — none of it changes what's flashed
+at any specific OSPI offset. If the heartbeat hook misbehaves, just
+revert `lp_watchdog_client.c`; OSPI is untouched. The diagnostic
+proto field is purely additive (older bridges/firmwares ignore it).
+
+### Session 2 — `sbl_chooser` fork (next bench session)
 
 - Copy TI's `sbl_ospi_multi_partition` example into
   `Nova_Firmware/lp_am2434/sbl_chooser/`.
-- Insert A/B selection logic into its `main.c` (use existing
-  `NovaFwUpdate_BootValidation` from Platform, port to NoRTOS bare
-  metal — no FreeRTOS in the SBL).
-- Build + sign per TI's standard flow → `sbl_chooser.release.tiboot3.bin`.
-- JTAG-flash to `0x000000`. **First on a single bench board only.**
-- Verify boot trace, then verify negative test (corrupt Bank A's
-  CRC manually, confirm fallback to Golden which we'll have written
+- Insert A/B/Golden selection logic into its `main.c`. Port
+  `NovaFwUpdate_BootValidation` from `Nova_Firmware/Platform/` to
+  NoRTOS bare metal (no FreeRTOS in the SBL).
+- Build + sign per TI's standard flow →
+  `sbl_chooser.release.tiboot3.bin`.
+- JTAG-flash to `0x000000` **on a single bench board only**.
+- Verify boot trace, then verify negative test (manually corrupt
+  Bank A's CRC, confirm fallback to Golden which we'll have written
   too).
 
-### Session 3 — bridge OTA push module
+### Session 3 — productionize across the fleet
 
-Phase 5 of `LP-AM2434-OTA-Update-Plan.md`. Not blocked by F2c except
-in the trivial sense that `NovaFwUpdate_Activate` becomes useful only
-once F2c is on the board.
+Once Session 2 has proven the chooser on one board:
+
+- Flash `sbl_chooser` to the other 3 bench boards.
+- Add Bank-B headers (write FwBankHeader for `0x900000` once the
+  next OTA cycles a real image there).
+- Update `Build-Cfu.ps1` to emit the SBL chooser binary alongside the
+  app binary so manufactured boards get both.
+- Document the new flashing pipeline in
+  `docs/firmware-equipment-control.md` and the install runbook.
 
 ---
 
-## 7. Risks + open questions
+## 9. Risks + open questions
 
-1. **Does ROM's HS_FS device-tree care about SBL size?** TI's stock
-   SBL is 256 KB unsigned; we may add ~30 KB for the chooser logic.
-   Need to verify HS_FS x509 cert stays within the device-tree's
-   loadable-region declaration. (Mitigation: signing tool will reject
-   oversized images at flash time — fail-safe.)
+1. **HS_FS device-tree size limit.** TI's stock SBL is 256 KB
+   unsigned; the chooser may add ~30 KB. Need to verify HS_FS x509
+   cert stays within the device-tree's loadable-region declaration.
+   Mitigation: signing tool rejects oversized images at flash time —
+   fail-safe.
 2. **OSPI DAC mode timing during boot.** `lp_device_config.c` already
-   uses indirect read (DAC disabled in syscfg). The SBL chooser does
-   the same — `Flash_read` via OSPI indirect mode for header polling.
-   No DAC changes.
+   uses indirect read (DAC disabled in syscfg per invariant #11);
+   the SBL chooser does the same. No DAC changes; the writes that
+   triggered the 3-day DAC-mode debug saga don't apply to read-only
+   boot-time header polling.
 3. **First-boot strike accounting.** A board fresh from manufacturing
-   has `strikes=0`, `boot_count=0`, no banks — empty OSPI everywhere.
-   SBL must treat this as "JTAG bringup mode" and just try to load
-   from `0x080000` (the legacy/bench flow). Detect via `magic !=
-   NOVA` on both bank headers AND boot_count == 0.
-4. **`CMD_REBOOT_SOC` already verified working** (May 3 entry in
-   `firmware-version-current.md`). OTA Activate calls this; SBL
-   sees the warm reset, picks the new bank.
+   has `strikes=0`, `boot_count=0`, no bank headers — empty OSPI
+   everywhere. SBL must treat this as "JTAG bringup mode" and just
+   try to load from `0x080000` (the legacy/bench flow). Detect via
+   `magic != FW_BANK_MAGIC` on both bank headers AND
+   `boot_count == 0`.
+4. **`CMD_REBOOT_SOC` verified working** — used by OTA Activate
+   today; SBL sees the warm reset, picks the new bank.
 5. **Can we test without bricking?** Yes — JTAG `xdsdfu` can rewrite
    `0x000000` even after a bad SBL flash, because R5F can be loaded
-   from CCS into RAM independently. As long as one of the three
+   from CCS into RAM independently. As long as one of the four
    bench boards has a known-good SBL backup we can cross-flash from,
-   we always have a recovery path. **Action item before session 2:**
-   image one board's current OSPI sector 0 to a `.bin` archive for
-   quick restore.
+   we always have a recovery path. **Action item before Session 2:**
+   image one board's current OSPI sector 0 (TI's stock SBL) to a
+   `.bin` archive for quick restore.
 
 ---
 
-## 8. Doc-trail
+## 10. Doc-trail
 
-- Architecture (this file): `docs/lp-am2434-f2c-sbl-chooser-design.md`.
+- This file: `docs/lp-am2434-f2c-sbl-chooser-design.md`.
 - Watchdog interactions: `docs/lp-am2434-watchdog-design.md` §5.
-- Existing OTA plan (Phases 1-5): `docs/LP-AM2434-OTA-Update-Plan.md`.
-- Hardware spec recommendations driving F2c needs:
+- OTA plan (Phases 1-5, Phase 4 VALIDATED 2026-05-29):
+  `docs/LP-AM2434-OTA-Update-Plan.md`.
+- SBL-wipe saga that drove the 0.A.208 metadata relocation:
+  `memories/repo/sbl-wipe-controller-self-update-7th-layer-2026-05-29.md`.
+- Bank B 4-byte addressing escape (0.A.102):
+  `memories/repo/lp-am2434-ospi-dac-writes.md`.
+- Hardware spec recommendations:
   `docs/Constellation-Board-Hardware-Spec.md` §1.2 / §2.2.
-- Quick-ref + bench recipe (created in session 2):
-  `/memories/repo/lp-sbl-chooser-bringup.md`.
-- Foundation index: `/memories/repo/foundation-plan.md` row F2c.
+- Foundation index: `memories/repo/foundation-plan.md` row F2c.

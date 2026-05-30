@@ -69,6 +69,15 @@ export interface FwBankInfo {
   goldenVersion: string;
   bootCount: number;
   bootReason: number;
+  /** OrbitRole this LP is provisioned as (CONTROLLER=0, STORAGE=1, GDC=2,
+   *  TRITON=3). Decoded from field 11 of FwBankInfo; older firmwares
+   *  that pre-date this field show 0 by default. */
+  currentRole: number;
+  /** F2c watchdog strike count (0 = healthy boot). ≥3 means the future
+   *  F2c SBL chooser will fall back to the previous bank. Cleared by
+   *  lp_watchdog_client once the boot has sustained all required alive
+   *  bits for 30 s. Decoded from field 12. */
+  watchdogStrikes: number;
 }
 
 export interface FwUpdateStatus {
@@ -356,11 +365,14 @@ export class NovaFwUpdateManager extends EventEmitter {
       goldenVersion: pbGetString(fields, 8),
       bootCount: pbGetVarint(fields, 9),
       bootReason: pbGetVarint(fields, 10),
+      currentRole: pbGetVarint(fields, 11),
+      watchdogStrikes: pbGetVarint(fields, 12),
     };
     console.log(`[FwUpdate] Bank info: active=${FwBankId[this.bankInfo.activeBank]}, ` +
       `A=${this.bankInfo.bankAVersion || '(empty)'}${this.bankInfo.bankAValid ? '✓' : '✗'}, ` +
       `B=${this.bankInfo.bankBVersion || '(empty)'}${this.bankInfo.bankBValid ? '✓' : '✗'}, ` +
-      `golden=${this.bankInfo.goldenVersion || '(none)'}, boots=${this.bankInfo.bootCount}`);
+      `golden=${this.bankInfo.goldenVersion || '(none)'}, ` +
+      `boots=${this.bankInfo.bootCount}, strikes=${this.bankInfo.watchdogStrikes}`);
     this.emit('bankInfo', this.bankInfo);
   }
 
