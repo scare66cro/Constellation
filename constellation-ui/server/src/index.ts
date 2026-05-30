@@ -960,8 +960,8 @@ httpServer.on('upgrade', (req, socket, head) => {
   // as the bridge sees its first protocol-version frame so any subsequent
   // log inserts (activity_log, user_log, pid_log, load_log) carry real
   // timestamps. Without this, every record stamps as 1900-01-01.
-  // Re-fires on every reconnect � cheap, and it keeps QEMU cold-boots
-  // honest after a `Start-Constellation.ps1 -Restart`.
+  // Re-fires on every reconnect — cheap, and keeps cold-boot timestamps
+  // honest after any LP reset / power cycle.
   novaBridge.on('connected', () => {
     try {
       const now = new Date();
@@ -1022,8 +1022,8 @@ httpServer.on('upgrade', (req, socket, head) => {
 // --- Start ---
 
 async function start() {
-  // Start HTTP server first � the UI/API must be available even if
-  // the firmware serial link isn't up yet (QEMU still booting, etc.).
+  // Start HTTP server first — the UI/API must be available even if
+  // the firmware serial link isn't up yet (LP still booting, etc.).
   httpServer.listen(PORT, () => {
     console.log('');
     console.log('  +----------------------------------------------+');

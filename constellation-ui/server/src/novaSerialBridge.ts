@@ -1139,11 +1139,12 @@ export class NovaSerialBridge extends EventEmitter {
 
     // Tear down any prior socket before opening a new one. Otherwise the
     // old (zombie) connection can survive a transient error and keep the
-    // QEMU `tcp::9000,server,nowait` chardev attached to it, while the
-    // new socket we're about to create gets accepted but ignored. Bridge
-    // writes then disappear into the new socket while QEMU still reads
-    // from the old one. Symptom: txFrames climbs but firmware RX bytes
-    // counter is frozen and every sendCommand times out.
+    // peer's listening socket attached to it, while the new socket we're
+    // about to create gets accepted but ignored. Bridge writes then
+    // disappear into the new socket while the peer still reads from the
+    // old one. Symptom: txFrames climbs but firmware RX bytes counter is
+    // frozen and every sendCommand times out. (TCP transport is rarely
+    // used now that production is UART per invariant #12.)
     if (this.tcpSocket) {
       try { this.tcpSocket.removeAllListeners(); this.tcpSocket.destroy(); } catch {}
       this.tcpSocket = null;
