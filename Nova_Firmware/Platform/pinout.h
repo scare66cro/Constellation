@@ -57,12 +57,6 @@ static const _pin_str RS485B_DIR = {
     .periph = 0, .strength = 0, .type = 0, .initial_state = 0
 };
 
-/* ---- Watchdog / heartbeat (feeds external watchdog if present) ---- */
-static const _pin_str WD_CPLD = {
-    .pin = (1 << 2), .port = AM2434_GPIO0_BASE,
-    .periph = 0, .strength = 0, .type = 0, .initial_state = 0
-};
-
 /* ---- Status LEDs ---- */
 static const _pin_str LED_STATUS = {
     .pin = (1 << 3), .port = AM2434_GPIO0_BASE,
@@ -73,15 +67,6 @@ static const _pin_str LED_COMMS = {
     .pin = (1 << 4), .port = AM2434_GPIO0_BASE,
     .periph = 0, .strength = 0, .type = 0, .initial_state = 0
 };
-
-/* ---- Shift register pins (legacy — may be removed on Nova PCB) ---- */
-static const _pin_str SS_MOSI  = { .pin = (1 << 8),  .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 0 };
-static const _pin_str SS_MISO  = { .pin = (1 << 9),  .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 0 };
-static const _pin_str SS_SCLK  = { .pin = (1 << 10), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 0 };
-static const _pin_str SS_RCLK  = { .pin = (1 << 11), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 0 };
-static const _pin_str SS_CS0   = { .pin = (1 << 12), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 1 };
-static const _pin_str SS_CS1   = { .pin = (1 << 13), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 1 };
-static const _pin_str SS_CS2   = { .pin = (1 << 14), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 1 };
 
 /* ---- SPI chip selects ---- */
 static const _pin_str FLASH_CS = { .pin = (1 << 16), .port = AM2434_GPIO0_BASE, .periph = 0, .strength = 0, .type = 0, .initial_state = 1 };

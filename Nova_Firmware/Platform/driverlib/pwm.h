@@ -49,10 +49,9 @@
 #define PWM_SYSCLK_DIV_32       0x00000005
 #define PWM_SYSCLK_DIV_64       0x00000006
 
-/* ─── Forwarders to hal_pwm.c (real AM2434 EPWM driver) ───────────────
+/* ─── Forwarders to hal_pwm.c (AM2434 EPWM driver) ────────────────────
  * Full implementation and behavioural contract: Nova_Firmware/Platform/hal_pwm.c
- * Preserves TM4C timing: 10 kHz carrier, count-down, legacy 3.75 MHz tick units.
- * Under QEMU_BUILD the HAL functions are no-ops. */
+ * Preserves TM4C timing: 10 kHz carrier, count-down, legacy 3.75 MHz tick units. */
 extern void hal_pwm_clock_set(uint32_t tm4c_div);
 extern void hal_pwm_gen_configure(uint32_t gen, uint32_t config);
 extern void hal_pwm_gen_period_set(uint32_t gen, uint32_t legacy_ticks);

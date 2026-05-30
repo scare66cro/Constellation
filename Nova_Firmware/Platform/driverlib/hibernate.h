@@ -18,8 +18,19 @@ static inline uint32_t HibernateRTCTrimGet(void) { return 0; }
 static inline uint32_t HibernateIntStatus(bool masked) { (void)masked; return 0; }
 static inline void HibernateIntClear(uint32_t flags) { (void)flags; }
 static inline void HibernateCounterMode(uint32_t mode) { (void)mode; }
-static inline void HibernateCalendarSet(struct tm *t) { (void)t; }
-static inline void HibernateCalendarGet(struct tm *t) { (void)t; }
+
+/* Calendar (wall-clock) — implemented in Platform/hal_rtc.c.
+ *
+ * On AM2434 (no battery-backed RTC), wall time is maintained by
+ * `hal_timer_get_ms()` deltas from a baseline `time_t` recorded by
+ * `HibernateCalendarSet()`. The baseline is set either by:
+ *   (a) the bridge auto-pushing host wall-clock at Nova-connect, or
+ *   (b) an operator setting the date/time on the Svelte UI.
+ * Until something sets it, `HibernateCalendarGet()` returns an
+ * obviously-invalid date (year 1900) so the legacy `WARN_DATETIME`
+ * path triggers normally. */
+extern void HibernateCalendarSet(struct tm *t);
+extern void HibernateCalendarGet(struct tm *t);
 
 #define HIBERNATE_OSC_LOWDRIVE   0
 #define HIBERNATE_OSC_HIGHDRIVE  0
