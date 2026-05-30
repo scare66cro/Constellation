@@ -1,20 +1,88 @@
 # LP-AM2434 Orbit Board OTA Update — Design Plan
 
-> **Status (2026-05-13): RUNTIME OTA WORKS.** The 2026-05-12 "bridge-side flash only" pivot below is **OBSOLETE**. After exhaustive forensic work across 0.A.118-0.A.140, the root cause was finally found: the SDK's `Flash_norOspiWrite` / `OSPI_lld_writeIndirect` (INDIRECT_WRITE_XFER subsystem) IS broken in our FreeRTOS+CPSW runtime context, BUT the OSPI controller has a completely separate **DAC (Direct Access Controller) mode** write path that works fine — it just needed a `CacheP_wbInv` after the memcpy (SDK does this in `OSPI_writeDirect` at `drivers/ospi/v0/ospi_v0.c:994`; we missed it). New public function `hal_flash_write_dac()` in [`Nova_Firmware/Platform/hal_flash.c`](../Nova_Firmware/Platform/hal_flash.c). Bench-verified in 0.A.140-0.A.141: 32 KB programmed via OTA in 73 ms with 5 sample-byte readbacks matching source. Full resolution write-up: [`memories/repo/lp-am2434-ota-dac-mode-fix.md`](../memories/repo/lp-am2434-ota-dac-mode-fix.md).
+> **Status (2026-05-15): END-TO-END OTA VALIDATED ON BENCH.** Full pipeline
+> runs from `test_ota_push.ts` (CLI on the Windows dev box) to a successfully
+> booted-into-new-firmware LP. Cycle time ~2 minutes per OTA.
 >
-> **Implications for the plan below:**
-> - **Phase 1B / Phase 2 are NO LONGER DEPRECATED** — runtime OTA write works via DAC mode.
-> - **Bridge-side flash via auto-flasher REMAINS a valid path** for first-flash-from-bare-chip and recovery scenarios where the LP isn't running.
-> - **Customers can now update LP firmware over the network** via the existing OTA listener on `:5503` (Cloud → bridge → TCP to LP :5503 → DAC-mode write to Bank B → optional copy to Bank A + warm-reset).
-> - Phase 3 (custom SBL chooser for A/B banking with hardware rollback) is still desirable for production but no longer strictly required — Bank A → Bank A overwrite with verify+rollback-via-watchdog-reset is workable as an interim.
+> The 0.A.166-0.A.185 "stochastic byte loss + chip wedge on retry" saga
+> turned out to be a single missing pattern: our `hal_flash_dac_pp_one`
+> was toggling the DAC bit + `IND_AHB_ADDR_TRIGGER_REG` between sub-PPs.
+> SDK's `OSPI_lld_writeDirect` (`drivers/ospi/v0/lld/ospi_v0_lld.c:1615`)
+> leaves both enabled across calls — load-bearing. Resolved in 0.A.186
+> (CHUNK writes) + 0.A.187 (stage-copy). Canonical rule + diagnostic
+> recipe: [`docs/lp-am2434-ospi-dac-writes.md`](lp-am2434-ospi-dac-writes.md);
+> hard invariant #11 in [`CLAUDE.md`](../CLAUDE.md).
 >
-> **Still-open work items:**
-> - DDR-backed image buffer (current 64 KB MSRAM buffer is sufficient for test images but real LP firmware is ~485 KB) — needed before shipping
-> - Two-stage activate flow polished: write to Bank B → verify → erase Bank A → copy B→A via `hal_flash_write_dac` → warm-reset. `lp_ota_stage_copy_b_to_a` already updated to use DAC; the activate handler's `reboot=1` path now drives this in 0.A.141 but it's only exercised when the bridge requests reboot.
-> - Bridge-side image signing + version metadata so the LP can refuse downgrades / unsigned images
-> - UI integration so an operator can trigger an LP firmware update from the panel
+> **Validated end-to-end flow (0.A.187, 2026-05-15):**
 >
-> Below sections preserved for context but the deprecation strikethroughs from 2026-05-12 should be lifted in a future docs pass.
+>     BEGIN     → erase Bank B (1 MB) + scratch (256 KB)
+>     CHUNK × N → stream 1024 B chunks via TCP, write via hal_flash_write_dac
+>     FINALIZE  → full Bank-B CRC32 vs expected (MATCH first try)
+>     ACTIVATE  → close Enet, re-open OSPI, stage-copy B→A via DAC (62 iters)
+>                 verify Bank-A CRC32 (MATCH)
+>     chip soft-reset (RSTEN+RST) → SoC warm-reset (Sciclient_pmDeviceReset)
+>     DMSC + SBL load → new firmware boots, listens on :5503 for next OTA
+>
+> ## What's done
+> - LP-side streaming OTA listener on `:5503` ([`lp_ota_task.c`](../Nova_Firmware/lp_am2434/lp_ota_task.c))
+> - Reliable DAC writes (CHUNK + stage-copy)
+> - Per-chunk verify + scratch-region remap safety net (proves unnecessary in practice but kept against future regressions)
+> - Bank-A CRC abort-on-mismatch (prevents bricking)
+> - Chip soft-reset before warm-reset so SBL boots cleanly
+> - Bridge-side `pushImage()` API in [`orbitOtaPush.ts`](../constellation-ui/server/src/orbitOtaPush.ts) with full-image retry on `LP_OTA_ERR_BANK_B_REDO`
+> - CLI test harness ([`test_ota_push.ts`](../constellation-ui/server/src/test_ota_push.ts))
+>
+> ## What's still open (next milestones, rough order)
+>
+> 1. **Wire OTA into the SvelteKit UI's "Software Upgrade" page.**
+>    The page already exists but currently hits the legacy AS2 endpoint.
+>    Re-target it at a new `/iot/orbit/ota/push` route on the bridge
+>    that wraps `pushImage()` and streams progress over WebSocket so the
+>    UI can show a percent bar. Per-orbit queueing (reject overlap) and
+>    HTTP-level auth (bearer token / DH-protected like other settings)
+>    are pre-reqs. **Owner:** UI + bridge work, not firmware.
+>
+> 2. **Rpi5 bridge: production endpoint + per-orbit lock.**
+>    Add the HTTP route (POST multipart `mcelf.hs_fs` + orbit IP), spawn
+>    `pushImage()`, stream progress. Drop the standing assumption that
+>    OTAs are run via JTAG / Flash-LP.ps1 from a developer box — the
+>    customer's path is rpi5 only.
+>
+> 3. **Bridge-side image signing + version metadata.**
+>    Today the LP trusts whatever bytes match the per-chunk wire CRC.
+>    Before shipping, the bridge needs to verify the mcelf's x509 cert
+>    against a known signing key and the LP needs to reject downgrades
+>    (compare incoming `version` to the running `LP_FW_VERSION`).
+>
+> 4. **F2c custom SBL chooser** for true A/B banking with hardware
+>    rollback. Today's Phase-2 path is "stage-copy B→A then warm-reset"
+>    — a power-fail mid-copy bricks Bank A. Real production needs an
+>    SBL that boots from whichever bank has a higher generation counter
+>    and a valid signature, with a watchdog-driven rollback if the new
+>    image fails to boot. See
+>    [`docs/lp-am2434-f2c-sbl-chooser-design.md`](lp-am2434-f2c-sbl-chooser-design.md).
+>    Until F2c lands, document the "don't power-cycle during activate"
+>    risk window (the 60 s between `ACTIVATE reboot=1` and the new
+>    firmware's first heartbeat).
+>
+> 5. **Cloud → bridge integration.**
+>    Hook the existing Azure firmware-distribution plan
+>    ([`docs/Azure-Cloud-Integration-Plan.md`](Azure-Cloud-Integration-Plan.md))
+>    to feed the bridge's OTA endpoint. Cloud holds signed builds; bridge
+>    pulls + caches + pushes to LPs.
+>
+> 6. **UART boot mode bridge-side flash** (the AS2-pivot path from
+>    2026-05-12). Keep for first-flash-from-bare-chip and recovery cases
+>    where the LP can't run a normal OTA. The current `Flash-LP.ps1` +
+>    JTAG remains the developer workflow.
+>
+> 7. **Recover S24L0707** — the dev CONTROLLER bricked by the 0.A.115
+>    NV-config write before the brick-safety rules were added. Procedure
+>    in [`memories/repo/lp-am2434-ospi-nv-recovery.md`](../memories/repo/lp-am2434-ospi-nv-recovery.md).
+>
+> Below sections preserved for context but the 2026-05-12 deprecation
+> strikethroughs (the "bridge-side flash only" pivot) are now obsolete
+> twice over — runtime OTA works AND we've now end-to-end-validated it.
 
 > **Goal:** Push new orbit firmware (`nova_lp.release.mcelf.hs_fs`) from
 > the rpi5 to STORAGE / GDC / TRITON boards over the existing Ethernet

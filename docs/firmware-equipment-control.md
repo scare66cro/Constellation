@@ -1,8 +1,13 @@
 # Agristar Constellation — Firmware Equipment Control Reference
 
-> **Purpose:** Document how the firmware controls equipment, what triggers mode changes,
-> which sensors drive decisions, and when equipment turns on and off.
-> Please review and correct anything that doesn't match your understanding.
+> **tl;dr** — How the firmware controls equipment: what triggers mode
+> changes, which sensors drive decisions, when each equipment turns on
+> and off, and the cadence at which PIDs run. AS2 cadence is preserved
+> bit-for-bit (P=5, I=15, D=2, U=3 s for Door / Refrig / Burner /
+> Climacell). For wire-protocol invariants on the save path go to
+> [`firmware-bridge-protocol.md`](firmware-bridge-protocol.md).
+>
+> **Last updated:** 2026-05-07 (renumbered §17, encoding fix in §17).
 
 ---
 
@@ -530,7 +535,7 @@ Ramping modifies the live `TempSet` that all PID controllers use, so all modes r
 
 ---
 
-## 13. Dehumidification (Onion)
+## 13. Dehumidification (onion)
 
 `SetDehumidification()` adds dehumidification to cooling or refrig modes. Both paths require:
 - `CheckInputs(SW_BURNER_AUTO)` active
@@ -598,3 +603,42 @@ Each equipment entry in `Settings.EquipIo[]` specifies:
 8. **Sensor-driven state machine** (outside temp vs start temp, etc.)
 9. **PID controllers** (within a mode, fine-tune PWM outputs)
 10. **Remote Manual** (`RemoteOff[i] == 2`) → Equipment forced ON (applied after mode)
+
+
+---
+
+## 17. Orbit analog-output fan-out (Nova-only, post-AS2)
+
+The four legacy PWM channels (`PWM_FAN`, `PWM_DOORS`,
+`PWM_REFRIGERATION`, `PWM_BURNER`) are mirrored onto operator-selectable
+Orbit AO channels. Programming lives in `Settings.AoEquip[slot][ch]`
+(persisted in OSPI). The Level 2 PWM 4-20 mA Output Setup page
+(`/level2/pwm`) is the operator UI; per-AO writes hit
+`POST /iot/orbits/aoequip`.
+
+### Cadence (matches AS2)
+
+- Underlying PID controllers (Door / Refrig / Burner / Climacell) re-run
+  every `Settings.X.PID.U` seconds. Legacy factory defaults
+  (`GetFactoryDefault` in `Application/Settings.c`):
+  - **P=5, I=15, D=2, U=3** for `Door`, `Refrig`, `Climacell`, `Burner`.
+- Fan in auto mode is throttled by `Settings.Fan.UpdatePeriod` (hours),
+  driven by `CtrlFan` in `nova_controls.c`.
+- `nova_fan_output_tick` (Nova orbit thread, ~1 Hz) samples
+  `PwmChannel[X].Output` and writes to:
+  1. **Modbus VFD path** — for present, non-faulted drives discovered
+     by `nova_vfd_tick`.
+  2. **Analog-output path** — for each `Settings.AoEquip[slot][ch]`
+     selector, writes the corresponding channel's 0..1000 (percent × 10)
+     value to that Orbit AO.
+- 1 Hz is faster than the slowest PID (3 s), so AOs reflect every PID
+  step with ≤ 1 s extra latency — matching legacy TM4C EPWM where
+  `PWM_UpdateChannel()` pushed instantly on every write.
+
+### Selectors (`ao_equip_t`, `nova_fan_output.h`)
+
+`0=UNUSED, 1=FAN_SPEED, 2=DOORS, 3=REFRIG, 4=BURNER`. Persisted as
+`uint8` per slot/channel — **never renumber.**
+
+Full wire-up notes:
+[`memories/repo/ao-equip-assign.md`](../memories/repo/ao-equip-assign.md).

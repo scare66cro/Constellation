@@ -1,208 +1,184 @@
-# Simulator → Production Transition Guide
+# Simulator â†’ Production Transition Guide
 
-What must change when moving from the dev simulator stack to real Nova + Orbit hardware.
+How the dev stack maps to real LP-AM2434 hardware. Linked from
+[`CLAUDE.md`](../CLAUDE.md).
+
+> **Status:** Rewritten May 2026 for the LP-AM2434 era. The pre-Nova
+> ARM/TM4C simulator (`armSimulator.ts`, `serialBridge.ts`,
+> `.arm-settings-bank-{a,b}.json`, `USE_NOVA` flag) and its scaffolding
+> are **deleted**. There is no longer a "sim vs prod" code split inside
+> the bridge or the firmware â€” the same binaries run in both
+> environments and only the *transport peer* differs.
 
 ---
 
-## Architecture Overview
+## Architecture overview
 
 ```
-SIMULATOR STACK                         PRODUCTION STACK
-═══════════════                         ════════════════
+DEVELOPMENT STACK                        PRODUCTION STACK
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•                        â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-┌─────────────────┐                     ┌─────────────────┐
-│  ARM Simulator   │  TCP :9000          │  Nova AM2434     │  UART /dev/ttyAMA0
-│  (armSimulator.ts)│◄───────────┐       │  (real firmware)  │◄───────────┐
-└─────────────────┘             │       └─────────────────┘             │
-                                │                                       │
-┌─────────────────┐             │       ┌─────────────────┐             │
-│  Bridge Server   │─────────────┘       │  Bridge Server   │─────────────┘
-│  (index.ts)      │                     │  (index.js)      │  ← same code
-│  port 81         │                     │  port 3001       │
-└────────┬────────┘                     └────────┬────────┘
-         │ Modbus TCP                             │ ← NOT USED
-         │ :5502                                  │
-┌────────▼────────┐                     ┌─────────────────┐
-│  Orbit Simulator │                     │  Nova firmware   │  Modbus TCP :502
-│  (orbitSimulator) │                     │  (hal_orbit.c)   │────────────────┐
-│  port 9010-9013  │                     └─────────────────┘                │
-└─────────────────┘                                                        │
-                                        ┌─────────────────┐                │
-                                        │  Real Orbit PCB  │◄───────────────┘
-                                        │  (embedded FW)   │
-                                        │  192.168.0.{DIP} │
-                                        └─────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚ LP-AM2434 board     â”‚ UART2            â”‚ LP-AM2434 board     â”‚ UART2
+â”‚ (CONTROLLER role)   â”‚ 921600 baud      â”‚ (CONTROLLER role)   â”‚ 921600 baud
+â”‚ flashed via JTAG    â”‚ â”€â”€â”              â”‚ flashed via JTAG    â”‚ â”€â”€â”
+â”‚ (Probe N / S24L0957)â”‚   â”‚              â”‚ (production fixture)â”‚   â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚              â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+   Eth :502 â”‚             â”‚                 Eth :502 â”‚             â”‚
+           â–¼             â–¼                          â–¼             â–¼
+   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   â”‚ STORAGE / GDC â”‚  â”‚ rpi5 @ 10.47.27.108  â”‚  â”‚ STORAGE / GDCâ”‚  â”‚ rpi5 (panel)       â”‚
+   â”‚ /TRITON LPs   â”‚  â”‚ â”€ agristar-bridge  â”‚  â”‚ /TRITON LPs  â”‚  â”‚ â”€ agristar-bridge  â”‚
+   â”‚ on 10.47.27.x â”‚  â”‚ â”€ uisvelte         â”‚  â”‚ 10.47.27.x   â”‚  â”‚ â”€ uisvelte         â”‚
+   â”‚ (air-gapped)  â”‚  â”‚ â”€ /dev/ttyAMA0     â”‚  â”‚              â”‚  â”‚ â”€ /dev/ttyAMA0     â”‚
+   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                  â–²
+                                  â”‚ ssh tunnel `localhost:9001`
+                                  â”‚
+                        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                        â”‚ developer PC     â”‚
+                        â”‚ (Windows + WSL)  â”‚
+                        â”‚ Flash-LP.ps1     â”‚
+                        â”‚ deploy.sh        â”‚
+                        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
----
-
-## 1. Bridge Server → Nova Communication
-
-| Aspect | Simulator | Production | What Changes |
-|--------|-----------|------------|--------------|
-| **Transport** | TCP socket to `localhost:9000` | UART `/dev/ttyAMA0` @ 230400 baud | Set `SERIAL_PORT=/dev/ttyAMA0` env var |
-| **Protocol** | Same CRC-32 framed messages | Same | Nothing — `serialBridge.ts` already supports both |
-| **ARM firmware** | `armSimulator.ts` (Node.js) | Real Nova R5F firmware (C) | Remove armSimulator from deployment |
-| **Configuration** | `SERIAL_PORT=tcp://localhost:9000` | `SERIAL_PORT=/dev/ttyAMA0` | One env var change |
-
-**File:** `constellation-ui/server/deploy/agristar-bridge.service` — already has production env vars.
+Both columns are the **same binaries**. The only thing that changes
+between dev and a customer install is which physical fixture the
+LP boards are mounted in and which network they sit on.
 
 ---
 
-## 2. Nova → Orbit Communication (Modbus TCP)
+## 1. Bridge â†” CONTROLLER LP
 
-| Aspect | Simulator | Production | What Changes |
-|--------|-----------|------------|--------------|
-| **Who polls Orbits** | Bridge server (`orbitClient.ts`) | Nova firmware (`hal_orbit.c`) | **Remove bridge Modbus polling** |
-| **IP addressing** | `10.47.27.{DIP}:5502` (QEMU net) | `192.168.0.{DIP}:502` (real Ethernet) | Already handled by `#ifdef QEMU_BUILD` in `hal_orbit.h` |
-| **Equipment → DO mapping** | Bridge reads OutputConfig, maps to orbit DOs | Nova firmware does this directly via `IoBoard[].OutputState` → coils | Bridge no longer needs `syncEquipOutputsViaModbus()` |
-| **DI → Equipment mapping** | Bridge doesn't read orbit DIs (ARM sim generates inputs) | Nova reads orbit DIs via FC02 → `IoBoard[].InputState` | Already implemented in `hal_orbit.c orbit_poll_io()` |
-| **Orbit labels** | REST API pushes labels for the web panel | Not needed — no web panel on real Orbit boards | Labels are a simulator-only convenience |
+| Aspect              | Dev / Prod                                          |
+|---------------------|-----------------------------------------------------|
+| **Transport**       | UART2 â†’ `/dev/ttyAMA0` @ 921600 baud, 8N1           |
+| **Wire protocol**   | COBS + CRC-16 envelope â†’ protobuf (per `proto/agristar/envelope.proto`) |
+| **Bridge process**  | `agristar-bridge.service` on rpi5, `npx tsx src/index.ts` (no build step) |
+| **Firmware**        | `nova_lp.release.mcelf.hs_fs` flashed to OSPI @ 0x80000 (see `Flash-LP.ps1`) |
 
-### Key: `syncEquipOutputsViaModbus()` goes away in production
+There is no "simulator transport". The dev workflow points the same
+service at a real LP board over the same UART. The legacy TCP-shimmed
+ARM simulator is gone.
 
-In the simulator, the bridge acts as a stand-in for Nova's Modbus TCP master. On real hardware, Nova itself does the I/O polling. The bridge only needs to serve the UI and relay user commands to Nova via UART.
+## 2. CONTROLLER LP â†” orbit LPs (STORAGE / GDC / TRITON)
 
-**Production TODO:** Add a `SIMULATOR_MODE` flag or detect whether an orbit client is connected. When running on real hardware, skip `syncEquipOutputsViaModbus()` and `syncIoConfigToOrbit()`.
+| Aspect              | Dev / Prod                                          |
+|---------------------|-----------------------------------------------------|
+| **Transport**       | Modbus TCP, port 502, on the air-gapped 10.47.27.0/24 LAN |
+| **Polling**         | CONTROLLER firmware (`orbit_client.c`) cycles slots every 100 ms |
+| **Sensor data**     | HR base 200, length 64 â€” pushed up as `OrbitSensorBank` (envelope tag 124) |
+| **Status / DI / DO**| `OrbitStatus.boards[]` (envelope tag 120), every 5 s |
 
----
+IP map for the dev fixture:
 
-## 3. Sensor Boards
+| Role        | Probe | XDS Serial  | UART  | IP              |
+|-------------|-------|-------------|-------|-----------------|
+| CONTROLLER  | N     | S24L0957    | COM4  | 10.47.27.1      |
+| STORAGE     | A     | S24L0417    | COM5  | 10.47.27.2      |
+| GDC         | B     | S24L0707    | COM9  | 10.47.27.3      |
+| TRITON      | (TBD) | (TBD)       | (TBD) | 10.47.27.4      |
+| rpi5 alias  | n/a   | n/a         | n/a   | 10.47.27.108/24 |
 
-| Aspect | Simulator | Production | What Changes |
-|--------|-----------|------------|--------------|
-| **Sensor data source** | Orbit sim emits fake temps/humidity directly from built-in default boards | Real I2C/SPI sensor boards on Orbit PCB | None — orbit sim already fabricates sensor data |
-| **Data path** | Orbit sim exposes sensor registers → bridge reads via Modbus TCP | Nova reads Orbit holding regs 200+ → gets real sensor data | Already in `hal_orbit.c orbit_read_sensors()` |
-| **Analog board config** | Orbit sim has default temp/humidity boards | Real boards auto-detected by Orbit firmware | No code change needed |
+Each board's role + IP are persisted in OSPI by `lp_device_config.c`;
+`Flash-LP.ps1 -Probe X` programs both the firmware and the role/IP
+defaults for that probe.
 
----
+## 3. Settings persistence (sim â‰¡ prod)
 
-## 4. VFD Drives
+OSPI ping-pong banks (`lp_settings_store.c`) are the **only** persistence
+layer. Bank A / Bank B alternate per save with a sequence number and
+CRC; cold boot picks the higher-sequence valid bank.
 
-| Aspect | Simulator | Production | What Changes |
-|--------|-----------|------------|--------------|
-| **VFD communication** | Orbit sim has built-in VFD simulator (holding regs 100+) | Real VFD drives on RS-485 bus via Orbit Port B | No bridge change — VFD regs are passthrough |
-| **Bridge VFD client** | Reads VFD registers from orbit sim via Modbus TCP | Same path — reads from Nova which reads from Orbit | Set `VFD_HOST` and `VFD_PORT` env vars |
+The legacy `~/.constellation/.arm-settings-bank-{a,b}.json` files no
+longer exist. Anything that reads / writes settings goes through
+`LpSettings_*` and `LpDeviceConfig_*` â€” there is no JSON shim.
 
----
+## 4. Wire protocol invariants (sim â‰¡ prod)
 
-## 5. Network & IP Addressing
+The COBS + CRC framing and protobuf payload semantics are byte-identical
+in dev and production. Bugs in either reproduce in the other. Full list
+in [`firmware-bridge-protocol.md`](firmware-bridge-protocol.md). Headlines:
 
-| Aspect | Simulator | Production |
-|--------|-----------|------------|
-| **Orbit IPs** | `10.47.27.{DIP}` (QEMU) or `127.0.0.1:9010+` (local) | `192.168.0.{DIP}` |
-| **Nova IP** | N/A (runs on same machine) | `192.168.0.1` (or DHCP) |
-| **Bridge IP** | `localhost:81` | `192.168.0.1:3001` (same machine as RPi5) |
-| **QEMU flag** | `QEMU_BUILD` defined in firmware Makefile | Remove `QEMU_BUILD` — use production linker script `am2434_r5f.ld` |
+1. **proto3 zero-suppression** â€” use `pb_uint32_force` /
+   `pbVarintForce` whenever 0 is meaningful (Mode=OFF, index=0,
+   threshold=0, fixed-length array slot 0, cross-coupled settings).
+2. **Mode-dependent encoders** mirror legacy `StoreXxx()` positional
+   layout per mode â€” never send a fixed-position superset.
+3. **Repeated-submsg decoders** clear the destination array first; the
+   counters MUST be function-local, never `static`.
+4. **TX path goes through `NovaProto_SendRaw` mutex** â€” bypassing it
+   corrupts COBS framing into a CRC-error storm.
+5. **Verification:** `/health` should report `rxCrcErrors:0` /
+   `rxCobsErrors:0` after any save campaign.
 
-**hal_orbit.h already handles this:**
-```c
-#ifdef QEMU_BUILD
-#define ORBIT_IP_A  10
-#define ORBIT_IP_B  47
-#define ORBIT_IP_C  27
-#define ORBIT_MBTCP_PORT  5502
-#else
-#define ORBIT_IP_A  192
-#define ORBIT_IP_B  168
-#define ORBIT_IP_C  0
-#define ORBIT_MBTCP_PORT  502
-#endif
-```
+## 5. Build / flash / deploy commands
 
----
+| Operation              | Command (Windows PowerShell)                                                |
+|------------------------|------------------------------------------------------------------------------|
+| Build LP firmware      | `cd F:\Constellation\Nova_Firmware\lp_am2434; gmake PROFILE=release`         |
+| JTAG-flash a board     | `cd F:\Constellation\Nova_Firmware\lp_am2434; .\Flash-LP.ps1 -Probe N`       |
+| Skip build, just flash | `.\Flash-LP.ps1 -Probe N -SkipBuild`                                         |
+| Cold-boot LP after flash | `cd ospi_flash; & "C:\ti\ccs2050\ccs\ccs_base\scripting\bin\dss.bat" .\system_reset.js F:/Constellation/Nova_Firmware/lp_am2434/AM2434_LP_NOVA.ccxml` |
+| Build SvelteKit UI     | `cd F:\Constellation\constellation-ui; npm run build`                         |
+| Deploy UI to rpi5      | `wsl bash -c "cd /mnt/f/Constellation/constellation-ui && ./deploy.sh --target=production"` |
+| Push bridge .ts files  | `scp F:\Constellation\constellation-ui\server\src\<file>.ts gellert@10.47.27.108:/home/gellert/Gellert/constellation/constellation-ui/server/src/` |
+| Restart bridge         | `ssh gellert@10.47.27.108 "sudo systemctl reset-failed agristar-bridge && sudo systemctl restart agristar-bridge"` |
+| Tail bridge log        | `bash F:\Constellation\_get_bridge_log.sh`                                   |
 
-## 6. Firmware Build
+`Flash-LP.ps1` enforces a per-probe XDS110-serial guard (it refuses to
+flash unless the requested probe is the **only** one enumerated, unless
+`-Force` is passed). This prevents accidentally writing CONTROLLER
+firmware to the STORAGE board, etc. See
+[`/memories/repo/lp-am2434-bringup.md`](../memories/repo/lp-am2434-bringup.md).
 
-| Aspect | Simulator | Production |
-|--------|-----------|------------|
-| **Target** | QEMU `am2434_qemu_r5f0.ld` (flat RAM at 0x0) | Real `am2434_r5f.ld` (ATCM/BTCM/MSRAM split) |
-| **Build flag** | `DEFS += -DQEMU_BUILD` | Remove `QEMU_BUILD` |
-| **Orbit stub** | Optional `QEMU_STUB_ORBIT` skips Modbus polling | Remove — real polling always active |
-| **Timer** | QEMU tick timer at `0x02400000`, virtual clock | Real PMU cycle counter, hardware timer |
-| **Flash** | RAM-backed fake flash (`hal_flash.c` QEMU path) | Real OSPI NOR via TI MCU+ SDK (`Flash_write/read`) |
-| **UART** | QEMU 16550 serial_mm with TCP chardev backend | Real AM2434 UART hardware — same 16550 register interface |
+`deploy.sh` only pushes the SvelteKit UI build â€” bridge `server/src/*.ts`
+must be `scp`'d manually. The bridge runs via `tsx` (no build step), so
+file copy is sufficient.
 
----
+## 6. What stays the same (no per-environment branches)
 
-## 7. What Stays the Same (No Changes Needed)
+These are **identical** in dev and prod:
 
-These components work identically in simulator and production:
+- Bridge REST + WS surface (`apiRoutes.ts`, `protoStream.ts`).
+- Data cache (`dataCache.ts`) â€” passthrough; no unit conversion.
+- Proto schema (`proto/agristar/*.proto`) and ts-proto / nanopb codegen.
+- SvelteKit UI (`constellation-ui/src/`).
+- LP firmware binary (`nova_lp.release.mcelf.hs_fs`) â€” single artifact
+  per role, no `#ifdef SIM` / `#ifdef PROD` paths.
+- Settings persistence (OSPI ping-pong via `lp_settings_store.c`).
 
-- **Bridge REST API** (`apiRoutes.ts`) — serves the UI, relays commands
-- **WebSocket manager** (`wsManager.ts`) — real-time UI updates
-- **Data cache** (`dataCache.ts`) — CGI variable cache
-- **Serial protocol** (`protocol.ts`) — CRC-32 framing, ACK/NAK
-- **SvelteKit UI** (`constellation-ui/src/`) — entire frontend
-- **IO Config page** — equipment assignment, port mapping
-- **Equipment status engine** — ARM sim and real firmware use identical logic
+## 7. Removed concepts (do not re-introduce)
 
----
+- `armSimulator.ts` â€” TS pure-software ARM emulator. Deleted.
+- `serialBridge.ts` â€” legacy ASCII RTS/ACK bridge. Deleted.
+- `USE_NOVA` env switch â€” there is no fallback path. Deleted.
+- `dev-orbit-probe` / `DEV_ORBIT_PROBE` env â€” bridge does **not**
+  populate `dataCache.getOrbitBoards()` from local code. Real boards do.
+- `.arm-settings-bank-{a,b}.json` â€” replaced by OSPI banks.
+- `QEMU_BUILD` / `am2434_qemu_r5f0.ld` â€” the LP firmware now targets
+  real silicon; the QEMU machine model in `qemu-constellation/` is a
+  separate research project, not part of the dev workflow.
+- Bridge-side Modbus TCP polling of orbits (`syncEquipOutputsViaModbus`,
+  `syncIoConfigToOrbit`). The CONTROLLER LP polls orbits directly.
+- Per-page `.arm-settings-bank-*.json` shims in `armSimulator`.
 
-## 8. Wire Protocol Invariants (sim and prod identical)
+If you find one of these in code or docs, it's stale â€” delete it.
 
-Even though the *transport* changes (TCP↔UART), the COBS+CRC envelope and protobuf payload semantics are byte-identical between simulator and production. The same encode/decode rules apply both places, and bugs found in one will manifest in the other.
+## 8. Sim-only behaviours that **do** still exist (and why)
 
-See [`firmware-bridge-protocol.md`](firmware-bridge-protocol.md) for the full list of invariants. The headline ones:
+- **`localhost:9001` ssh tunnel from the dev PC.** Convenience only â€”
+  forwards to `agristar-bridge` on the rpi5. Production users hit the
+  rpi5's lighttpd proxy on `:80` instead.
+- **`Start-Constellation.ps1`** is *not* a stack launcher anymore. It
+  just opens the sensor-injector panel page on the rpi5 in a browser.
+  No local processes are spawned.
+- **Sensor injector** runs as `sensor-injector.service` on the rpi5
+  (target 10.47.27.2:5502 via the rpi5's 10.47.27.108 alias). This is
+  a developer convenience for forcing sensor values into the STORAGE
+  board's RTU passthrough; it does not exist on a customer install.
 
-1. **proto3 zero-suppression** — use `pb_uint32_force` / `pbVarintForce` for any field where 0 is a meaningful value (Mode=OFF, index=0, threshold=0, fixed-length array slots, cross-coupled settings).
-2. **Mode-dependent encoders** mirror the legacy `StoreXxx()` positional layout per mode — never send a fixed-position superset.
-3. **Repeated-submessage decoders** clear the destination array up front; counters MUST be function-local, not `static`.
-4. **TX serialization** — all firmware TX goes through `NovaProto_SendRaw` mutex; bypassing it produces interleaved COBS framing and a CRC-error storm.
-5. **`/health`** exposes `txFrames` / `rxFrames` / `rxCrcErrors` — these must read 0 errors after any clean save campaign in *both* environments.
-
-If a save works in the simulator but fails on real hardware (or vice versa), suspect:
-- Timing differences exposing a missing TX-mutex bypass.
-- Non-zero `rxOverflows` indicating UART buffer depth needs tuning at 230400 baud on real hardware.
-- Endianness or struct-packing differences in `Settings.*` fields touched outside the proto encoder/decoder layer.
-
----
-
-## 9. Sim-only behaviours to be aware of
-
-- **Bank-A / Bank-B JSON** files (`constellation-ui/server/src/.arm-settings-bank-{a,b}.json`) stand in for ARM persistent settings storage. In production, settings live in OSPI NOR via the SDK Flash API.
-- **`Start-Constellation.ps1`** orchestrates the full sim stack (QEMU + bridge + UI). Production uses systemd / init scripts on the panel.
-- **Bridge runs in a hidden PowerShell window** under WSL/Windows hybrid; logs only reach the agent via files written to the workspace path. Production runs the bridge as a foregrounded Node process under a service supervisor.
-- **CGI shim layer** (`legacyShim.sendPost` in `index.ts`) translates POST bodies built by the legacy AS2 UI into `MSG_SETTINGS_UPDATE` envelopes. This shim is intentional and stays in production until the UI is fully migrated to native protobuf calls — it is **not** a hack to remove.
-
-- **GDC door control** — same register map (300-319), same safety interlocks
-
----
-
-## 8. Deployment Checklist
-
-### Bridge Server (RPi5)
-- [ ] Build: `npm run build` in `constellation-ui/server/`
-- [ ] Set env: `SERIAL_PORT=/dev/ttyAMA0`, `SERIAL_BAUD=230400`
-- [ ] Set env: `VFD_HOST=<orbit-ip>`, `VFD_PORT=502` (if VFD drives present)
-- [ ] Disable: `syncEquipOutputsViaModbus()` (Nova handles orbit I/O directly)
-- [ ] Disable: `syncIoConfigToOrbit()` (labels are simulator-only)
-- [ ] Install systemd service: `deploy/agristar-bridge.service`
-
-### Nova Firmware
-- [ ] Remove `QEMU_BUILD` from Makefile DEFS
-- [ ] Remove `QEMU_STUB_ORBIT` if set
-- [ ] Use production linker script `am2434_r5f.ld`
-- [ ] Configure Orbit board DIP switch IDs in Settings/EEPROM
-- [ ] Verify UART1 baud rate matches bridge (230400)
-
-### Orbit Boards
-- [ ] Set DIP switches (ID 2 = MAIN, 3 = EXP_1, etc.)
-- [ ] Connect Ethernet to Nova's switch/network
-- [ ] Verify Modbus TCP port 502 accessible
-- [ ] Connect I/O wiring per IO Config assignments
-
---- 
-
-## 9. Components to Remove from Production Deployment
-
-These are simulator-only and should NOT be deployed:
-
-| Component | Port | Purpose |
-|-----------|------|---------|
-| `armSimulator.ts` | 9000 | Fake ARM controller |
-| `orbitSimulator.ts` | 9010-9013, 5502+ | Fake Orbit boards |
-| `Start-Constellation.ps1` | — | Dev launcher script |
-| QEMU (`start_nova_qemu.sh`) | — | CPU emulator |
-| Orbit web panels (`panel/index.html`) | — | Debug UI for simulator |
-
+When in doubt about whether something is sim-only, check
+[`/memories/repo/`](../memories/repo/) â€” every recurring sim/prod
+delta has a memory file.
