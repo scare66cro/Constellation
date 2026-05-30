@@ -64,27 +64,23 @@ Defined as compile-time constants in `sbl_bank_select.h` (`SBL_FW_*`).
 **Single source of truth is `Nova_Firmware/Platform/nova_fw_update.h`**
 — if those macros change, mirror the change here.
 
-## Bench session-2 runbook (build + flash + verify)
+## Session 2 runbook (JTAG-only — no bench items required)
 
-### Pre-flight (do BEFORE flashing anything)
+The full Session 2 workflow runs over JTAG via XDS110. No DIP switches,
+no UART boot mode, no USB cycling. The orchestration script
+[`Flash-SblChooser.ps1`](Flash-SblChooser.ps1) handles backup, flash,
+seed, and the negative test as one-button operations.
 
-1. **Image one bench board's existing OSPI sector 0 to a backup `.bin`**
-   so you can cross-flash the stock SBL back if `sbl_chooser` bricks:
-   ```powershell
-   # From CCS Debug Server Scripting (DSS):
-   cd F:\Constellation\Nova_Firmware\lp_am2434\ospi_flash
-   $env:LP_CCXML="F:\Constellation\Nova_Firmware\lp_am2434\AM2434_LP_A.ccxml"
-   dss.bat .\ospi_read_dump.js     # writes ospi_dump_0x000000_0x60000.bin
-   # Copy it somewhere safe (e.g. F:\Constellation\backups\sbl_stock_A.bin)
-   ```
-2. **Confirm only one XDS110 probe is enumerated.** Invariant #7 is
-   load-bearing here:
-   ```powershell
-   & "C:\ti\ccs2050\ccs\ccs_base\common\uscif\xds110\xdsdfu.exe" -e
-   # Must show exactly one device. Unplug the others.
-   ```
-3. **Pick the smoke-test board.** Probably Probe A (STORAGE, S24L0417)
-   so a brick doesn't affect the controller. Confirm with the user.
+### Prerequisites (workstation, no bench)
+
+1. **CCS 12.0+** with TI MCU+ SDK 12.00 at
+   `C:\ti\mcu_plus_sdk_am243x_12_00_00_26`.
+2. **`sysconfig_1.27.0`** at `C:\ti\sysconfig_1.27.0`.
+3. **ti-arm-clang 4.0.4 LTS** at `C:\ti\ti-cgt-armllvm_4.0.4.LTS`.
+4. **The target board is wired up + powered + reachable via XDS110.**
+   Any one of the four bench probes (`A`, `N`, `P`, `T`). Recommend `A`
+   (STORAGE, S24L0417) so a worst-case brick doesn't affect the
+   controller.
 
 ### Step 1 — Wire SysConfig for the Flash driver
 
@@ -96,7 +92,7 @@ We need a Flash driver instance so `sbl_bank_select.c` can call
 `Flash_read` / `Flash_eraseBlk` / `Flash_write`. Add it to
 `example.syscfg`:
 
-1. Open SysConfig GUI on `example.syscfg`.
+1. Open SysConfig GUI on `r5fss0-0_nortos/example.syscfg`.
 2. **TI DRIVERS → Flash → ADD**.
 3. Match the OSPI configuration of the running Nova app (W25Q128JV
    or W25Q64JV depending on the board — check `flash_log.txt` from
@@ -108,171 +104,162 @@ We need a Flash driver instance so `sbl_bank_select.c` can call
 
 ```powershell
 cd F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang
-$env:MCU_PLUS_SDK_PATH="C:\ti\mcu_plus_sdk_am243x_12_00_00_26"
-$env:SYSCFG_PATH="C:\ti\sysconfig_1.27.0"
-$env:CG_TOOL_ROOT="C:\ti\ti-cgt-armllvm_4.0.4.LTS"
+$env:MCU_PLUS_SDK_PATH = "C:\ti\mcu_plus_sdk_am243x_12_00_00_26"
+$env:SYSCFG_PATH       = "C:\ti\sysconfig_1.27.0"
+$env:CG_TOOL_ROOT      = "C:\ti\ti-cgt-armllvm_4.0.4.LTS"
 gmake -s PROFILE=release all
 # → sbl_chooser.release.tiimage   (signed for HS_FS boot)
 ```
 
-Build failures to expect on first try:
-- `gFlashHandle[CONFIG_FLASH0]` undefined → SysConfig step 1 was skipped.
-- Linker can't find sbl_bank_select.o → makefile FILES list is wrong.
-- `Bootloader_FlashArgs` not found → missing `#include
-  <drivers/bootloader/bootloader_flash.h>` (already in our main.c).
+Common build failures:
+- `gFlashHandle[CONFIG_FLASH0]` undefined → SysConfig step 1 skipped.
+- Linker can't find `sbl_bank_select.o` → makefile `FILES_common` is wrong.
+- `Bootloader_FlashArgs` undefined → missing `#include
+  <drivers/bootloader/bootloader_flash.h>` in main.c (already in ours).
 
-### Step 3 — Flash to one bench board
+### Step 3 — JTAG-flash the SBL chooser, seed metadata, and verify (one command)
 
-Use the existing UART-flash path (SW4 → UART boot mode) so the JTAG
-path stays available for recovery:
+```powershell
+cd F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser
+.\Flash-SblChooser.ps1 -Probe A
+```
+
+This runs four operations in order:
+
+| # | Op | Detail |
+|---|---|---|
+| 1 | Probe check | xdsdfu verifies exactly one XDS110 (invariant #7); aborts if multiple are attached or the target serial is missing |
+| 2 | Backup stock SBL | dumps OSPI `0x000000 – 0x05FFFF` (384 KB) via memory-mapped XIP read into `F:\Constellation\backups\sbl_stock_A_YYYYMMDD-HHMMSS.bin`. Used for recovery if the chooser bricks the board. |
+| 3 | Flash chooser | writes `sbl_chooser.release.tiimage` to OSPI `0x000000` via the existing `flasher_uart` + `uniflash_run.js` path |
+| 4 | Seed metadata | builds a 256-byte FwBootMeta + Bank A FwBankHeader block (magic=NOVA, sequence=1, valid=1, active=1) and writes it to OSPI `0x300000` |
+
+The script prints the expected boot trace and the UART monitoring
+command at the end. After it finishes, power-cycle the LP (USB unplug +
+replug) so it boots from OSPI, and watch UART0 on the matching COM port.
+
+Each operation is independently skippable via switches (e.g.
+`-SkipBackup` if you've already imaged the stock SBL on this board).
+
+### Step 4 — Verify boot trace
+
+Capture UART0 output:
 
 ```powershell
 cd F:\Constellation\Nova_Firmware\lp_am2434
-# Set DIP switches to UART boot mode (SW4: 1+2+3 ON)
-# USB-cycle Probe A
-& python uart_uniflash.py -p COM5 `
-    --cfg .\sbl_chooser\flash_chooser_only.cfg     # see template below
-# Set DIP switches back to OSPI boot mode (SW4: 2+6 ON)
-# USB-cycle Probe A
+.\Capture-Com.ps1 -Port COM5    # COM port for Probe A (STORAGE)
 ```
 
-The `flash_chooser_only.cfg` template needs to write ONLY the SBL
-chooser at offset `0x000000`, leaving the app at `0x080000` and the
-device-config at `0x600000` untouched. Don't have one yet — derive
-from `Nova_Firmware/lp_am2434/ti-arm-clang/flash_sbl_ospi_commission.cfg`.
-
-### Step 4 — Write seed metadata (one-shot via JTAG)
-
-Fresh-flashed boards have `0xFF` at `0x300000` (the meta sector).
-SblBankSelect_Choose detects this (boot_count=0 + no magic) and falls
-through to LEGACY mode (boot 0x080000 unconditionally). That works
-for the first boot. To make subsequent boots use the real selection
-logic, write the seed metadata:
-
-```javascript
-// JTAG-write via DSS — see ospi_flash/seed_meta_block.js (to be written
-// at the bench when needed). Sets:
-//   FwBootMeta:        boot_count=1, boot_reason=0, watchdog_strikes=1
-//   Bank A header:     magic="NOVA", sequence=1, valid=1, active=1,
-//                      image_size+crc computed from the existing
-//                      image at 0x080000.
-```
-
-This is a one-time JTAG operation per board. After the first
-successful OTA-via-bridge, Bank B will be written normally and the
-app's `NovaFwUpdate_ConfirmBoot` (already wired in Session 1) will
-keep both banks' headers fresh.
-
-### Step 5 — Reset and verify boot trace
-
-Expected on UART0:
+Expected on cold boot from OSPI:
 
 ```
 Starting OSPI Bootloader ...
-[SBL] bank=A seq=1 off=0x080000 boots=2 strikes=1 reason=0
+[SBL] bank=A seq=1 off=0x080000 boots=2 strikes=2 reason=0
 Image loading done, switching to application ...
 [BB] LpDeviceConfig_Init ok
+[BB] NovaFwUpdate_Init ok
 ...
 ```
 
-The `strikes=1` is normal — it clears within 30 s once the app
-reaches "healthy" (5 alive bits held continuously via Session 1's
-heartbeat hook). Next boot you'll see `strikes=1` again (the SBL
-increment) → clears to 0 in OSPI after 30 s healthy → next boot
-shows `strikes=1` once more (the increment).
+`strikes=2` is normal — Session 1's heartbeat hook clears the OSPI
+counter to 0 after 30 s of all-alive, but the SBL bumps it back to 1
+on the *next* boot's increment. Steady state is `strikes=1` until
+something fails. After 30 s healthy you can verify the clear by
+booting again and observing `strikes=1` instead of `strikes=2`.
 
-If you see `bank=LEGACY off=0x080000 boots=0`: the SBL didn't find
-metadata (you skipped step 4, or it was wiped). Boot still works
-because LEGACY mode just unconditionally boots `0x080000`.
+#### Failure modes to recognize on the boot trace
 
-If you see `bank=GOLDEN off=0xC00000`: both Bank A and Bank B failed
-validation. **This should never happen on a freshly-flashed board**
-— it means the seed write in step 4 didn't take, or the image at
-`0x080000` got corrupted, or you hit the strike-ceiling (≥3) on the
-high-sequence bank. Check the boots= count to see how many SBL
-runs the strikes accumulated over.
+| Trace shows | Means | Action |
+|---|---|---|
+| `bank=LEGACY off=0x080000 boots=0` | Chooser found no metadata (seed step skipped or wiped) | Boot still works (LEGACY = unconditional 0x080000). Re-run `Flash-SblChooser.ps1 -Probe X -SkipBackup -SkipSblFlash` to seed. |
+| `bank=GOLDEN off=0xC00000` | Both banks rejected | Either negative test triggered, or Bank A's seed didn't take. No Golden image is flashed today → SBL spins in FATAL. Restore via `-SkipBackup -SkipSblFlash` to re-seed Bank A. |
+| `bank=A seq=1 off=0x080000 strikes=4 reason=2` | Strike fallback path triggered | App isn't reaching healthy in 30 s × 3 boots. Check Session 1's heartbeat hook in `lp_watchdog_client.c`. |
+| No `[SBL]` line at all | Chooser didn't run | Either the SBL flash failed silently, or you're reading from a stale terminal. Re-power-cycle. |
 
-### Step 6 — Negative test (the actual F2c proof)
+### Step 5 — Negative test (rollback proof)
 
-Manually corrupt Bank A's `image_crc` field:
-
-```javascript
-// JTAG-write 0xDEADBEEF to FW_HEADER_OFFSET + FW_BANK_A_HDR_OFFSET + 8
-// (image_crc is the 3rd uint32 in FwBankHeader, offset 8 within the
-// header at offset 0x80 of the 0x300000 sector)
-```
-
-Reset. Expected trace:
-
-```
-[SBL] bank=A seq=N off=0x080000 ...      ← still picks Bank A
-                                          (valid bit still true,
-                                          we only corrupted CRC; SBL
-                                          doesn't CRC-check, just
-                                          trusts the valid bit)
-```
-
-This is correct behaviour — the SBL is fast and trusts the app to
-have validated the image. If we want CRC-checked SBL boot, that's
-a Session-3 extension.
-
-To trigger the actual rollback path, instead set Bank A's `valid`
-field to `0`:
-
-```javascript
-// JTAG-write 0 to FW_HEADER_OFFSET + FW_BANK_A_HDR_OFFSET + 12
-// (valid is the 4th uint32 in FwBankHeader)
-```
-
-Reset (requires Bank B to be written with a valid image first — chain
-this test AFTER doing one full OTA cycle). Expected trace:
-
-```
-[SBL] bank=B seq=M off=0x900000 boots=N strikes=1 reason=0
-```
-
-`reason=0` because we're not in the strike-fallback path; we just
-followed the priority order (Bank B was the highest-sequence VALID
-bank).
-
-To trigger strike-based fallback specifically, force the app to hang
-before reaching 30 s healthy 3 times in a row. Easiest way: temporarily
-patch the watchdog client to never set `s_ota_confirmed`. Reset
-three times. On the 4th boot, SBL trace should show:
-
-```
-[SBL] bank=B seq=M-1 off=0x900000 boots=4 strikes=0 reason=2
-```
-
-(`strikes=0` because pick_bank reset them when falling back; `reason=2`
-= FALLBACK.)
-
-### Step 7 — Cross-check Bank B persistence
-
-After Session 2 is proven on one board, the other 3 bench boards
-get the same SBL flash in step 3. The seed metadata step (4) is
-PER-BOARD because Bank A's image CRC differs.
-
-## Recovery: if `sbl_chooser` bricks the board
-
-JTAG-flash TI's stock `sbl_ospi.release.hs_fs.tiimage` back to
-`0x000000`. The app at `0x080000` is untouched and boots normally
-without bank metadata.
+To exercise the SBL fallback path, re-write the seed with `valid=0`:
 
 ```powershell
-# From the backup taken in Pre-flight step 1:
-cd F:\Constellation\Nova_Firmware\lp_am2434\ospi_flash
-$env:LP_CCXML="F:\Constellation\Nova_Firmware\lp_am2434\AM2434_LP_A.ccxml"
-dss.bat .\uniflash_loadraw.js F:\Constellation\backups\sbl_stock_A.bin 0x000000
+.\Flash-SblChooser.ps1 -Probe A -SkipBackup -SkipSblFlash -InvalidateBankA
 ```
 
-If that doesn't work, fall back to the UART recovery path:
+Power-cycle and watch the boot trace. With no Bank B image yet (a
+fresh F2c install hasn't run OTA), SBL will report
+`bank=GOLDEN off=0xC00000` and spin in FATAL because no Golden image
+exists at `0xC00000`. **That's the expected failure mode without a
+Golden image flashed** — it proves the chooser correctly REJECTED
+the invalid Bank A.
+
+To recover: re-run the seed with valid=1:
 
 ```powershell
-# SW4: 1+2+3 ON (UART boot), USB-cycle Probe A
-python uart_uniflash.py -p COM5 --cfg .\ti-arm-clang\flash_nova_lp_win.cfg
-# Full nova_lp.bin + stock SBL reflash — same as a wrong-probe recovery.
+.\Flash-SblChooser.ps1 -Probe A -SkipBackup -SkipSblFlash
 ```
+
+For a more interesting fallback test, do this AFTER a full OTA cycle
+that has written Bank B (sequence=2, valid=1) — then invalidate Bank A
+and confirm the SBL falls to Bank B:
+
+```
+[SBL] bank=B seq=2 off=0x900000 boots=N strikes=1 reason=0
+```
+
+`reason=0` because we're not in the strike-fallback path; we followed
+the priority order (Bank B was the highest-sequence VALID bank).
+
+### Step 6 — Cross-flash to the other bench boards
+
+Once Session 2 is verified on Probe A, the other three boards get the
+same treatment:
+
+```powershell
+.\Flash-SblChooser.ps1 -Probe N    # CONTROLLER
+.\Flash-SblChooser.ps1 -Probe P    # GDC
+.\Flash-SblChooser.ps1 -Probe T    # TRITON
+```
+
+Each backup ends up in `F:\Constellation\backups\sbl_stock_<probe>_<timestamp>.bin`
+so you have per-board recovery archives.
+
+## Recovery: if `sbl_chooser` bricks a board
+
+The backup from step 3.2 is your insurance:
+
+```powershell
+cd F:\Constellation\Nova_Firmware\lp_am2434\sbl_chooser
+.\Flash-SblChooser.ps1 -Probe A `
+    -SkipBackup `
+    -SblImagePath "F:\Constellation\backups\sbl_stock_A_20260530-141523.bin" `
+    -SkipSeed
+# Replaces the chooser at 0x000000 with the saved stock SBL.
+# The app at 0x080000 stays put and boots normally without metadata.
+```
+
+If `Flash-SblChooser.ps1` itself can't reach the board (e.g. you flashed
+something that breaks JTAG attach), the last-resort is the UART boot
+fallback — but **that requires bench access** (DIP switch SW4:
+1+2+3 ON, USB-cycle, then `uart_uniflash.py -p COM5 --cfg .\ti-arm-clang\flash_nova_lp_win.cfg`).
+That path full-reflashes both the SBL and the app from scratch and is
+equivalent to a wrong-probe recovery.
+
+In practice: as long as JTAG attach still works, the JTAG-only recovery
+above is sufficient. The TI ROM is in chip mask and can always be
+forced into a known-good state by JTAG-resetting before the bad SBL
+runs — the boot sequence is `ROM → (load SBL) → (jump to SBL)` and
+JTAG halt at the ROM stage is always available.
+
+## Pre-Session-2 (workstation only, no bench)
+
+Before running `Flash-SblChooser.ps1`:
+
+1. Make sure the SDK paths in `Flash-SblChooser.ps1` and the makefile
+   resolve to your installs.
+2. Do the SysConfig GUI step (§Step 1 above) and check the generated
+   `ti_drivers_config.c` declares `gFlashHandle[CONFIG_FLASH0]`.
+3. Build (§Step 2 above) and confirm
+   `sbl_chooser.release.tiimage` exists.
+4. Make sure only one XDS110 is plugged in (the script checks, but
+   pre-flight saves a wasted DSS startup).
 
 ## What's NOT in this session
 
