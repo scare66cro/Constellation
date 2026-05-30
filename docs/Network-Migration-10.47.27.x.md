@@ -1,33 +1,34 @@
 # Network Migration — `10.1.2.x` → `10.47.27.x`
 
-> 🚨 **CURRENT PI5 IS DUAL-HOMED FOR DEV — NOT THE PRODUCTION ARCHITECTURE 🚨**
+> **HISTORICAL — migration COMPLETE 2026-05-03.** Live IP map is in
+> [`docs/System-State.md`](System-State.md) §1. This doc is the
+> original migration plan + checklist; kept as the record of what
+> was changed and why. **The `.20` proposed rpi5 IP in §3.2 below was
+> abandoned — final rpi5 address is `10.47.27.108` (kept the `.108`
+> host octet so deploy scripts only needed the subnet swap, not a full
+> rename).**
+
+> 🚨 **BENCH PI5 IS DUAL-HOMED FOR DEV — NOT THE PRODUCTION ARCHITECTURE 🚨**
 >
 > The bench rpi5 currently sits at `10.47.27.108` on the same LAN as the
-> orbit LPs. This is a **dev-only shortcut** that lets us iterate on
-> Pi5↔LP traffic (OTA push, Modbus polls, fleet probe) without building
-> Nova-as-broker first. **In production, the Pi5 must live on the
-> customer/internet-side LAN (e.g. `192.168.10.108`) with NO IP route
-> to `10.47.27.0/24`.** The only authorised Pi5↔equipment data path is
-> the UART (`/dev/ttyAMA0` @ 921600, COBS+protobuf envelopes) between
-> the Pi5 and the Nova-controller LP. See
-> [`docs/uart-airgap-architecture.md`](uart-airgap-architecture.md) for
-> the full architecture invariant and the migration plan that moves
-> the bridge-side direct-LP TCP code (`orbitOtaPush.ts`,
-> `orbitFleetResolver.ts`, `probe_fleet.ts`, `vfdClient.ts`,
-> `orbitMbtcp.ts`) into Nova-as-broker. Also codified as
-> [`CLAUDE.md`](../CLAUDE.md) invariant #12.
+> orbit LPs. This is a **dev-only shortcut**. **In production, the Pi5
+> must live on the customer/internet-side LAN (e.g. `192.168.10.108`)
+> with NO IP route to `10.47.27.0/24`.** The only authorised
+> Pi5↔equipment data path is the UART (`/dev/ttyAMA0` @ 921600,
+> COBS+protobuf envelopes) between the Pi5 and the Nova-controller LP.
+> See [`docs/uart-airgap-architecture.md`](uart-airgap-architecture.md)
+> for the full architecture invariant and the migration plan. The
+> bridge-side direct-LP OTA-push modules (`orbitOtaPush.ts`,
+> `orbitFleetResolver.ts`, `probe_fleet.ts`) were **deleted in Phase
+> 4b** (commit `5465ab5`, 2026-05-29); `vfdClient.ts` and
+> `orbitMbtcp.ts` (Modbus paths) are the remaining Phase-4b migration
+> targets. Also codified as [`CLAUDE.md`](../CLAUDE.md) invariant #12.
 
-> ✅ **COMPLETE (2026-05-03)** — see [`docs/System-State.md`](./System-State.md) §1 for the live IP map.
->
-> **Done:** LP boards on `10.47.27.0/24` (CONTROLLER `.1`,
+> ✅ **DONE 2026-05-03:** LP boards on `10.47.27.0/24` (CONTROLLER `.1`,
 > STORAGE `.2`, GDC `.3`, TRITON `.4`). Workstation has dual-IP NIC
-> (`10.47.27.100/24` + `10.1.2.135/24` on `Ethernet 2`). **rpi5 moved
-> to `10.47.27.108`** (kept the `.108` host octet so deploy scripts
-> only needed the subnet swap, not a full rename to `.20`). The old
-> `10.1.2.x` lab subnet is no longer reachable.
->
-> The `.20` rename below was abandoned — final rpi5 address is
-> **`10.47.27.108`**, not `.20`.
+> (`10.47.27.100/24` + `10.1.2.135/24` on `Ethernet 2`). **rpi5 at
+> `10.47.27.108`**. The old `10.1.2.x` lab subnet is no longer
+> reachable.
 >
 > **Why:** the lab `10.1.2.x` subnet is shared with the office VoIP
 > system. The SIP phone at `10.1.2.150` (MAC `00:30:4d:f4:a4:db`,

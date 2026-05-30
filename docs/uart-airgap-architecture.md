@@ -12,18 +12,21 @@
 > Any bridge-side code that opens a TCP socket to `10.47.27.x` is dev-only
 > and must not ship.
 >
-> **THE CURRENT BENCH (2026-05-20) IS DUAL-HOMED FOR DEV CONVENIENCE.**
-> The Pi5 sits at `10.47.27.108` on the same LAN as the orbit LPs and can
-> reach `:5503` on each LP directly. This breaks the airgap. It exists
-> only because it lets us iterate on the LP firmware over OTA without
-> building Nova-as-OTA-relay first. **All bridge-side code that
-> TCP-connects directly to LPs (`orbitOtaPush.ts`, `orbitOtaClient.ts`,
-> `orbitFleetResolver.ts`, `probe_fleet.ts`, `vfdClient.ts`,
-> `orbitMbtcp.ts`) is on borrowed time and must migrate to Nova-as-relay
-> before a Pi5 ships to a customer.**
+> **THE CURRENT BENCH (2026-05-30) IS DUAL-HOMED FOR DEV CONVENIENCE.**
+> The Pi5 sits at `10.47.27.108` on the same LAN as the orbit LPs.
 >
-> If you are touching this stack and you see TCP-from-Pi5-to-LP, that is
-> the migration target, not the production design.
+> **Phase 4 (OTA) FULLY LANDED 2026-05-29.** The bridge-side direct-LP
+> OTA modules `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
+> `probe_fleet.ts` are **deleted** (commit `5465ab5`, 816 lines). OTA
+> goes UART → Nova-side broker (`nova_ota_broker.c`) → orbit `:5503`
+> via Nova-side `nova_ota_push.c`. The 4-board fleet validated
+> end-to-end on 0.A.208.
+>
+> **Phase 4b remaining: `vfdClient.ts` and `orbitMbtcp.ts` (Modbus
+> paths) still TCP-from-Pi5-to-LP.** These are the next migration
+> targets. If you are writing new bridge↔LP code and you see
+> TCP-from-Pi5-to-LP, that is the migration target, not the production
+> design.
 
 ## The intended architecture (production)
 
@@ -91,29 +94,28 @@ surface means designing a new envelope field, decoding it in Nova,
 acting on it. There's no "just open another port from the Pi5" shortcut.
 That cost is the price of the airgap, and it's worth it.
 
-## The current dev compromise (2026-05-20)
+## The current dev compromise (2026-05-30)
 
 Today's bench has the Pi5 dual-homed (or single-homed on the airgapped
-LAN at `10.47.27.108`). This means:
+LAN at `10.47.27.108`).
 
-- `orbitFleetResolver.snapshotFleet()` directly probes each LP's
-  `:5503` OTA listener for `FwBankInfo`.
-- `firmwareInstaller.pushOneComponent()` directly streams chunks to
-  the destination LP via `orbitOtaPush.pushImage()`.
-- `probe_fleet.ts` runs on the Pi5 (or the dev workstation) and
-  reaches the LPs directly.
-- `vfdClient.ts` and `orbitMbtcp.ts` are Modbus TCP clients that talk
-  directly to LP `:5502`.
+**OTA path: migrated.** Phase 4 / Phase 4b landed 2026-05-29:
+`firmwareInstaller.ts` now drives the Nova-side broker exclusively over
+UART envelopes. The bridge-side OTA modules that previously TCP-pushed
+to LPs (`orbitOtaPush.ts`, `orbitFleetResolver.ts`, `probe_fleet.ts`)
+are deleted.
 
-**None of this works in the production airgap.** It works on the bench
-because we put the Pi5 on the wrong LAN.
+**Modbus path: still bench-direct.** What remains:
 
-The reason we did this: it lets us iterate on LP-firmware changes
-rapidly without first standing up Nova-as-OTA-relay. JTAG + OTA round-
-trips in ~3 minutes today; an OTA-via-Nova round-trip would require
-Nova firmware to be the OTA broker, which is multi-session work to
-build. The "Pi5 on LAN" shortcut was the right dev call, but the
-production migration is owed.
+- `vfdClient.ts` — Modbus TCP client that talks directly to LP `:5502`
+  for VFD drive status/control.
+- `orbitMbtcp.ts` — direct Modbus TCP polls of orbit boards (and the
+  underlying transport for `vfdClient`).
+
+**None of these works in the production airgap.** They work on the
+bench because the Pi5 is on the equipment LAN. The Modbus migration
+into Nova (`Nova` polls orbits, publishes via envelopes) is the next
+significant migration after Phase 4b's OTA deletion.
 
 ## Migration plan — OTA via Nova
 
@@ -298,20 +300,24 @@ direct TCP to LPs.
 **Phase 4b — delete the dead direct-TCP modules.**
 - ☑ Delete `orbitOtaPush.ts`, `orbitFleetResolver.ts`,
   `probe_fleet.ts` from the bridge. **DONE 2026-05-29 (`5465ab5`).**
-- ☐ Drop the three `/api/_debug/broker-*` debug endpoints from `index.ts`.
-  Kept for now because `/api/_debug/broker-fleet-probe` is the operator
-  diagnostic replacement for `probe_fleet.ts`. Drop the other two
-  (`broker-install-fail-test`, `broker-install-begin-abort`) whenever
-  there's a focused cleanup pass.
-- ☐ Drop `InstallOptions.fleet` and `ORBIT_FLEET` env handling.
+- ☑ Drop `/api/_debug/broker-install-fail-test` +
+  `/api/_debug/broker-install-begin-abort` debug endpoints.
+  `/api/_debug/broker-fleet-probe` retained as the operator
+  diagnostic replacement for `probe_fleet.ts`. **DONE 2026-05-29
+  (`c199b82`).**
+- ☑ Drop `InstallOptions.fleet` and `ORBIT_FLEET` env handling.
+  **DONE 2026-05-29 (`c199b82`).**
 - ☐ Move `vfdClient.ts` and `orbitMbtcp.ts` Modbus-TCP logic INTO Nova.
   Today these run on the Pi5 because that was the dev shortcut.
   Production: Nova polls the orbit LPs and VFD over Modbus, then
   publishes the results to the Pi5 via envelopes (today's
-  `FrontMatter` and friends).
-- ☐ Update the bridge env: drop `ORBIT_FLEET`, drop `VFD_HOST`.
+  `FrontMatter` and friends). **REMAINING — next significant
+  migration chunk.**
+- ☐ Update the bridge env: drop `VFD_HOST` (couples with Modbus
+  migration above).
 - ☐ Update Pi5 deployment: bind only to `192.168.10.108` (or whatever
-  customer-side address), explicitly NOT to `10.47.27.0/24`.
+  customer-side address), explicitly NOT to `10.47.27.0/24`. Config
+  change on the box.
 
 ### Phase 5 — Move the dev Pi5 off the equipment LAN
 

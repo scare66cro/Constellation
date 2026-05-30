@@ -1,16 +1,35 @@
 # AS2 Mini IO (Legacy) vs Nova Firmware — Equipment Control Review
 
-> Generated: April 18, 2026
-> Purpose: Line-by-line review of how Nova replicates legacy equipment control.
-> Status: **DRAFT — needs walkthrough to confirm/correct each finding**
+> Generated: April 18, 2026.
+> **Status: HISTORICAL REFERENCE — superseded by Phase 17 FINAL
+> (2026-05-30).** Nova firmware no longer compiles legacy AS2 `.c`
+> files — equipment control runs on Nova-native ports
+> (`nova_controls.c`, `nova_modes.c`, `nova_states.c`,
+> `nova_failures.c`, `nova_warnings.c`, `nova_pwm.c`,
+> `nova_serialshift.c`, `nova_timer.c`). Override headers at
+> `Nova_Firmware/Platform/include/legacy/` carry Nova-extension fields
+> (OrbitRole, float PID) without touching the AS2 source tree per
+> invariant #0.
+>
+> The findings below were captured against the transitional state when
+> Nova still compiled AS2 sources directly. Keep for reference; the
+> "Questions to Resolve" lists are historically interesting (they
+> document the per-equipment porting decisions) but no longer
+> actionable.
 
 ---
 
-## Architecture Overview
+## Architecture Overview (historical — pre-Phase 17)
 
-Both firmwares share the **same application-level source files** — Controls.c, States.c, Modes.c, SerialShift.c, etc. are compiled directly from the legacy `Mini_IO legacy refference only firmware/Application/` directory via the Nova Makefile.
+Originally both firmwares shared the **same application-level source
+files** — Controls.c, States.c, Modes.c, SerialShift.c, etc. compiled
+directly from the legacy `docs/legacy_AS2_reference/Application/`
+directory via the Nova Makefile. **As of Phase 17 (2026-05-30) the
+Nova-native ports have fully replaced this scheme**; the AS2 reference
+tree stays read-only per invariant #0.
 
-The differences are entirely in the **hardware abstraction layer (HAL)**:
+The original transitional differences were entirely in the **hardware
+abstraction layer (HAL)**:
 
 | Layer | Legacy (TM4C129E) | Nova (AM2434 R5F) |
 |---|---|---|

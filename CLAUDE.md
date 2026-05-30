@@ -124,30 +124,32 @@ mechanical, not a research project.
 # Doc map (single source of truth for "where is X?")
 
 ## Architecture & state
-- [`docs/System-State.md`](docs/System-State.md) — **read first.** Live architecture, bench rig, workflow, Phase-C lessons.
+- [`docs/System-State.md`](docs/System-State.md) — **read first.** Live architecture (fleet on 0.A.208, Phase 5 proto-direct landed), bench rig, workflow.
 - [`docs/firmware-bridge-protocol.md`](docs/firmware-bridge-protocol.md) — COBS+CRC + save-path invariants + `/health`.
 - [`docs/firmware-equipment-control.md`](docs/firmware-equipment-control.md) — equipment state machines, PID cadence, AO fan-out.
-- [`docs/Legacy-vs-Nova-Equipment-Control-Review.md`](docs/Legacy-vs-Nova-Equipment-Control-Review.md) — AS2 vs Nova per-equipment.
-- [`docs/proto-direct-redesign-plan.md`](docs/proto-direct-redesign-plan.md) — transport architecture, `useDraft` / `writeProto`.
+- [`docs/Legacy-vs-Nova-Equipment-Control-Review.md`](docs/Legacy-vs-Nova-Equipment-Control-Review.md) — AS2 vs Nova per-equipment (Phase 17 FINAL — all equipment ported Nova-native).
+- [`docs/proto-direct-redesign-plan.md`](docs/proto-direct-redesign-plan.md) — transport architecture, `useDraft` / `writeProto` (Phase 5 LANDED 2026-05-30).
 - [`docs/proto-migration-pattern.md`](docs/proto-migration-pattern.md) — per-page CSV→proto migration recipe.
 - [`docs/proto-force-zero-design.md`](docs/proto-force-zero-design.md) — design rationale for force-encoders.
-- [`docs/Simulator-to-Production-Transition.md`](docs/Simulator-to-Production-Transition.md) — sim→prod (no simulator anymore).
+- [`docs/Simulator-to-Production-Transition.md`](docs/Simulator-to-Production-Transition.md) — sim→prod transition COMPLETE; bench == prod binaries.
 - [`docs/ioconfig-architecture.md`](docs/ioconfig-architecture.md) — IO Config wire layout, slot invariants.
-- [`docs/triton-grc-port-plan.md`](docs/triton-grc-port-plan.md) — TRITON refrigeration GPIO/EPWM.
+- [`docs/triton-grc-port-plan.md`](docs/triton-grc-port-plan.md) — TRITON refrigeration GPIO/EPWM (Phase 17 LANDED).
 - [`docs/ui-changes.md`](docs/ui-changes.md) — UI page moves, swipe-nav, menu changes.
 - [`docs/swipe-navigation.md`](docs/swipe-navigation.md), [`docs/touch-slider-fix.md`](docs/touch-slider-fix.md), [`docs/version-page-refactor.md`](docs/version-page-refactor.md).
 
 ## Hardware / bringup
-- [`docs/LP-AM2434-Hardware-Bringup-Plan.md`](docs/LP-AM2434-Hardware-Bringup-Plan.md) — bringup reference, bench rig.
-- [`docs/LP-AM2434-Ethernet-Bringup.md`](docs/LP-AM2434-Ethernet-Bringup.md) — CPSW/ICSSG init, PHY.
-- [`docs/LP-AM2434-OTA-Update-Plan.md`](docs/LP-AM2434-OTA-Update-Plan.md) — OTA design (partial Phase 1A).
+- [`docs/LP-AM2434-Hardware-Bringup-Plan.md`](docs/LP-AM2434-Hardware-Bringup-Plan.md) — bringup reference, bench rig (4-board fleet live).
+- [`docs/LP-AM2434-Ethernet-Bringup.md`](docs/LP-AM2434-Ethernet-Bringup.md) — CPSW/ICSSG init, PHY (historical bringup; LP runs 100M-FD in production).
+- [`docs/LP-AM2434-OTA-Update-Plan.md`](docs/LP-AM2434-OTA-Update-Plan.md) — OTA design (Phase 4 end-to-end VALIDATED 2026-05-29).
+- [`docs/lp-am2434-ota-hardening-plan.md`](docs/lp-am2434-ota-hardening-plan.md) — OTA defensive checks (G1-G4 DONE; Gap 5/6 DEFERRED).
 - [`docs/lp-am2434-ospi-dac-writes.md`](docs/lp-am2434-ospi-dac-writes.md) — **DAC-mode write invariant** (the rule that took 3 days to find; never toggle DAC bit between sub-PPs).
 - [`docs/LP-Flash-Probe-Discipline.md`](docs/LP-Flash-Probe-Discipline.md) — flash/probe/reset, wrong-probe recovery.
 - [`docs/Constellation-Board-Hardware-Spec.md`](docs/Constellation-Board-Hardware-Spec.md) — custom production PCB v0 spec.
-- [`docs/Network-Migration-10.47.27.x.md`](docs/Network-Migration-10.47.27.x.md) — lab network plan.
-- [`docs/uart-airgap-architecture.md`](docs/uart-airgap-architecture.md) — **production UART airgap + Nova-as-OTA-broker migration plan.** Bench Pi5 is currently dual-homed for dev; production Pi5 lives on internet side with UART-only path to Nova.
+- [`docs/lp-am2434-network-production-requirements.md`](docs/lp-am2434-network-production-requirements.md) — production-PCB network requirements (drop the 100M-FD downshift).
+- [`docs/Network-Migration-10.47.27.x.md`](docs/Network-Migration-10.47.27.x.md) — lab network migration (COMPLETE 2026-05-03; rpi5 at `.108`).
+- [`docs/uart-airgap-architecture.md`](docs/uart-airgap-architecture.md) — **production UART airgap + Nova-as-OTA-broker migration.** Phase 4 (OTA) LANDED. Phase 4b vfdClient/orbitMbtcp Modbus migration is the next significant chunk. Bench Pi5 is still dual-homed for dev.
 - [`docs/lp-am2434-watchdog-design.md`](docs/lp-am2434-watchdog-design.md), [`docs/lp-am2434-f2c-sbl-chooser-design.md`](docs/lp-am2434-f2c-sbl-chooser-design.md).
-- [`docs/Bench-Checklist-2026-05-02.md`](docs/Bench-Checklist-2026-05-02.md) — archived runbook.
+- [`docs/Bench-Checklist-2026-05-02.md`](docs/Bench-Checklist-2026-05-02.md) — archived 2026-05-02 runbook (historical).
 
 ## Firmware versioning
 - [`docs/firmware-version-current.md`](docs/firmware-version-current.md) — bump before meaningful flash.
@@ -156,7 +158,7 @@ mechanical, not a research project.
 
 ## Operational
 - [`docs/factory-defaults-review-2026-05.md`](docs/factory-defaults-review-2026-05.md) — defaults audit.
-- [`docs/session-resume-ota-flash-write.md`](docs/session-resume-ota-flash-write.md) — OTA flash-write WIP.
+- [`docs/session-resume-ota-flash-write.md`](docs/session-resume-ota-flash-write.md) — historical session resume (OTA Flash_write resolved 0.A.112; full root cause in `memories/repo/ota-flash-write-preemption-root-cause.md`).
 - [`docs/Azure-Cloud-Integration-Plan.md`](docs/Azure-Cloud-Integration-Plan.md) — cloud sync plan.
 - [`docs/history/save-path-postmortems.md`](docs/history/save-path-postmortems.md) — resolved save-path bugs.
 

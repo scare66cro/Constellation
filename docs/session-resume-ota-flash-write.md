@@ -1,14 +1,19 @@
 # OTA Flash_write — session resume (2026-05-09, post-WRRSB-validation)
 
-> **RESOLVED 2026-05-09 (firmware 0.A.112)** — root cause was FreeRTOS
-> task preemption mid-`OSPI_lld_writeIndirect` polled FIFO fill, NOT a
-> silicon/SDK/chip bug. The fix (`vTaskSuspendAll`/`xTaskResumeAll`
-> wrap around `Flash_write`/`Flash_eraseBlk`) was already designed and
-> documented in a comment in `Platform/hal_flash.c:26-37` months ago
-> but was never actually implemented. Full root-cause analysis +
-> generalised lesson: [`memories/repo/ota-flash-write-preemption-root-cause.md`](../memories/repo/ota-flash-write-preemption-root-cause.md).
-> The TI E2E ticket draft below is **no longer needed** — delete
-> instead of sending. Original session timeline retained for context.
+> **HISTORICAL — RESOLVED 2026-05-09 (firmware 0.A.112).** And the
+> resolution was itself superseded twice:
+>
+> 1. The vTaskSuspendAll fix turned out to be incomplete on 0.A.113 —
+>    see [`memories/repo/ota-flash-write-still-fails-0a113.md`](../memories/repo/ota-flash-write-still-fails-0a113.md).
+> 2. The actual definitive fix landed in 0.A.141 by migrating
+>    `Flash_norOspiWrite` calls to `hal_flash_write_dac` —
+>    INDIRECT_WRITE_XFER is broken in FreeRTOS+CPSW runtime context;
+>    DAC mode (CPU memcpy to `0x60000000 + flash_addr`) is the working
+>    path. Canonical rule: invariant #11 + [`docs/lp-am2434-ospi-dac-writes.md`](lp-am2434-ospi-dac-writes.md).
+>    Memory: [`memories/repo/lp-am2434-ota-dac-mode-fix.md`](../memories/repo/lp-am2434-ota-dac-mode-fix.md).
+>
+> The TI E2E ticket draft below was **never needed** — delete instead
+> of sending. Full session timeline retained for context only.
 
 ## Status (2026-05-09 update)
 **WRRSB SafeBoot-recovery hypothesis ruled out.** 0.A.108 with proper

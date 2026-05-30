@@ -1,14 +1,17 @@
 # Proto-Direct Redesign Plan
 
-> **Status:** Phase 5 active (May 2026). Most pages are proto-direct;
-> the bridge is a transparent transport gateway. New work follows the
-> patterns documented here. Per-page migration recipe lives in
+> **Status:** **Phase 5 LANDED 2026-05-30** (commits `f942ee5` schema,
+> `291766e` bridge, `57769cd` UI; ~180 files, +21k/-21k).
+> The bridge is a stateless transport gateway. ~30 per-page `+page.ts`
+> files deleted in favour of `useDraft` / `protoStores` / `writeProto`.
+> Per-page migration recipe lives in
 > [`proto-migration-pattern.md`](./proto-migration-pattern.md).
-
-The original goal — eliminate the bridge's CSV-translation layer so the
-SvelteKit UI consumes typed protobuf directly — is largely achieved.
-What remains is per-page write cutover on the holdouts and a final
-`legacyShim` deletion sweep.
+>
+> The original goal — eliminate the bridge's CSV-translation layer so
+> the SvelteKit UI consumes typed protobuf directly — is achieved.
+> `legacyShim.ts` is now an imperative-command dispatcher
+> (`ClearAlarm`, `*Btn`, `refrBtn`, `remoteStop`) rather than a CSV
+> translator. See [`memories/repo/legacyshim-audit-may2026.md`](../memories/repo/legacyshim-audit-may2026.md).
 
 ## Current state (May 2026)
 
@@ -74,11 +77,11 @@ What remains is per-page write cutover on the holdouts and a final
 | Item | Status | Notes |
 |------|--------|-------|
 | Repeated-submsg pages (humidifier, refrigeration, accounts, analog, auxiliary, ioconfig) | proto-direct READ + raw `writeProtoRaw` WRITE | Intentionally not on `useDraft`; the per-row repeat semantics need explicit encoding. Keep as-is. |
-| Encrypted pages (basic, tcpip) | proto-direct READ + DH+AES POST | DH+AES auth path stays on `/iot/dlr` until Phase 4 routes it through `/proto/control`. Low priority. |
-| `legacyShim.ts` | **rename pending** — every remaining branch is an imperative command dispatcher (button presses, system commands, log clears), not a CSV translator. See [`/memories/repo/legacyshim-audit-may2026.md`](/memories/repo/legacyshim-audit-may2026.md). |
-| `/iot/settings/restore` | **broken** — POSTs `RestoreSettings=…` strings to a deleted shim handler. Needs proto-direct restore implementation in `level2/settings/+page.svelte`. |
-| `dataCache.ts` CGI variables | passthrough only | `buildFrontmatterData` (~280 LOC) deleted. `getIoNamesCsv()` survives only for Azure-cloud `djangoSync`; delete when cloud migrates. `buildTcpIpData()` is the only remaining composer. |
-| Firmware `pb_uint32_force` audit | continuous | Schema-level `(agristar.force_zero) = true` annotation deferred — track as a single follow-up commit, not per page. |
+| Encrypted pages (basic, tcpip) | proto-direct READ + DH+AES POST | DH+AES auth path stays on `/iot/dlr`. Route through `/proto/control` deferred — low priority. |
+| `legacyShim.ts` rename | **deferred** — body is now an imperative-command dispatcher per [`memories/repo/legacyshim-audit-may2026.md`](../memories/repo/legacyshim-audit-may2026.md); a rename is cosmetic. |
+| `/iot/settings/restore` | proto-direct path lives in `level2/settings/+page.svelte` via `/proto/write/<sfield>`. Memory: [`memories/repo/settings-export-import.md`](../memories/repo/settings-export-import.md). |
+| `dataCache.ts` CGI variables | passthrough only — `buildFrontmatterData` deleted. `getIoNamesCsv()` survives only for Azure-cloud `djangoSync`; delete when cloud migrates. |
+| Firmware `pb_uint32_force` audit | continuous | Schema-level `(agristar.force_zero) = true` annotation deferred — see [`docs/proto-force-zero-design.md`](proto-force-zero-design.md). |
 
 ## Patterns
 

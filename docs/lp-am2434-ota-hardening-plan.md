@@ -1,24 +1,30 @@
 # LP-AM2434 OTA hardening — progress tracker
 
-> **STATUS 2026-05-21: end-to-end OTA validated on real silicon with
-> universal binary delivery.** Every defensive check fires correctly,
-> the four-layer OSPI device-config persistence bug is fully rooted
-> and fixed, and a storage LP receiving an OTA pushes of a universal
-> binary now stays as STORAGE/.2 post-reboot. See the "Final bench
-> validation 2026-05-21" section at the bottom.
+> **STATUS 2026-05-29: PHASE 4 OTA END-TO-END VALIDATED on the
+> 4-board fleet (0.A.208).** Multi-orbit + controller-self-update
+> install completes cleanly. Gaps 1-4 DONE; Gap 5 (test-fleet
+> bring-up) and Gap 6 (F2c SBL chooser) remain **DEFERRED**.
 >
-> Living doc for the OTA defensive-checks work kicked off 2026-05-20
-> after a multi-hour session where:
+> **NOTE on file references in this doc:** the bridge-side modules
+> `orbitOtaPush.ts`, `orbitFleetResolver.ts`, `probe_fleet.ts` are
+> **deleted** as of Phase 4b (commit `5465ab5`, 2026-05-29). Their
+> functionality is now in Nova firmware (`nova_ota_broker.c`,
+> `nova_ota_push.c`, `nova_fw_update.c`) accessed via UART envelopes
+> through `firmwareInstaller.ts`. Path references below to those
+> deleted files are historical — the defensive checks they describe
+> were ported into the Nova-side broker and into the new
+> bridge-side `installBundle()` orchestrator.
+>
+> Living doc, originally kicked off 2026-05-20 after a multi-hour
+> session where:
 > 1. The wrong-probe trap on JTAG (`Flash-LP.ps1`) reflashed Nova as
 >    TRITON role, causing a `.4` IP conflict and ~30 min of confused
 >    debug
 > 2. A swallowed gmake error silently flashed a stale binary,
 >    compounding (1)
 >
-> Flash-LP.ps1 got belt-and-suspenders hardening in commit
-> [43b0e16](../) ("LP-AM2434: harden Flash-LP, add Probe P, recover
-> S24L0707 chip"). This doc tracks the equivalent work for the **OTA
-> path** so we can leave boards in OSPI from now on with confidence.
+> Flash-LP.ps1 got belt-and-suspenders hardening in commit `43b0e16`
+> ("LP-AM2434: harden Flash-LP, add Probe P, recover S24L0707 chip").
 
 ## Goals
 
@@ -44,7 +50,7 @@ over TCP `:5503` with length-prefixed framing.
 | Defense | Location | Status |
 |---|---|---|
 | `.cfu` bundle sha256 verified per-component on `loadBundle()` | [`firmwareBundle.ts:132`](../constellation-ui/server/src/firmwareBundle.ts) | ✓ |
-| Per-chunk CRC32 on the wire (Ethernet/zlib polynomial) | [`orbitOtaPush.ts:68-74`](../constellation-ui/server/src/orbitOtaPush.ts), `lp_ota_task.c` | ✓ |
+| Per-chunk CRC32 on the wire (Ethernet/zlib polynomial) | `orbitOtaPush.ts:68-74` (deleted Phase 4b — ported into `nova_ota_push.c`), `lp_ota_task.c` | ✓ |
 | Full Bank-B CRC32 verified after streaming, before Activate | LP side | ✓ |
 | Bank-A CRC re-verified before stage-copy commits to Bank A | LP side | ✓ — prevents bricking |
 | HS-FS image x509 signature checked by SBL at next boot | TI ROM/SBL | ✓ — bad image won't boot |

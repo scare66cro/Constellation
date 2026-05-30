@@ -1,12 +1,28 @@
 # Constellation — Current System State
 
 > **tl;dr** — How the system is wired today. The live bench rig, the
-> day-to-day developer workflow, and the hard lessons from the Phase-C
-> bringup (May 2026). For the doc map ("where do I find X?") go to the
-> repo-root [`CLAUDE.md`](../CLAUDE.md). For protocol / save-path
-> invariants go to [`firmware-bridge-protocol.md`](firmware-bridge-protocol.md).
+> day-to-day developer workflow, and the hard lessons from Phase-C
+> bringup, Phase-D (orbit status pipeline), Phase 17 (Nova-native
+> equipment), and Phase 5 (proto-direct landing 2026-05-30). For the
+> doc map ("where do I find X?") go to the repo-root
+> [`CLAUDE.md`](../CLAUDE.md). For protocol / save-path invariants go
+> to [`firmware-bridge-protocol.md`](firmware-bridge-protocol.md).
 >
-> **Last updated:** 2026-05-07 (Phase-C complete; Phase-D in progress).
+> **Last updated:** 2026-05-30 (Phase 5 proto-direct landed; fleet on
+> 0.A.208 — Phase 4 OTA validated end-to-end 2026-05-29).
+>
+> **Fleet snapshot (2026-05-30):**
+>
+> ```
+> .1 CONTROLLER (Probe N, S24L0707, COM9)   active=bankB banks=AB  0.A.208
+> .2 STORAGE    (Probe A, S24L0417, COM5)   active=bankA banks=A-  0.A.208
+> .3 GDC        (Probe P, S24L0727, COM7)   active=bankA banks=A-  0.A.208
+> .4 TRITON     (Probe T, S24L0957, COM4)   active=bankA banks=A-  0.A.208
+> ```
+>
+> `.1 active=bankB banks=AB` is the smoking gun proving the controller
+> self-update Activate completed cleanly. Bridge `/health`: `nova.connected:true`,
+> `rxCrcErrors:0`, `rxCobsErrors:0`.
 
 ---
 
@@ -39,14 +55,15 @@
 │ CONTROLLER LP-AM2434 (Probe N, S24L0707)  10.47.27.1                   │
 │  • Owns OSPI settings + device-config banks                            │
 │  • Modbus TCP master → STORAGE / GDC / TRITON                          │
-│  • Equipment control state machines (legacy AS2 cadence preserved)     │
+│  • Equipment control state machines — Nova-native (Phase 17 FINAL,     │
+│    nova_controls.c / nova_modes.c / nova_states.c / nova_pwm.c / …)    │
+│  • Nova OTA broker (UART envelope ↔ TCP `:5503` push to orbits)        │
 └──────────┬─────────────────┬─────────────────────┬─────────────────────┘
            │ Modbus TCP :502 │                     │
            ▼                 ▼                     ▼
    STORAGE 10.47.27.2    GDC 10.47.27.3      TRITON 10.47.27.4
-   (Probe A, S24L0417)   (Probe B = N's hw,  (Probe T, S24L0957
-                          or Probe P=S24L0727 flashed 2026-05-20)
-                          Pulsar)
+   (Probe A, S24L0417)   (Probe P, S24L0727) (Probe T, S24L0957)
+   COM5                  COM7                COM4
 ```
 
 The same `nova_lp.release.mcelf.hs_fs` binary runs on every probe. Role /
@@ -57,7 +74,15 @@ IP / board-id are written to OSPI device-config at flash time by
 
 ## 2. The transparent bridge + proto-direct UI
 
-Destination architecture — **no CSV translation in the bridge for new code.**
+Destination architecture — **no CSV translation in the bridge for new
+code.** Phase 5 proto-direct LANDED 2026-05-30 (commits `f942ee5`
+schema, `291766e` bridge, `57769cd` UI). ~30 per-page `+page.ts` files
+deleted in favour of `useDraft` / `protoStores` / `writeProto`. Bridge
+modules deleted: `rs485Panel`, `orbitSimulator` (in-server),
+`vfdSimulator`, `rs485Responder`, `vfdServer`, `warningTranslator`,
+`settingsSchema`, `auditDiff`, `orbitClient`. Bridge modules added:
+`protoStream`, `firmwareBundle`, `masterSlaveSync`, `orbitMbtcp`,
+`logSpool`, `remoteSystemsSync`.
 
 ### 2.1 Three transport surfaces between UI and bridge
 
@@ -78,18 +103,20 @@ UI helpers:
 
 ### 2.2 Bridge responsibilities
 
-The bridge (`constellation-ui/server/`) is now a **stateless transport
+The bridge (`constellation-ui/server/`) is a **stateless transport
 gateway** plus a tiny set of bridge-emitted tags (200–209, e.g. VFD
 status from a Modbus client).
 
 Hard rules:
 
 - **No data fix-ups in the bridge.** No unit conversion, scaling,
-  default-substitution. Conversion to user units happens exactly once,
-  in `Nova_Firmware/Platform/nova_thread_overrides.c::ReadAnalogBoards()`.
-- **`legacyShim.ts` is shrinking, not growing.** When the last UI page
-  reading a CGI variable is migrated, the producer in `dataCache.ts`
-  must be deleted in the same commit.
+  default-substitution. ADC → engineering conversion happens exactly
+  once, on the STORAGE orbit board in
+  `Nova_Firmware/lp_am2434/orbit_server/adc_convert.c` (1:1 port of
+  legacy `Analog_Input.c::ConvertToTemp/Humid/CO2`).
+- **`legacyShim.ts` is now an imperative-command dispatcher**, not a
+  CSV translator (`ClearAlarm`, `*Btn`, `refrBtn`, `remoteStop` etc.).
+  Audit: [`memories/repo/legacyshim-audit-may2026.md`](../memories/repo/legacyshim-audit-may2026.md).
 - **TX from bridge to firmware always goes through the COBS framer.**
   Bypassing the framer corrupts CRC and produces an error storm visible
   at `/health`.
@@ -269,21 +296,44 @@ wrong-probe incident.
 
 1. Edit firmware in `Nova_Firmware/lp_am2434/` (or `Nova_Firmware/Platform/`).
 2. `cd Nova_Firmware\lp_am2434; gmake PROFILE=release`
-3. Verify only the intended XDS110 is plugged in; `xdsdfu.exe -e` shows
-   `Found 1 device. Serial: <expected>`.
-4. `.\Flash-LP.ps1 -Probe N` (or A / B). `-WipeDevCfg` only if changing
-   the board's role.
-5. `dss .\system_reset.js .\AM2434_LP_NOVA.ccxml` (cold boot from OSPI).
-   Watch UART0 at 115200 8N1 for the boot trace.
+3. Use `Set-Probe.ps1 -Probe <X> -Action Solo` (where X = A / N / P / T)
+   and verify with `xdsdfu.exe -e` showing exactly one device with the
+   intended serial. Multi-probe bench requires this discipline — see
+   invariant #7 and [`LP-Flash-Probe-Discipline.md`](LP-Flash-Probe-Discipline.md).
+4. `.\Flash-LP.ps1 -Probe N` (or A / P / T). `-WipeDevCfg` only if
+   changing the board's role.
+5. `dss .\system_reset.js .\AM2434_LP_<X>.ccxml` (cold boot from OSPI)
+   or rely on the auto-flasher's MAGIC_REBOOT path. Watch UART0 at
+   115200 8N1 for the boot trace.
+
+### Universal binary + OTA (production-shape path)
+
+1. `cd Nova_Firmware\lp_am2434; .\Build-Cfu.ps1` — produces a
+   `firmware-bundles\constellation-0.A.<n>.cfu` zip plus the raw
+   universal `ti-arm-clang\nova_lp.release.mcelf.hs_fs` (no role/IP
+   baked in).
+2. Upload + install via UI or scripted:
+   ```bash
+   ssh gellert@10.47.27.108 \
+     'UP=$(curl -s -F "file=@/tmp/constellation-0.A.208.cfu" http://localhost:9001/iot/firmware/upload) ; \
+      SID=$(echo "$UP" | grep -oE "[0-9]+-[a-z0-9]+" | head -1) ; \
+      curl -s -X POST -H "Content-Type: application/json" \
+        -d "{\"stagingId\":\"$SID\",\"allowDowngrade\":true}" \
+        http://localhost:9001/iot/firmware/install'
+   ```
+3. Poll `/iot/firmware/status` for per-component progress. End-to-end
+   ~7-8 min for a 4-component fleet install.
 
 ### UI / bridge code → rpi5
 
 1. UI: `cd constellation-ui; npm run build` then
    `wsl bash -c "cd /mnt/f/Constellation/constellation-ui && ./deploy.sh --target=production"`.
-2. Bridge: `scp constellation-ui/server/src/foo.ts gellert@10.47.27.108:/home/gellert/Gellert/constellation/constellation-ui/server/src/foo.ts`
-   then `ssh gellert@10.47.27.108 'sudo systemctl reset-failed agristar-bridge && sudo systemctl restart agristar-bridge'`.
+2. Bridge: `rpi5/_deploy_bridge_to_pi5_hw.sh` (canonical bench-target
+   deploy — snapshots live `src/`+`package*.json` to a timestamped
+   backup, rsyncs source, runs `npm install --omit=dev`,
+   `systemctl reset-failed`, restarts, validates `/health`).
 3. Tail bridge log: `bash F:\Constellation\_get_bridge_log.sh`.
-4. Sanity: `curl http://10.47.27.108/health` → `rxCrcErrors:0` after any
+4. Sanity: `curl http://10.47.27.108:9001/health` → `rxCrcErrors:0` after any
    write campaign.
 
 ### Verify a save round-trip

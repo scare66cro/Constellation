@@ -296,7 +296,7 @@ removed under the proto-direct migration.
 |---|---|
 | Proto schema | [proto/agristar/io.proto](../proto/agristar/io.proto), [proto/agristar/settings.proto](../proto/agristar/settings.proto) |
 | Firmware apply/build | [Nova_Firmware/lp_am2434/lp_settings.c](../Nova_Firmware/lp_am2434/lp_settings.c) — search `LpSettings_ApplyIoConfig`, `LpSettings_BuildIoConfigBody`, `io_config_pin_hardware_inputs`, `s_io_defaults`, `io_definition_seed_defaults` |
-| Firmware label seed (legacy compat) | [Nova_Firmware/Platform/nova_thread_overrides.c](../Nova_Firmware/Platform/nova_thread_overrides.c) — search `EquipIo` defaults table |
+| Firmware label seed (legacy compat) | `Nova_Firmware/lp_am2434/lp_engine_shim.c` (previously `Platform/nova_thread_overrides.c`, deleted in 2026-05 QEMU cleanup) — search `EquipIo` defaults table |
 | Bridge decode | [constellation-ui/server/src/novaDataStore.ts](../constellation-ui/server/src/novaDataStore.ts) — `decodeIoConfig` |
 | UI page | [constellation-ui/src/routes/level2/ioconfig/+page.svelte](../constellation-ui/src/routes/level2/ioconfig/+page.svelte) — `saveIoConfig`, `buildEquipmentList`, `setupIoConfig` |
 | UI cells | [constellation-ui/src/lib/components/InputCell.svelte](../constellation-ui/src/lib/components/InputCell.svelte), [constellation-ui/src/lib/components/OutputCell.svelte](../constellation-ui/src/lib/components/OutputCell.svelte) |

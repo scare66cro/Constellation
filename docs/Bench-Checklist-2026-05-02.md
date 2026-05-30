@@ -184,7 +184,7 @@ row populates for all boards). Not required for Phase C completion.
 
 ## Cross-references (don't print, but read once before you go)
 
-- [/memories/repo/phase-c-resume.md](../memories/repo/phase-c-resume.md) â€” Phase C deep context
+- `memories/repo/phase-c-resume.md` (deleted; referenced for historical context only) — was Phase C deep context
 - [/memories/repo/lp-am2434-ota-phase1a.md](../memories/repo/lp-am2434-ota-phase1a.md) â€” OTA :5503 listener internals
 - [/memories/repo/lp-am2434-bringup.md](../memories/repo/lp-am2434-bringup.md) â€” orbit board cold-bringup recipe
 - [/memories/repo/lan-ip-map.md](../memories/repo/lan-ip-map.md) â€” SIP phone vs TI MAC trap
