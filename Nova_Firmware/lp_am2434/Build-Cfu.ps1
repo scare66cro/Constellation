@@ -91,7 +91,17 @@ param(
     # Used to bench-test the controller self-update path (nova_fw_update.c)
     # in isolation from the orbit OTA path (lp_ota_task.c) when orbit boards
     # are wedged or unavailable. Install goes straight to controller-self-update.
-    [switch]$ControllerOnly
+    [switch]$ControllerOnly,
+    # F2c manufacturing-bundle flag — also stage the SBL chooser binary into
+    # the .cfu zip and add an `sbl_chooser` manifest entry. The runtime
+    # OTA installer does NOT auto-flash the SBL today (separate design
+    # decision tracked in docs/lp-am2434-f2c-sbl-chooser-design.md §8.3);
+    # this is for the manufacturing pipeline that uses Commission-LP.ps1
+    # at the workstation to flash fresh boards. The manifest entry is also
+    # useful for cross-checking the deployed SBL version against the
+    # built-against version at install time. SBL chooser binary is
+    # expected at sbl_chooser/r5fss0-0_nortos/ti-arm-clang/sbl_chooser.release.tiimage.
+    [switch]$IncludeSbl
 )
 $ErrorActionPreference = 'Stop'
 
@@ -256,6 +266,35 @@ try {
             }
         }
     }
+    # ─── F2c: optional SBL chooser inclusion (manufacturing bundles) ───
+    if ($IncludeSbl) {
+        $sblBuild = "$RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang\sbl_chooser.release.tiimage"
+        if (-not (Test-Path $sblBuild)) {
+            throw "IncludeSbl requested but sbl_chooser.release.tiimage not found at $sblBuild. Build it first: cd $RepoRoot\Nova_Firmware\lp_am2434\sbl_chooser\r5fss0-0_nortos\ti-arm-clang ; gmake -s PROFILE=release all"
+        }
+        $stagedSbl = Join-Path $tmp 'sbl_chooser.release.tiimage'
+        Copy-Item $sblBuild $stagedSbl -Force
+        $sblSha  = (Get-FileHash $stagedSbl -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sblSize = (Get-Item $stagedSbl).Length
+        Write-Host ""
+        Write-Host "[stage] $stagedSbl  (F2c SBL chooser)" -ForegroundColor Magenta
+        Write-Host "        size   = $sblSize bytes"
+        Write-Host "        sha256 = $sblSha"
+
+        # Add to manifest as a non-orbit component. Today's runtime OTA
+        # installer skips manifest entries without slot/role/ip fields
+        # (treated as a Pi5-style optional component, per Phase 1 manifest
+        # contract in firmwareBundle.ts). For manufacturing use, the
+        # Commission-LP.ps1 workstation script reads this entry, extracts
+        # the binary, and JTAG-flashes via Flash-SblChooser.ps1.
+        $manifestObj.components['sbl_chooser'] = [ordered]@{
+            file   = 'sbl_chooser.release.tiimage'
+            kind   = 'sbl_chooser'   # tag so the installer can recognize + skip
+            target = 'ospi_offset_0x000000'
+            sha256 = $sblSha
+        }
+    }
+
     $manifestPath = Join-Path $tmp 'manifest.json'
     ($manifestObj | ConvertTo-Json -Depth 10) | Set-Content -Path $manifestPath -Encoding ASCII
 
@@ -287,14 +326,19 @@ try {
     Write-Host "=== Done ===" -ForegroundColor Cyan
     Write-Host "Bundle: $cfuPath" -ForegroundColor Green
     Write-Host "Size  : $((Get-Item $cfuPath).Length) bytes"
+    if ($IncludeSbl) {
+        Write-Host "F2c   : sbl_chooser.release.tiimage included (manufacturing bundle)" -ForegroundColor Magenta
+        Write-Host "        Runtime OTA installer will SKIP this component." -ForegroundColor DarkGray
+        Write-Host "        Use Commission-LP.ps1 at the workstation to flash SBL chooser." -ForegroundColor DarkGray
+    }
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "  1. Set ORBIT_FLEET on the bridge env (see Start-Constellation.ps1):"
-    Write-Host "       `$env:ORBIT_FLEET = '$ControllerIp,$StorageIp,$GdcIp,$TritonIp'"
-    Write-Host "  2. Restart the bridge so it picks up the env var."
-    Write-Host "  3. Open the UI → Program → Level 1 → Software Upgrade,"
-    Write-Host "     upload the .cfu, then click Install."
-    Write-Host "  4. Watch the bridge log for the fleet-snapshot line and"
+    Write-Host "  1. (Manufacturing only — for IncludeSbl bundles)"
+    Write-Host "       cd Nova_Firmware\lp_am2434\sbl_chooser"
+    Write-Host "       .\Commission-LP.ps1 -Probe A   # repeat for N, P, T"
+    Write-Host "  2. For routine OTA: upload .cfu via the UI → Program → Level 1 → Software Upgrade,"
+    Write-Host "     then click Install. The bridge will route per the manifest's role/ip fields."
+    Write-Host "  3. Watch the bridge log for the fleet-snapshot line and"
     Write-Host "     per-component routing decisions."
 
 } finally {

@@ -239,31 +239,105 @@ at any specific OSPI offset. If the heartbeat hook misbehaves, just
 revert `lp_watchdog_client.c`; OSPI is untouched. The diagnostic
 proto field is purely additive (older bridges/firmwares ignore it).
 
-### Session 2 — `sbl_chooser` fork (next bench session)
+### ✅ Session 2 software prep — DONE 2026-05-30 (commit `7599afb`)
 
-- Copy TI's `sbl_ospi_multi_partition` example into
-  `Nova_Firmware/lp_am2434/sbl_chooser/`.
-- Insert A/B/Golden selection logic into its `main.c`. Port
-  `NovaFwUpdate_BootValidation` from `Nova_Firmware/Platform/` to
-  NoRTOS bare metal (no FreeRTOS in the SBL).
-- Build + sign per TI's standard flow →
-  `sbl_chooser.release.tiboot3.bin`.
-- JTAG-flash to `0x000000` **on a single bench board only**.
-- Verify boot trace, then verify negative test (manually corrupt
-  Bank A's CRC, confirm fallback to Golden which we'll have written
-  too).
+The 80% of Session 2 that doesn't need a probe attached:
 
-### Session 3 — productionize across the fleet
+- Forked TI's `sbl_ospi` (plain version — `sbl_ospi_multi_partition`
+  turned out to be for multi-CPU offsets, not what F2c needs) into
+  `Nova_Firmware/lp_am2434/sbl_chooser/r5fss0-0_nortos/`.
+- Wrote `sbl_bank_select.c` — NoRTOS bare-metal port of
+  `NovaFwUpdate_BootValidation`. Uses SDK `Flash_read` / `Flash_eraseBlk` /
+  `Flash_write` directly, no FreeRTOS dependencies. Struct layouts
+  mirror Platform/nova_fw_update.h with `_Static_assert` on `sizeof`.
+- Modified `main.c` to call the selector and override
+  `Bootloader_FlashArgs::appImageOffset` at runtime.
+- `README.md` with full bench runbook.
 
-Once Session 2 has proven the chooser on one board:
+### ✅ Session 2 JTAG-only tooling — DONE 2026-05-30 (commit `7dfb82a`)
 
-- Flash `sbl_chooser` to the other 3 bench boards.
-- Add Bank-B headers (write FwBankHeader for `0x900000` once the
-  next OTA cycles a real image there).
-- Update `Build-Cfu.ps1` to emit the SBL chooser binary alongside the
-  app binary so manufactured boards get both.
-- Document the new flashing pipeline in
-  `docs/firmware-equipment-control.md` and the install runbook.
+The remaining 20% of Session 2, made JTAG-only (no DIP switches, no
+UART boot, no USB cycling):
+
+- `Flash-SblChooser.ps1` — orchestrates backup + flash + seed + optional
+  invalidate-for-negative-test as one command per probe.
+- `Write-SeedMetaBlock.ps1` — builds a 256-byte FwBootMeta + FwBankHeader
+  seed in PowerShell, JTAG-writes it at OSPI `0x300000` via
+  `uniflash_run.js`. `-Valid:$false` flips to the negative-test case.
+- `dump_ospi_to_file.js` — new DSS script that loads the auto-flasher,
+  waits for OSPI XIP at `0x60000000`, halts, and `memory.readData()` a
+  requested region to a host file. Used for the pre-flight stock-SBL
+  backup.
+
+### ✅ Session 3 software prep — DONE 2026-05-30 (commit pending)
+
+Manufacturing-pipeline integration. The runtime OTA installer does NOT
+auto-flash the SBL today (deferred — see §8 below); instead:
+
+- `Commission-LP.ps1` — one-button per-board first install that calls
+  `Flash-SblChooser.ps1` then `Flash-LP.ps1` in sequence. For commissioning
+  a fresh board or migrating an existing-bench board off TI stock SBL.
+- `Build-Cfu.ps1 -IncludeSbl` — optional flag that stages
+  `sbl_chooser.release.tiimage` into the .cfu bundle and adds an
+  `sbl_chooser` manifest entry. The runtime OTA installer treats this as
+  a Pi5-style optional component (no slot/role/ip → skipped). Useful for
+  manufacturing pipelines that need a single shippable artifact
+  containing both the app and the SBL.
+
+### Bench-required (your move, when probe is hooked up)
+
+The remaining work needs JTAG probe attached but **does NOT need DIP
+switches or UART boot**. Pure XDS110 via the new tooling:
+
+1. **SysConfig GUI**: add a Flash driver instance to
+   `sbl_chooser/r5fss0-0_nortos/example.syscfg`. Save. Regenerated
+   `ti_drivers_config.c` will declare `gFlashHandle[CONFIG_FLASH0]`.
+2. **Build**: `gmake -s PROFILE=release all` from
+   `sbl_chooser/r5fss0-0_nortos/ti-arm-clang`. Produces
+   `sbl_chooser.release.tiimage`.
+3. **First flash** (one board): `.\Commission-LP.ps1 -Probe A` from
+   `Nova_Firmware/lp_am2434/sbl_chooser/`. Backup stock SBL → install
+   chooser → seed Bank A → flash Nova app → write device-config. Power-
+   cycle, verify boot trace shows both `[SBL] bank=A ...` and
+   `[BB] LP role = STORAGE`.
+4. **Negative test**: `.\Flash-SblChooser.ps1 -Probe A -SkipBackup
+   -SkipSblFlash -InvalidateBankA`. Power-cycle. Expected:
+   `[SBL] bank=GOLDEN off=0xC00000` (FATAL because no Golden flashed yet
+   — that IS the rollback proof). Recover with
+   `.\Flash-SblChooser.ps1 -Probe A -SkipBackup -SkipSblFlash` (re-seed
+   with valid=1).
+5. **Cross-flash to fleet**: repeat step 3 for Probes N, P, T.
+
+### Session 4 — Golden image (deferred)
+
+After Session 3 is on all 4 boards, the negative test will land in
+GOLDEN-not-found FATAL. To make the rollback chain truly complete,
+flash a known-good `nova_lp.release.mcelf.hs_fs` (probably the current
+0.A.208) to OSPI `0xC00000` on every board during manufacturing. After
+that, an invalidated Bank A + missing Bank B falls back to Golden and
+the board still boots a working (if outdated) image. JTAG-only.
+
+### Session 5 — OTA-pushed SBL updates (deferred, design decision pending)
+
+The hardest production-readiness question: how do SBL updates get
+deployed in the field? Today the SBL is "manufactured-in" (Commission-LP
+at the workstation). Three options for future SBL revisions:
+
+1. **Never** — SBL is one revision per product generation. Customer
+   panels in the field stay on whatever SBL they shipped with.
+2. **Manual** — When a customer panel needs a new SBL, a service tech
+   visits with a workstation + XDS110 probe and runs
+   `Flash-SblChooser.ps1`.
+3. **OTA-pushed with golden interlock** — The bridge can push an SBL
+   chunk that gets staged into a SECOND SBL slot (not yet defined in
+   the OSPI map). The chooser, on next boot, sees the new SBL and a
+   "verify pending" flag; if it boots successfully (per the strike
+   counter), the old SBL gets overwritten. Requires reserving a
+   ~384 KB "staging SBL" slot in the OSPI map. Significant design work.
+
+Option 3 is the only one that delivers true "no service truck" for SBL
+updates. We're not blocking on this — option 1 is acceptable for v1
+production and option 2 is acceptable for transitional deployments.
 
 ---
 

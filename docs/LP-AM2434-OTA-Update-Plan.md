@@ -51,18 +51,26 @@
 >    "will it boot?" gate; an upstream gate at the bridge would catch
 >    bad bundles before any byte goes over UART.)
 >
-> 2. **F2c custom SBL chooser** for true A/B banking with hardware
->    rollback. Today's path is "stage-copy B→A then warm-reset" — a
->    power-fail mid-copy still leaves Bank A partially overwritten with
->    no automatic rollback. Real production needs an SBL that boots
->    from whichever bank has a higher generation counter
->    and a valid signature, with a watchdog-driven rollback if the new
->    image fails to boot. See
+> 2. **F2c custom SBL chooser** — Session 1 (Pi5/app-side wiring) and
+>    Session 2 (SBL fork + JTAG-only tooling) LANDED 2026-05-30
+>    (commits `a0c52ba`, `7599afb`, `7dfb82a`). Session 3 software prep
+>    (Commission-LP.ps1 + Build-Cfu.ps1 -IncludeSbl) LANDED 2026-05-30
+>    (commit pending). The actual SBL flash on each bench board is one
+>    JTAG-only `Commission-LP.ps1 -Probe X` command per board —
+>    awaiting bench probe time.
+>
+>    Once `Commission-LP.ps1` has run on the 4 bench boards, the
+>    "don't power-cycle during activate" risk window is closed: a
+>    power loss mid-OTA → next boot's strike counter hits 3 → SBL
+>    falls back to the previous bank, no JTAG service trip needed.
+>    Full design + Session 1-3 status in
 >    [`docs/lp-am2434-f2c-sbl-chooser-design.md`](lp-am2434-f2c-sbl-chooser-design.md).
->    Until F2c lands, document the "don't power-cycle during activate"
->    risk window (the 60 s between `ACTIVATE reboot=1` and the new
->    firmware's first heartbeat). Tracked as Gap 6 in
->    [`docs/lp-am2434-ota-hardening-plan.md`](lp-am2434-ota-hardening-plan.md).
+>
+>    Still deferred AFTER Session 3 lands:
+>    - **Session 4**: Golden image flashing during manufacturing so
+>      "both banks bad" recovers cleanly instead of SBL FATAL.
+>    - **Session 5**: OTA-pushed SBL updates (design decision pending —
+>      see f2c design doc §8 Session 5 for the three options).
 >
 > 3. **Cloud → bridge integration.**
 >    Hook the existing Azure firmware-distribution plan
