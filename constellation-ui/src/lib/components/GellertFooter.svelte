@@ -46,17 +46,25 @@
     });
 
     function checkDirty(action: () => void) {
-        if ($navigationStore.isDirty()) {
+        // Only block navigation if the user is actively typing (keyboard
+        // visible). With SaveButton autoSave covering nearly every page,
+        // any pending change has either already been persisted or will
+        // be within the 1.2 s debounce window after the keyboard closes.
+        // The old "are you sure?" prompt was a holdover from explicit
+        // Save buttons and produced a lot of false positives whenever a
+        // ~1 Hz store push briefly desynced the page's `original`
+        // snapshot from its live `data`. The page-side `isDirty()`
+        // hooks are still used elsewhere (hydration guards in level1/
+        // pages — they prevent a firmware echo from clobbering an
+        // in-progress edit) so we keep `isDirty` itself in place.
+        if (!$keyboardStore.hidden && $navigationStore.isDirty()) {
             const modal: ModalSettings = {
                 type: 'confirm',
-                // Data
                 title: $t('global.confirm'),
                 body: $t('global.are-you-sure'),
             };
-            modal.buttonTextCancel=$t('global.no');
-        	modal.buttonTextConfirm=$t('global.yes');
-
-            // TRUE if confirm pressed, FALSE if cancel pressed
+            modal.buttonTextCancel = $t('global.no');
+            modal.buttonTextConfirm = $t('global.yes');
             modal.response = (r: boolean) => { if (r) {
                 action();
                 $navigationStore.isDirty = () => false;

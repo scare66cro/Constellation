@@ -1,41 +1,47 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import GellertPage from "$lib/components/GellertPage.svelte";
-	import PIDU from "$lib/components/PIDU.svelte";
-	import SaveButton from "$lib/components/SaveButton.svelte";
-	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
-	import { navigationStore, pidStore } from "$lib/store";
+  import GellertPage from "$lib/components/GellertPage.svelte";
+  import PIDU from "$lib/components/PIDU.svelte";
+  import SaveButton from "$lib/components/SaveButton.svelte";
+  import ScrollableArea from "$lib/components/ScrollableArea.svelte";
+  import { navigationStore, pidStore } from "$lib/store";
   import { getHttpUrl } from "$lib/business/util";
-	import Button from "$lib/ui/Button.svelte";
-	import Card from "$lib/ui/Card.svelte";
-	import Column from "$lib/ui/Column.svelte";
-	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
-	import Row from "$lib/ui/Row.svelte";
-	import Table from "$lib/ui/Table.svelte";
-	import TextField from "$lib/ui/TextField.svelte";
-	import { onMount } from "svelte";
-  import { cloneDeep, isEqual } from "lodash-es";
+  import { doorSettings } from "$lib/business/protoStores";
+  import { useDraft, numField } from "$lib/business/useDraft";
+  import { TAG } from "$lib/business/protoTags";
+  import Button from "$lib/ui/Button.svelte";
+  import Card from "$lib/ui/Card.svelte";
+  import Column from "$lib/ui/Column.svelte";
+  import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
+  import Row from "$lib/ui/Row.svelte";
+  import Table from "$lib/ui/Table.svelte";
+  import TextField from "$lib/ui/TextField.svelte";
+  import { onMount } from "svelte";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import type { ArrayResponse } from "$lib/business/util";
 
-  export let data: ArrayResponse & { gdc: any };
+  export let data: { gdc: any };
 
   let edit = true;
   let title = $t('level2.door.fresh-air-door-setup');
 
   let validation = {
-    PAirValue: '',
-    IAirValue: '',
-    DAirValue: '',
-    UAirValue: '',
-    ActuatorTimes: '',
-    CoolAirCycle: ''
+    PAirValue: '', IAirValue: '', DAirValue: '', UAirValue: '',
+    ActuatorTimes: '', CoolAirCycle: ''
   };
 
-  $: door = [] as string[];
+  // Proto-direct DoorSettings draft. Replaces door[6]-positional shape.
+  const door = useDraft(doorSettings, TAG.DoorSettings);
+  const { draft, live, hydrated } = door;
+  const pStr   = numField(draft, 'pGain',        'float');
+  const iStr   = numField(draft, 'iGain',        'float');
+  const dStr   = numField(draft, 'dGain',        'float');
+  const uStr   = numField(draft, 'uLimit',       'float');
+  const actStr = numField(draft, 'actuatorTime', 'int');
+  const cycStr = numField(draft, 'coolAirCycle', 'int');
+
   $: ready = false;
   $: wait = false;
-
   // ── GDC state ──
   interface GDCStageEdit {
     stageNum: number;
@@ -136,13 +142,12 @@
 
   onMount(async () => {
     try {
-      $navigationStore.data = getHttpUrl(`/iot/door`);
-      $navigationStore.isDirty = () => !isEqual(door, data.array);
-      door = cloneDeep(data.array);
+      // GDC orbit sidecar is non-proto and refreshed only on initial load.
       initGDCFromData(data.gdc);
     } catch (error) {
       console.error(error);
     }
+    $navigationStore.isDirty = () => !isEqual($draft, $live);
     ready = true;
   });
 
@@ -155,18 +160,19 @@
 <GellertPage {wait} {title} {ready} level={2} name="door">
   <ScrollableArea>
   <Card class="md:mx-2 xl:mx-auto flex flex-col container-wide 3xl:container-standard">
+    {#if $hydrated}
     <Table class="text-size-xl">
       <Row>
         <Column class="w-1/2 border-r border-gray-400">{ $t('global.pidu-values') }</Column>
         <Column class="w-1/2">
-          <PIDU bind:p={door[0]} bind:i={door[1]} bind:d={door[2]} bind:u={door[3]} {edit} pvalid={validation.PAirValue} ivalid={validation.IAirValue} dvalid={validation.DAirValue} uvalid={validation.UAirValue} />
+          <PIDU bind:p={$pStr} bind:i={$iStr} bind:d={$dStr} bind:u={$uStr} {edit} pvalid={validation.PAirValue} ivalid={validation.IAirValue} dvalid={validation.DAirValue} uvalid={validation.UAirValue} />
         </Column>
       </Row>
       <Row>
         <Column class="w-1/2 border-r border-gray-400">{ $t('level2.door.total-open-time-for-all-actuator-stages') }</Column>
         <Column class="w-1/2 items-center">
           <p class="text-center">
-            <TextField class="w-36 mr-2" size="xl" bind:value={door[4]} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.ActuatorTimes}/> {$t('level2.door.seconds')}
+            <TextField class="w-36 mr-2" size="xl" bind:value={$actStr} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.ActuatorTimes}/> {$t('level2.door.seconds')}
           </p>
         </Column>
       </Row>
@@ -174,7 +180,7 @@
         <Column class="w-1/2 border-r border-gray-400">{ $t('level2.door.cooling-air-short-cycle-timer') }</Column>
         <Column class="w-1/2 items-center">
           <p class="text-center">
-            <TextField class="w-36 mr-2" size="xl" bind:value={door[5]} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.CoolAirCycle}/> {$t('global.minutes')}
+            <TextField class="w-36 mr-2" size="xl" bind:value={$cycStr} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.CoolAirCycle}/> {$t('global.minutes')}
           </p>
         </Column>
       </Row>
@@ -185,7 +191,9 @@
         </Column>
       </Row>
     </Table>
-    <SaveButton {edit} bind:wait={wait} data={door} bind:original={data.array} route="door" bind:validation={validation} autoSave/>
+    <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} route="door" bind:validation={validation} autoSave
+      onSave={() => door.save()}/>
+    {/if}
   </Card>
 
   {#if gdcPresent}

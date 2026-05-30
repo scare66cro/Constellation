@@ -1,89 +1,112 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+  import { onMount } from "svelte";
   import GellertPage from "$lib/components/GellertPage.svelte";
-	import Card from "$lib/ui/Card.svelte";
-	import TextField from "$lib/ui/TextField.svelte";
+  import Card from "$lib/ui/Card.svelte";
+  import TextField from "$lib/ui/TextField.svelte";
   import Select from "$lib/ui/Select.svelte";
-	import Table from "$lib/ui/Table.svelte";
-	import Row from "$lib/ui/Row.svelte";
-	import Column from "$lib/ui/Column.svelte";
-	import { navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
-	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
-	import { AdornmentType } from "$lib/business/adornmentType";
-	import SaveButton from "$lib/components/SaveButton.svelte";
-	import { cloneDeep, isEqual } from "lodash-es";
+  import Table from "$lib/ui/Table.svelte";
+  import Row from "$lib/ui/Row.svelte";
+  import Column from "$lib/ui/Column.svelte";
+  import { navigationStore } from "$lib/store";
+  import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
+  import { AdornmentType } from "$lib/business/adornmentType";
+  import SaveButton from "$lib/components/SaveButton.svelte";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import type { ArrayResponse } from "$lib/business/util";
+  import { fanBoostSettings } from "$lib/business/protoStores";
+  import { useDraft, numField } from "$lib/business/useDraft";
+  import { writeProtoRaw, buildForceVarintBytes, buildForceFloatBytes } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
-  export let data: ArrayResponse;
+  // Proto-direct page state (see /memories/agristar-principles.md +
+  // useDraft.ts). Replaces the legacy `fanboost: string[5]` positional
+  // shape that bound `fanboost[0]` (mode), `fanboost[1]` (speed) etc.
+  // The save still goes through writeProtoRaw because field 2 (speed)
+  // and field 5 (temp) have a wire-vs-schema discrepancy (proto says
+  // uint32, firmware reads float — see firmware-bridge-protocol.md).
+  const fb = useDraft(fanBoostSettings, TAG.FanBoostSettings);
+  const { draft, hydrated, live } = fb;
 
-  let title = $t('level1.fanboost.fan-boost-control');
+  const speedStr    = numField(draft, 'speed',    'float');
+  const tempStr     = numField(draft, 'temp',     'float');
+  const intervalStr = numField(draft, 'interval', 'int');
+  const durationStr = numField(draft, 'duration', 'int');
 
-  let boostMode = [
-    { text: $t('global.none-default'), value: '0' },
-    { text: $t('level1.fanboost.temperature-based'), value: '1' },
-    { text: $t('level1.fanboost.runtime-based'), value: '2' },
+  $: title = $t('level1.fanboost.fan-boost-control');
+
+  $: boostMode = [
+    { text: $t('global.none-default'),                 value: 0 },
+    { text: $t('level1.fanboost.temperature-based'),   value: 1 },
+    { text: $t('level1.fanboost.runtime-based'),       value: 2 },
   ];
 
-  let validation = {
-    'speed': '',
-    'temp': '',
-    'hours': '',
-    'time': ''
-  };
+  let validation = { 'speed': '', 'temp': '', 'hours': '', 'time': '' };
 
   $: ready = false;
   $: wait = false;
   $: level = $navigationStore.level;
   $: edit = $navigationStore.level > 0;
-  let fanboost = [] as string[];
 
-  onMount(async () => {
-    try {
-      $navigationStore.data = getHttpUrl('/iot/fanboost');
-      $navigationStore.isDirty = () => !isEqual(fanboost, data.array);
-      fanboost = Array.isArray(data.array) ? cloneDeep(data.array) : [];
-    } catch (e) {
-      console.error(e);
-    }
-		ready = true;
+  /**
+   * Phase 5.1 proto-direct save (settings field 3 / TAG.FanBoostSettings).
+   * Field map (apply_fan_boost in nova_dataexc.c):
+   *   1=mode (varint), 2=speed (FLOAT — schema says uint32), 3=interval,
+   *   4=duration, 5=temp (FLOAT — schema says uint32).
+   * See firmware-bridge-protocol.md for the wire-vs-schema discrepancy.
+   */
+  async function save(): Promise<void> {
+    const v = buildForceVarintBytes({
+      1: $draft.mode,      // 0 valid (Off)
+      3: $draft.interval,
+      4: $draft.duration,
+    });
+    const f = buildForceFloatBytes({
+      2: $draft.speed,
+      5: $draft.temp,
+    });
+    const out = new Uint8Array(v.length + f.length);
+    out.set(v, 0);
+    out.set(f, v.length);
+    await writeProtoRaw(TAG.FanBoostSettings, out);
+  }
+
+  onMount(() => {
+    $navigationStore.isDirty = () => !isEqual($draft, $live);
+    ready = true;
   });
 </script>
 
 <GellertPage {wait} {ready} {title} {level} name="fanboost">
   <Card class="mx-auto flex flex-col w-3/4 mt-2">
-    {#if fanboost.length > 4}
+    {#if $hydrated}
     <Table class="mb-3">
       <Row>
         <Column class="items-center text-size-xl">{ $t('level1.fanboost.fan-boost-control-mode') }:
-          <Select bind:value={fanboost[0]} class="w-96 3xl:w-144" size="xl" options={boostMode} {edit} />
+          <Select bind:value={$draft.mode} class="w-96 3xl:w-144" size="xl" options={boostMode} {edit} />
         </Column>
       </Row>
-      {#if fanboost[0] !== '0'}
+      {#if $draft.mode !== 0}
         <Row>
           <Column class="items-center text-size-xl">{ $t('level1.fanboost.the-fan-speed-will-be-increased-to') }
-            <TextField class="w-28 3xl:w-36" size="xl" bind:value={fanboost[1]} {edit} keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Percent} validation={validation.speed} />
+            <TextField class="w-28 3xl:w-36" size="xl" bind:value={$speedStr} {edit} keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Percent} validation={validation.speed} />
             { $t('level1.fanboost.if') }
-            {#if fanboost[0] === '1'}
-              { $t('level1.fanboost.the-outside-temperature-is-below')} <TextField class="w-28 3xl:w-36" size="xl" bind:value={fanboost[4]} {edit} keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.temp}/>
+            {#if $draft.mode === 1}
+              { $t('level1.fanboost.the-outside-temperature-is-below')} <TextField class="w-28 3xl:w-36" size="xl" bind:value={$tempStr} {edit} keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.temp}/>
               { $t('level1.fanboost.and-it') } { $t('level1.fanboost.has-been') }
-              <TextField class="w-28 3xl:w-36" size="xl" bind:value={fanboost[2]} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.hours}/>
+              <TextField class="w-28 3xl:w-36" size="xl" bind:value={$intervalStr} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.hours}/>
               { $t('level1.fanboost.hours-since-the-last-fan-boost-period') }
-            {:else if fanboost[0] === '2'}
-              { $t('level1.fanboost.the-continuous-fan-runtime-exceeds') } <TextField class="w-28 3xl:w-36" size="xl" bind:value={fanboost[2]} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.hours} /> { $t('global.hours') }.
+            {:else if $draft.mode === 2}
+              { $t('level1.fanboost.the-continuous-fan-runtime-exceeds') } <TextField class="w-28 3xl:w-36" size="xl" bind:value={$intervalStr} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.hours} /> { $t('global.hours') }.
             {/if}
             <br />
             { $t('level1.fanboost.the-fan-boost-period-will-last-for') }
-            <TextField class="w-28 3xl:w-36" size="xl" bind:value={fanboost[3]} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.time}/>
+            <TextField class="w-28 3xl:w-36" size="xl" bind:value={$durationStr} {edit} keyboardType={KeyboardTypes.Numeric} validation={validation.time}/>
             { $t('global.minutes') }.
           </Column>
         </Row>
       {/if}
     </Table>
-    <SaveButton {edit} bind:wait={wait} data={fanboost} bind:original={data.array} route="fanboost" bind:validation={validation} autoSave/>
+    <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} bind:validation={validation} autoSave onSave={save}/>
     {/if}
   </Card>
 </GellertPage>
-
-

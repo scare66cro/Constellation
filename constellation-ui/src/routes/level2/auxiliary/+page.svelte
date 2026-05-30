@@ -14,13 +14,14 @@
 	import TextField from "$lib/ui/TextField.svelte";
   import Select from "$lib/ui/Select.svelte";
   import SaveButton from "$lib/components/SaveButton.svelte";
-  import { auxiliaryOptionsStore, navigationStore, heightsStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
+  import { auxiliaryOptionsStore, navigationStore, heightsStore, keyboardStore } from "$lib/store";
+  import { auxiliaryComposite } from "$lib/business/protoStores";
+  import { writeProtoRaw, buildForceVarintBytes, buildForceFloatBytes, wrapAsLengthDelim } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
   import { cloneDeep, isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
   import { getModalStore, type ModalSettings } from "@skeletonlabs/skeleton";
-	import { safeJsonParse } from "$lib/business/util";
-	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
+  import ScrollableArea from "$lib/components/ScrollableArea.svelte";
 
   const modalStore = getModalStore();
 
@@ -86,57 +87,60 @@
   let currentIndex = 0;
   let reset = false;
 
-  onMount(async () => {
-    try {
-      ready = false; // Set ready to false while fetching
-      await refresh();
-      $navigationStore.data = getHttpUrl(`/iot/aux/all`);
-      $navigationStore.isDirty = () => !isEqual(data, aux);
-    } catch (error) {
-      console.error((error as Error).message);
-    }
-    ready = true;
-  });
+  // Hydration gate: while the user is editing (data/aux differ), skip
+  // composite-driven re-hydration so the next 5 s firmware push doesn't
+  // overwrite an in-flight edit. Mirrors the plentemp/failures1 pattern.
+  function isDirty(): boolean {
+    return !!(data && aux && !isEqual(data, aux));
+  }
 
-  async function refresh(retry = true) {
-    const response = await fetch(getHttpUrl('/iot/aux/all'));
-    const result = await safeJsonParse(response);
-    
-    // If empty, server might be discovering. Wait and retry once.
-    if ((!result.allAux || result.allAux.length === 0) && retry) {
-        await new Promise(r => setTimeout(r, 3500));
-        await refresh(false);
-        return;
+  function hydrateFromComposite(view: ReturnType<typeof asView>): void {
+    if (!view) return;
+    if (allAux.length !== view.allAux.length
+        || !isEqual(allAux, view.allAux)) {
+      allAux = view.allAux;
+      if (currentIndex >= allAux.length) currentIndex = 0;
     }
-
-    // result has common data + allAux
-    if (result.allAux && Array.isArray(result.allAux)) {
-        allAux = result.allAux;
-    }
-    
-    // Construct base data from result (excluding allAux)
-    const baseData = { ...result };
-    delete baseData.allAux;
-
-    if (currentIndex >= allAux.length) currentIndex = 0;
-    
-    // Find first valid auxiliary if current is empty
+    if (isDirty()) return;
+    // Find first valid auxiliary if current is empty.
     let count = 0;
     let idx = currentIndex;
-    while(count < allAux.length) {
-       const item = allAux[idx];
-       if (item && item.rules && item.rules.length > 0) {
-          currentIndex = idx;
-          break;
-       }
-       idx = (idx + 1) % allAux.length;
-       count++;
+    while (count < allAux.length) {
+      const item = allAux[idx];
+      if (item && item.rules && item.rules.length > 0) {
+        currentIndex = idx;
+        break;
+      }
+      idx = (idx + 1) % allAux.length;
+      count++;
     }
-    
-    data = createAuxiliary(baseData, allAux[currentIndex]);
-    aux = cloneDeep(data);
-    reset = true;
+    const baseData = {
+      InputConfig: view.InputConfig,
+      OutputConfig: view.OutputConfig,
+      IoNames: view.IoNames,
+      systemMode: view.systemMode,
+    };
+    const next = createAuxiliary(baseData, allAux[currentIndex]);
+    if (!isEqual(data, next)) {
+      data = next;
+      aux = cloneDeep(data);
+      reset = true;
+    }
   }
+
+  // Helper alias so hydrateFromComposite's parameter type stays in sync
+  // with the store without re-importing the AuxiliaryView type.
+  function asView(v: any) { return v as any; }
+
+  onMount(() => {
+    $navigationStore.isDirty = () => isDirty();
+    const unsub = auxiliaryComposite.subscribe((v) => {
+      if (!v) return;
+      hydrateFromComposite(asView(v));
+      ready = true;
+    });
+    return () => unsub();
+  });
 
   function createAuxiliary(base: any, item: { auxProg: string[], rules: any[] }) {
       if (!base || !item) return undefined;
@@ -144,26 +148,29 @@
   }
 
   async function handleSaveComplete(event: CustomEvent<{ success: boolean }>) {
+      // Proto-direct: firmware re-broadcasts the AuxProgramBundle every
+      // 5 s, and `auxiliaryComposite` re-hydrates automatically when the
+      // next frame arrives. No explicit refresh needed; the dirty gate
+      // in hydrateFromComposite already prevents clobbering in-flight
+      // edits, so the post-save baseline simply settles when the next
+      // bundle lands. Just clear the busy flag.
       if (event.detail.success) {
-          wait = true;
-          try {
-             await refresh();
-          } catch(e) { console.error(e); }
           wait = false;
       }
   }
 
   function checkDirty(action: () => void) {
-    if ($navigationStore.isDirty()) {
+    // Skip the "continue without saving?" prompt unless the user is
+    // actively typing (keyboard visible). SaveButton autoSave handles
+    // the persistence — see GellertFooter.checkDirty for full rationale.
+    if (!$keyboardStore.hidden && $navigationStore.isDirty()) {
       const modal: ModalSettings = {
         type: 'confirm',
-        // Data
         title: $t('global.confirm'),
         body: $t('global.are-you-sure'),
       };
-      modal.buttonTextCancel=$t('global.no');
-     	modal.buttonTextConfirm=$t('global.yes');
-      // TRUE if confirm pressed, FALSE if cancel pressed
+      modal.buttonTextCancel = $t('global.no');
+      modal.buttonTextConfirm = $t('global.yes');
       modal.response = (r: boolean) => { if (r) {
         action();
       }};
@@ -231,6 +238,74 @@
       // wait = false;
     });
   }
+
+  /**
+   * Phase 5.1 — proto-direct write for AuxProgramSettings (firmware
+   * settings field 41). Mirrors the legacy bridge `auxProgram` shim
+   * (deleted from constellation-ui/server/src/index.ts) but builds the
+   * envelope client-side and posts raw bytes to /proto/write/41.
+   *
+   * Wire layout (matches firmware apply_aux_program in
+   * Nova_Firmware/Platform/nova_dataexc.c):
+   *   outer = field 1 (length-delim) = AuxProgramSettings sub-msg, where
+   *     AuxProgramSettings = {
+   *       1: aux_index (varint, force — 0 valid for AUX1)
+   *       3: duty_cycle (varint, force — 0 means "off")
+   *       4: period     (varint, force)
+   *       5: units      (varint, force — 0 = seconds)
+   *       6: AuxRule    (length-delim, repeated) = {
+   *         1: type (varint, force), 2: io_index (force),
+   *         3: state (force),        4: op       (force),
+   *         5: sensor_value (float, force — 0.0 valid),
+   *         6: and_or (force),       7: reference_index (force)
+   *       }
+   *     }
+   * Field 2 (eq_index) is intentionally OMITTED — firmware ignores it
+   * and infers EQ_AUX1+aux_index. Empty rules (type==0) are skipped.
+   */
+  async function saveAuxProgram(d: any): Promise<void> {
+    const eqIdx = parseInt(d.auxProg?.[0] ?? '0', 10);
+    const auxIdx = eqIdx - 25; // EQ_AUX1
+    if (auxIdx < 0 || auxIdx >= 8) {
+      console.warn('[aux] eq_index out of range, skipping save', { eqIdx, auxIdx });
+      return;
+    }
+
+    const ruleSubmsgs: Uint8Array[] = [];
+    for (const r of (d.rules ?? [])) {
+      const type = parseInt(r.type ?? '0', 10);
+      if (type === 0) continue; // firmware skips empty rules — match here too
+      const ioIdx = parseInt(r.io ?? '0', 10);
+      const state = parseInt(r.st ?? '0', 10);
+      const op = parseInt(r.op ?? '0', 10);
+      const sen = parseFloat(r.sen ?? '0');
+      const andOr = parseInt(r.andOr ?? '0', 10);
+      const ref = parseInt(r.ref ?? '0', 10);
+      const varParts = buildForceVarintBytes({ 1: type, 2: ioIdx, 3: state, 4: op, 6: andOr, 7: ref });
+      const floatPart = buildForceFloatBytes({ 5: sen });
+      // Concatenate then wrap as field 6 of AuxProgramSettings.
+      const ruleBody = new Uint8Array(varParts.length + floatPart.length);
+      ruleBody.set(varParts, 0);
+      ruleBody.set(floatPart, varParts.length);
+      ruleSubmsgs.push(wrapAsLengthDelim(6, ruleBody));
+    }
+
+    const headerVarints = buildForceVarintBytes({
+      1: auxIdx,
+      3: parseInt(d.auxProg?.[1] ?? '0', 10),
+      4: parseInt(d.auxProg?.[2] ?? '0', 10),
+      5: parseInt(d.auxProg?.[3] ?? '0', 10),
+    });
+    let entryLen = headerVarints.length;
+    for (const r of ruleSubmsgs) entryLen += r.length;
+    const entry = new Uint8Array(entryLen);
+    entry.set(headerVarints, 0);
+    let off = headerVarints.length;
+    for (const r of ruleSubmsgs) { entry.set(r, off); off += r.length; }
+
+    const inner = wrapAsLengthDelim(1, entry);
+    await writeProtoRaw(TAG.AuxProgramSettings, inner);
+  }
 </script>
 
 <GellertPage {wait} {ready} {title} level={2} name="auxiliary">
@@ -255,7 +330,7 @@
         {#each aux.rules as rule, index}
           {#if rule.andOr !== '256'}
             <Row>
-              <Rule {index} name={aux.IoNames?.[parseInt(aux.auxProg[0], 10)]?.split(':')[0] || `Auxiliary ${parseInt(aux.auxProg[0], 10) - 24}`}
+              <Rule {index} name={aux.IoNames?.[parseInt(aux.auxProg[0], 10)]?.name ?? ''}
                 bind:rule={rule} bind:aux={aux} on:change={() => rule = rule}/>
             </Row>
             {#if rule.type === '4' && rule.st !== '255' && data?.rules[index]}
@@ -302,7 +377,7 @@
 
   <div class="flex flex-row items-center" bind:clientHeight={saveHeight}>
         <Button size="xl" class="ml-auto mr-2 mb-0" on:click={() => moveAux('Back')}>{ $t('global.back') }</Button>
-        <SaveButton {edit} bind:wait={wait} data={aux} bind:original={data} route="aux" bind:validation={validation} bind:reset={reset} on:complete={handleSaveComplete} autoSave />
+        <SaveButton {edit} bind:wait={wait} data={aux} bind:original={data} bind:validation={validation} bind:reset={reset} on:complete={handleSaveComplete} autoSave onSave={saveAuxProgram} />
         <Button size="xl" class="mr-auto mb-0" on:click={() => moveAux('Next')}>{ $t('global.next') }</Button>
       </div>
     {/if}

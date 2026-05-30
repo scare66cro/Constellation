@@ -10,9 +10,9 @@
 	import {
 		localeStore, backgroundStore, keyboardStore, heightsStore, frontMatterStore,
 		alarmsStore, dataSelectionStore, upgradeStore, navigationStore, keysStore,
-		pageTranslationsStore, modeToColorStore, auxiliaryOptionsStore, equipmentOptionsStore,
+		pageTranslationsStore, modeToColorStore, auxiliaryOptionsStore,
 		yesNoOptionsStore, failureOptionsStore,
-		homePageStore,
+		homePageStore, headersStore,
 	} from '$lib/store';
 	import Keyboard from '$lib/ui/Keyboard.svelte';
 	import { onDestroy, onMount } from 'svelte';
@@ -26,14 +26,20 @@
 	import { locale } from 'svelte-i18n';
 	import { t } from "svelte-i18n";
 	import type { PageList } from '$lib/business/PageType';
-	import { type Equipment } from '$lib/business/equipmentStatus';
 	import { defaultImages } from '$lib/store';
 	import { getDropDownPage } from '$lib/business/paging';
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { KeyboardTypes } from '$lib/ui/Keyboard.svelte';
-	import WsClient from "$lib/business/wsClient";
 	import { enableFetchDebugLogging } from '$lib/business/debugFetch';
+	// Phase 3 → Phase 5 proto-direct redesign: the typed proto composite
+	// (`frontMatterComposite`) is now the SOLE feeder for `$frontMatterStore`.
+	// The legacy WsClient(`frontmatter-data`) channel is gone; the
+	// `dataCache.buildFrontmatterData()` HTTP endpoint (`/iot/frontmatter`)
+	// remains for one-shot consumers (`history/userlog`, `history/activitylog`,
+	// the parity test) and will be retired when those migrate to typed stores.
+	import { frontMatterComposite } from '$lib/business/frontMatterComposite';
+	import { headerComposite } from '$lib/business/headerComposite';
 
 
 	if (browser) {
@@ -45,6 +51,9 @@
 	// Authentication state
 	let authError = false;
 	let authWait = false;
+
+	// Subscriptions / timers we need to tear down on destroy.
+	const onDestroyCallbacks: Array<() => void> = [];
 
 	// Cloud sign-in state (pass 3)
 	let showCloudLogin = false;
@@ -102,7 +111,6 @@
 			{ text: $t('page-list.run-clock'), value: 'runclock', display: true, navigation: true },
 			{ text: $t('page-list.fan-speed'), value: 'fanspeed', display: true, navigation: true },
 			{ text: $t('page-list.fan-boost'), value: 'fanboost', display: true, navigation: true },
-			{ text: $t('page-list.ramp-rate'), value: 'ramp', display: true, navigation: true },
 			{ text: $t('level1.humidifier.humidifier-control'), value: 'humidifier', display: true, navigation: true },
 			{ text: $t('level1.climacell.climacell-control'), value: 'climacell', display: true, navigation: true },
 			{ text: $t('page-list.co2-purge'), value: 'co2', display: true, navigation: true },
@@ -186,14 +194,6 @@
 		availSensors,
 	};
 
-	const equipmentOptions = {
-		getStatus,
-		getRefrigStatus,
-		getAuxSwitch,
-		getSwitchStatus,
-		getDoorDiagStatus,
-	}
-
 	$: yesNoOptions = [
 		{ text: $t('global.no'), value: '0' },
 		{ text: $t('global.yes'), value: '1' },
@@ -218,8 +218,6 @@
 	}
 
 	let myDiv: HTMLDivElement;
-	let client: WsClient | undefined;
-	let vfdAlarmPoll: ReturnType<typeof setInterval> | undefined;
 	let hideCursorTimeout: ReturnType<typeof setTimeout>;
 	let showCursor: (() => void) | undefined;
 
@@ -310,7 +308,6 @@
 	$: $pageTranslationsStore = pageTranslations;
 	$: $modeToColorStore = modeToColor;
 	$: $auxiliaryOptionsStore = auxiliaryOptions;
-	$: $equipmentOptionsStore = equipmentOptions;
 	$: $yesNoOptionsStore = yesNoOptions;
 	$: $failureOptionsStore = failureOptions;
 	$: if (!$alarmsStore.canShowAlarm) {
@@ -457,60 +454,34 @@
 		}
 
 		$heightsStore.main = myDiv.clientHeight;
-		client = new WsClient(
-			getHttpUrl('/iot/ws'),
-			'frontmatter-data',
-			(fms) => {
-				// Handle toast notifications from backend (e.g. save failures)
-				const data = fms as any;
-				if (data.type === 'notification') {
-					toastStore.trigger({
-						message: data.message,
-						background: data.level === 'error' ? 'variant-filled-error' : 'variant-filled-success',
-						timeout: 5000
-					});
-					return;
-				}
 
-				const frontmattter = fms as Record<string, string | string[]>;
-				try {
-					if ($navigationStore.inLoad) {
-						const alarmData = (frontmattter.AlarmData as string[]).filter((alarm) => 
-							!alarm.toLowerCase().includes('system controller is not responding')
-						);
-						$frontMatterStore = { ...frontmattter, AlarmData: alarmData };
-					} else {
-						$keysStore.localRequired = frontmattter.localLogin === 'true';
-						$keysStore.hasLevel1Password = frontmattter.hasLevel1Password === 'true';
-						$frontMatterStore = frontmattter;
-					}
-				} catch (err) {
-					console.error('Failed to parse Polling data:', err); 
-				}
+		// ── Proto-direct composite → frontMatterStore bridge ──
+		// Composite is the source of truth for the entire frontmatter
+		// payload. VFD-related fan failures are now raised by Nova firmware
+		// (nova_failures.c::FanFailChk → WARN_FAN) and arrive in the same
+		// AlarmData stream as every other warning, so no client-side merge
+		// or polling is needed.
+		const unsubComposite = frontMatterComposite.subscribe((proto) => {
+			if (!proto) return;
+			$keysStore.localRequired = proto.localLogin === 'true';
+			$keysStore.hasLevel1Password = proto.hasLevel1Password === 'true';
+			let alarms = proto.AlarmData as string[];
+			if ($navigationStore.inLoad) {
+				alarms = alarms.filter((a) => !a.toLowerCase().includes('system controller is not responding'));
 			}
-		);
-		
-		client.connect();
+			$frontMatterStore = { ...proto, AlarmData: alarms };
+		});
+		onDestroyCallbacks.push(unsubComposite);
 
-		// ── VFD Alarm Poller ──
-		// Poll /vfd/alarms every 3s and merge VFD fault entries into AlarmData
-		// so they appear in the global alarm modal alongside ARM alarms.
-		vfdAlarmPoll = setInterval(async () => {
-			try {
-				const resp = await fetch(getHttpUrl('/vfd/alarms'), { cache: 'no-store' });
-				if (!resp.ok) return;
-				const data = await resp.json();
-				const vfdAlarms: string[] = Array.isArray(data.alarms) ? data.alarms : [];
-				// Merge: replace any existing WARN_VFD entries, keep all others
-				const current = ($frontMatterStore?.AlarmData as string[]) ?? [];
-				const nonVfd = current.filter((a: string) => !a.startsWith('WARN_VFD='));
-				if (vfdAlarms.length > 0 || nonVfd.length !== current.length) {
-					$frontMatterStore = { ...$frontMatterStore, AlarmData: [...nonVfd, ...vfdAlarms] };
-				}
-			} catch {
-				// VFD server unreachable — ignore
-			}
-		}, 3000);
+		// ── Proto-direct header composite → headersStore bridge ──
+		// Replaces the legacy `header-data` WsClient that GellertHeader
+		// owned. Single subscription means every component reading
+		// `$headersStore.{DateTime,CurrentMode,PanelName}` automatically
+		// gets proto-derived values.
+		const unsubHeader = headerComposite.subscribe((h) => {
+			headersStore.set(h);
+		});
+		onDestroyCallbacks.push(unsubHeader);
 
 		 // Add error handling for unauthorized responses
 		const handleUnauthorized = async (response: Response) => {
@@ -589,9 +560,8 @@
 			// Ensure the class is removed on component destruction
 			document.body.classList.remove('show-cursor');
 		}
-		client?.close();
-		client = undefined;
-		if (vfdAlarmPoll) { clearInterval(vfdAlarmPoll); vfdAlarmPoll = undefined; }
+		for (const cb of onDestroyCallbacks) { try { cb(); } catch { /* ignore */ } }
+		onDestroyCallbacks.length = 0;
 		modalStore.clear();
 	});
 
@@ -636,92 +606,16 @@
 		return sensors;
 	}
 
-	function getStatus(equipment: Equipment, eq: string, remote: string, input: string, output: string): { status: string, color: string } {
-		if (eq === 'door') {
-			return { status: input, color: 'black' }; 
-		}
-		if (eq === 'refrig') {
-			const diag = [41, 42, 43, 44, 45, 46, 89, 90, 91, 92].reduce((acc, val) => (equipment.eqStatus[val] === '2' && acc !== '2') ? '2' : '0', '0');
-			return getRefrigStatus(remote, input, output, diag);
-		}
-		if (remote === '1') {
-			return { status: $t('global.rem-off'), color: 'text-red-500 font-bold' };
-		} else if (input === '0')
-			return { status: $t('global.on'), color: 'text-green-700 font-bold' };
-		else {
-			return { status: $t('global.off'), color: 'text-red-500 font-bold' };
-		}
-	}
+	// Equipment-status helpers (getStatus / getRefrigStatus / getAuxSwitch /
+	// getSwitchStatus / getDoorDiagStatus) used to live here and were
+	// proxied through `equipmentOptionsStore` so that `equipmentStatus.ts`
+	// could call back into i18n-aware code. They were a stand-in for the
+	// AS2 hand-positioned CSV `equipment.eqStatus[N]` reads. The proto-
+	// direct rewrite (May 2026) replaced all of that with the typed
+	// `interpretEquipmentInput` / `interpretRemoteState` helpers in
+	// `$lib/business/equipmentEnum.ts`. This entire indirection layer is
+	// gone — `equipmentStatus.ts` calls the helpers directly via `get(t)`.
 
-	function getDoorDiagStatus(input: string, output: string, diag: string): { status: string, color: string } {
-		const status = { status: $t('global.off'), color: 'text-red-500 font-bold' };
-		if (diag === '2') {
-				status.status = $t('global.open');
-				status.color = 'text-blue-500 font-bold';
-		} else if (diag === '1') {
-			status.status = $t('global.close');
-			status.color = 'text-red-700 font-bold';
-		} else if (diag === '0') {
-			status.status = $t('global.diag-off');
-			status.color = 'text-black font-bold';
-		}
-		if (input === '1') {
-			status.status = $t('global.off');
-			status.color = 'text-red-500 font-bold';
-		}
-		return status;
-	}
-
-	function getRefrigStatus(remote: string, input: string, output: string, diag: string): { status: string, color: string } {
-		const status = { status: $t('global.off'), color: 'text-red-500 font-bold' };
-		if (diag === '2') {
-				status.status = $t('global.diag-on');
-				status.color = 'text-blue-500';
-		}
-		else if (output === '1') {
-			status.status = $t('global.on');
-			status.color = 'text-green-700 font-bold';
-		}
-		if (input === '1') {
-			status.status = $t('global.off');
-			status.color = 'text-red-500 font-bold';
-		}
-		if (remote === '1') {
-			status.status = $t('global.rem-off');
-			status.color = 'text-red-500 font-bold';
-		}
-		return status;
-	}
-
-	function getAuxSwitch(edit: boolean, status: string, switch1: string[], switch2: string[], auxiliary: number): { status: string, color: string } {
-		if (auxiliary > -1 && switch1[auxiliary] !== '5') {
-			return getSwitchStatus(switch1[auxiliary]);
-		} else if (auxiliary > -1 && switch2[auxiliary] !== '5') {
-			return getSwitchStatus(switch2[auxiliary]);
-		} else if (!edit) {
-			if (status === '0') {
-				return { status: $t('global.on'), color: 'text-green-700 font-bold' };
-			} else {
-				return { status: $t('global.off'), color: 'text-red-500 font-bold' };
-			}
-		} else {
-			return { status: $t('global.off'), color: 'text-red-500 font-bold' };
-		}
-	}
-
-	function getSwitchStatus(value: string): { status: string, color: string } {
-		switch (value) {
-			case '1':
-				return { status: $t('global.auto'), color: 'text-green-700 font-bold' };
-			case '2':
-				return { status: $t('global.manual'), color: 'text-black' };
-			case '3':
-				return { status: $t('global.on'), color: 'text-green-700 font-bold' };
-			case '4':
-			default:
-				return { status: $t('global.off'), color: 'text-red-500 font-bold' };
-		}
-	}
 	function refridgeRunOptions(boardType: string, controllerVersion: string): { text: string, value: string }[] {
 		const RefridgeRun: { text: string, value: string }[] = [
 			{ text: ' ', value: '255' },

@@ -1,10 +1,9 @@
-import { loadIotData, getHttpUrl } from "$lib/business/util";
+import { getHttpUrl } from "$lib/business/util";
 
+// /iot/door has been migrated to the typed proto store `$doorSettings`
+// (TAG.DoorSettings = 56). This loader only fetches GDC orbit data,
+// which has no proto representation yet (separate /iot/gdc orbit flow).
 export async function load({fetch}) {
-  
-  const result = await loadIotData('/iot/door', fetch);
-
-  // Fetch GDC orbit data (may not be present)
   let gdc = null;
   try {
     if (typeof window !== 'undefined') {
@@ -16,5 +15,5 @@ export async function load({fetch}) {
     }
   } catch { /* GDC not available */ }
 
-  return { array: result, gdc };
+  return { gdc };
 }

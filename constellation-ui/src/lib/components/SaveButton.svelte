@@ -6,43 +6,79 @@
   import { t } from "svelte-i18n";
   import { keyboardStore } from "$lib/store";
   import { onMount } from "svelte";
+  import { beforeNavigate } from "$app/navigation";
 
   export let edit = false;
   export let wait = true;
   export let data: any;
-  export let route: string;
+  /**
+   * Legacy `/iot/${route}` POST target. Optional — pages that supply an
+   * `onSave` (the proto-direct path) don't need it. Kept for the few
+   * remaining pages whose save still goes through `legacyShim` / a
+   * registered `apiRoutes.ts` POST handler.
+   */
+  export let route: string = '';
   export let original: any;
   export let validation: Record<string, string> = {};
   export let reset = false;
   export let autoSave = false;
+  /**
+   * Phase 0.4+ hook — when provided, SaveButton calls `onSave(data)` in
+   * place of POSTing to `/iot/${route}`. Use with `writeProto(TAG, msg)`
+   * to cut a page's write path over to the typed-proto transport while
+   * preserving SaveButton's autoSave / dirty-tracking / wait UX.
+   *
+   * Resolve to indicate success; throw to indicate error. The function
+   * is responsible for any UI-space → proto-message shape conversion.
+   * Field-level validation errors (the `Validation` response shape from
+   * legacyShim) are NOT surfaced through this path — throw a plain Error
+   * with a user-readable message instead.
+   */
+  export let onSave: ((data: any) => Promise<void>) | undefined = undefined;
 
   const dispatch = createEventDispatcher();
 
   let error = false;
   let isDisabledDueToKeyboard = false;
   let keyboardHideTimeout: NodeJS.Timeout;
-  let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
-  let autoSaveStatus: 'idle' | 'saving' | 'saved' | 'error' = 'idle';
   let savedTimeout: ReturnType<typeof setTimeout> | undefined;
+  let autoSaveStatus: 'idle' | 'saving' | 'saved' | 'error' = 'idle';
 
-  // Auto-save: watch for data changes and trigger save after debounce
-  // Only triggers when keyboard is hidden (user finished entering values)
-  $: if (autoSave && edit && data && original && $keyboardStore.hidden) {
-    scheduleAutoSave(data, original);
-  }
-
-  function scheduleAutoSave(current: any, orig: any) {
-    if (isEqual(current, orig)) return;
-    if (autoSaveTimer) clearTimeout(autoSaveTimer);
-    autoSaveStatus = 'idle';
-    autoSaveTimer = setTimeout(() => {
-      autoSaveTimer = undefined;
-      save();
-    }, 1200);
+  // Auto-save policy (rev May 2026): instead of debouncing a save
+  // after every keystroke (which felt "annoying" — the spinner kept
+  // flashing while the operator was still mid-edit), we now defer the
+  // save until the page is navigated away from. The dirty data sits
+  // in `data` while the operator works; the moment the route changes
+  // (back arrow, home button, swipe-nav, sidebar link, …) SvelteKit
+  // fires `beforeNavigate` and we flush. If the operator wants to
+  // save explicitly without leaving the page they can still tap the
+  // visible Save button (rendered when dirty + edit mode + no
+  // autoSave OR when the proto-write callback exists).
+  //
+  // Edge cases handled:
+  //   - Reverted edit (`data` matches `original`): no save fired.
+  //   - Page closed via tab close / browser quit: SvelteKit's
+  //     beforeNavigate also fires for `type==='leave'`; we kick the
+  //     fetch synchronously. If the browser kills it before flush we
+  //     accept the loss — there is no synchronous alternative for
+  //     fetch with a JSON body.
+  //   - Re-render thrash: `data` is rebuilt by the parent on every WS
+  //     push, but `isEqual(data, original)` keeps us idle when
+  //     nothing real changed.
+  if (autoSave) {
+    beforeNavigate(({ cancel }) => {
+      if (!edit) return;
+      if (!data || !original) return;
+      if (isEqual(data, original)) return;
+      // Fire the save and let the navigation proceed. We do NOT await
+      // — blocking navigation would feel even more annoying than the
+      // pre-rev autoSave. The fetch is queued at the network layer
+      // before the route teardown begins; in practice it lands.
+      void save();
+    });
   }
 
   onDestroy(() => {
-    if (autoSaveTimer) clearTimeout(autoSaveTimer);
     if (savedTimeout) clearTimeout(savedTimeout);
   });
 
@@ -106,6 +142,32 @@
       }
     }
     
+    // ── Phase 0.4+ proto write path ─────────────────────────────
+    // When an onSave callback is supplied (e.g. a writeProto(…) wrapper),
+    // skip the legacy /iot/${route} POST entirely. All proto pages land
+    // here as they migrate off the CSV translation layer.
+    if (onSave) {
+      try {
+        await onSave(data);
+        original = cloneDeep(data);
+        wasSuccess = true;
+      } catch (e: any) {
+        console.error(`[SaveButton:${route}] proto save error:`, e?.message ?? e);
+        error = true;
+      } finally {
+        wait = false;
+        if (autoSave) {
+          autoSaveStatus = wasSuccess ? 'saved' : 'error';
+          if (wasSuccess) {
+            if (savedTimeout) clearTimeout(savedTimeout);
+            savedTimeout = setTimeout(() => { autoSaveStatus = 'idle'; }, 2000);
+          }
+        }
+        dispatch('complete', { success: wasSuccess });
+      }
+      return;
+    }
+
     const result = await fetch(getHttpUrl(`/iot/${route}`), {
       method: 'POST',
       headers: {
@@ -208,13 +270,20 @@
 </script>
 
 {#if autoSave}
-  <div class="mx-auto text-center h-6 mt-1">
+  <!-- AutoSave status indicator. Icon-only by user preference — a
+       spinning blue circle while the save is pending/in-flight, a green
+       check after success, a red retry pill on failure. The fixed
+       `min-h-12` wrapper reserves the layout slot so the page doesn't
+       shift when status appears/disappears. -->
+  <div class="mx-auto text-center mt-1 min-h-12 flex items-center justify-center" aria-live="polite">
     {#if autoSaveStatus === 'saving'}
-      <span class="text-sm text-gray-500 animate-pulse">{$t('global.save')}...</span>
+      <span class="inline-block w-8 h-8 rounded-full border-4 border-blue-200 border-t-blue-700 animate-spin" title={$t('global.save')} aria-label={$t('global.save')}></span>
     {:else if autoSaveStatus === 'saved'}
-      <span class="text-sm text-green-600">✓</span>
+      <span class="text-3xl font-bold text-green-700" title={$t('global.saved')} aria-label={$t('global.saved')}>✓</span>
     {:else if autoSaveStatus === 'error'}
-      <button class="text-sm text-red-600 underline cursor-pointer" on:click={save}>{$t('global.retry')}</button>
+      <button class="text-size-large font-semibold text-red-700 underline cursor-pointer px-4 py-2 rounded bg-red-100" on:click={save}>
+        {$t('global.retry')}
+      </button>
     {/if}
   </div>
 {:else if edit}

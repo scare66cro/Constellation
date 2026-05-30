@@ -11,12 +11,12 @@
   import type { Equipment } from "$lib/business/equipmentStatus";
 	import HumidifierRow from "$lib/components/HumidifierRow.svelte";
 	import RefrigerationRow from "$lib/components/RefrigerationRow.svelte";
-	import { getHttpUrl } from "$lib/business/util";
 	import { onDestroy, onMount } from "svelte";
   import { t } from "svelte-i18n";
 	import DoorDiagRow from "$lib/components/DoorDiagRow.svelte";
 	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
-  import WsClient from "$lib/business/wsClient";
+  import { getHttpUrl } from "$lib/business/util";
+  import { equipmentComposite } from "$lib/business/protoStores";
 
   type Counts = {
     leftRows: number,
@@ -28,9 +28,20 @@
 
   let title = $t('level1.equipment.equipment-status');
 
-  let client: WsClient | undefined = undefined;
-
   let equipment: Equipment | undefined;
+
+  // Reactive subscription to the proto composite store. The bridge
+  // replays cached frames immediately on subscribe, so this typically
+  // settles within one round-trip — same effective behaviour as the
+  // legacy `equipment-data` WS channel, minus the bridge CSV layer.
+  $: if ($equipmentComposite) {
+    if (!equipment) {
+      equipment = $equipmentComposite;
+    } else {
+      updateRows($equipmentComposite);
+      equipment = $equipmentComposite;
+    }
+  }
 
   let switch1Use: string[] = [];
   let switch2Use: string[] = [];
@@ -68,29 +79,14 @@
   }
 
   onMount(() => {
-    // Establish websocket for equipment data
-    client = new WsClient(
-      getHttpUrl('/iot/ws'),
-      'equipment-data',
-      (data) => {
-        const incoming = data as Equipment;
-        if (!incoming) return;
-        // First data load: build row structures
-        if (!equipment) {
-          equipment = incoming;
-          // Trigger reactive rebuild block (currentLevel mismatch) to call loadData
-          // ready will be set true inside loadData reactive block
-        } else {
-          updateRows(incoming);
-        }
-      }
-    );
-    client.connect();
+    // No-op: subscription is wired via the reactive `$equipmentComposite`
+    // block above. Kept for parity with other pages so future side-effects
+    // (one-shot REST fetches, etc.) have an obvious home.
   });
 
 	onDestroy(() => {
-    client?.close();
-    client = undefined;
+    // No-op: the proto store auto-unsubscribes when the last consumer
+    // detaches; nothing page-local to tear down.
 	});
 
   function updateRows(equipment: Equipment): void {
@@ -205,17 +201,26 @@
         addEquipment(equipment, 'lights2', counts);
       }
       if (level >= 1) {
-        if (equipment.outputConfig[13] !== '-1' || equipment.pwmConfig[1].split(':')[2] !== '-1') {
+        if (equipment.outputConfig[13] !== '-1' || equipment.pwmConfig[1]?.split(':')[2] !== '-1') {
           addEquipment(equipment, 'refrig', counts);
         }
+        // Fresh-air doors operator selector. Always show at level≥1
+        // because the row's purpose is to drive the state machine
+        // (SW_FRESHAIR_AUTO gate in SetStateCooling), not just a
+        // physical output. The legacy CPLD economizer auto-bypass was
+        // removed in fw 0.A.46 so this is now the sole mechanism for
+        // the operator to enable cooling-mode entry. Renders even when
+        // no DOORS output is mapped — picking AUTO with no wiring is
+        // harmless (engine just has nothing to drive).
+        addEquipment(equipment, 'door', counts);
       } else {
-        if (equipment.outputConfig[13] === '-1' && equipment.pwmConfig[1].split(':')[2] !== '-1') {
+        if (equipment.outputConfig[13] === '-1' && equipment.pwmConfig[1]?.split(':')[2] !== '-1') {
           addEquipment(equipment, 'refrig', counts);
         }
-        if (onionMode && equipment.pwmConfig[3].split(':')[2] !== '-1') {
+        if (onionMode && equipment.pwmConfig[3]?.split(':')[2] !== '-1') {
           addEquipment(equipment, 'burner', counts);
         }
-        if (equipment.pwmConfig[0].split(':')[2] !== '-1') {
+        if (equipment.pwmConfig[0]?.split(':')[2] !== '-1') {
           addEquipment(equipment, 'door', counts);
         }
       }

@@ -1,21 +1,20 @@
-import { loadIotData, getHttpUrl } from "$lib/business/util";
+﻿import { getHttpUrl } from "$lib/business/util";
 
+/**
+ * Phase 5.1: refrig settings now hydrate from the RefrigSettings proto
+ * store ($refrigSettings). This loader only fetches the bridge-side
+ * Triton sidecar (orbit-only metadata, no proto representation).
+ */
 export async function load({ fetch }) {
-  const result = await loadIotData('/iot/refrigeration', fetch);
-
-  // Triton-orbit list (used by the SCADA section at the bottom of the page).
-  // Always returns 200 with { tritons: [...] } from the bridge — empty array
-  // means no Tritons present and the SCADA section stays hidden.
-  let tritons: { slot: number; connected: boolean; label: string }[] = [];
+  let tritons = [];
   try {
-    if (typeof window !== 'undefined') {
-      const resp = await fetch(getHttpUrl('/iot/triton/list'));
+    if (typeof window !== "undefined") {
+      const resp = await fetch(getHttpUrl("/iot/triton/list"));
       if (resp.ok) {
-        const data = await resp.json();
-        if (Array.isArray(data?.tritons)) tritons = data.tritons;
+        const j = await resp.json();
+        if (Array.isArray(j?.tritons)) tritons = j.tritons;
       }
     }
   } catch { /* SCADA section will simply not render */ }
-
-  return { array: result, tritons };
+  return { tritons };
 }

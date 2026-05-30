@@ -52,10 +52,12 @@
   const COND_MODES       = ['Fixed','Floating','Balanced'];
   const DEFROST_MODES    = ['NONE','TIMED','DEMAND','HOT_GAS','ELEC'];
   const FAILURE_MODES    = ['ALARM_ONLY','SAFE_OFF','RUN_THROUGH'];
+  // Phase 8 — Triton orbit hardware ships 2 AOs / 10 DOs.  Order MUST match
+  // TRITON_AO_MODE / TRITON_DO_ROLE in orbit-simulator/src/orbitSimulator.ts.
   const AO_MODES         = ['UNUSED','EEV','COMP_VFD','COND_VFD','EVAP_VFD'];
   const DO_ROLES         = ['UNUSED','COMP','COND_FAN','EVAP_FAN','DEFROST',
                             'LIQ_SOL','UNLOADER1','UNLOADER2','UNLOADER3',
-                            'UNLOADER4','OIL_PUMP'];
+                            'UNLOADER4','OIL_PUMP','COMP_ALARM'];
   const COMP_STATUS      = ['AUTO_STANDBY','AUTO_RUN','DEFROST','DEFROST_OVR',
                             'PROVE','SW_PUMPDOWN','RM_PUMPDOWN','SW_OFF',
                             'RM_OFF','SYS_OFF','ERROR','STARTING','PUMPDOWN',
@@ -131,15 +133,19 @@
   }
 
   /** DI port indices for each safety (matches sim TRITON_DI_NAMES). */
+  // Phase 8 — DI indices MUST match TRITON_DI_NAMES in orbitSimulator.ts.
+  // There is NO dedicated run-prove DI; "prove" is the inverted DI_1 reading
+  // (crankcaseCurrent) handled inside tritonControl.ts.
   const SAFETY_DI: Array<{ key: string; label: string; di: number; closedSafe: boolean }> = [
-    { key: 'phaseMonitor',      label: 'Phase Monitor',       di: 0, closedSafe: true },
-    { key: 'hpSwitch',          label: 'HP Switch',           di: 1, closedSafe: true },
-    { key: 'lpSwitch',          label: 'LP Switch',           di: 2, closedSafe: true },
-    { key: 'compOverload',      label: 'Compressor Overload', di: 3, closedSafe: true },
-    { key: 'condFanOverload',   label: 'Cond Fan Overload',   di: 4, closedSafe: true },
-    { key: 'runProve',          label: 'Run Prove',           di: 5, closedSafe: true },
-    { key: 'pumpdownSwitch',    label: 'Pumpdown Switch',     di: 6, closedSafe: true },
-    { key: 'autoRunPermissive', label: 'Auto-Run Permissive', di: 7, closedSafe: true },
+    { key: 'phaseMonitor',      label: 'Phase Monitor',         di: 0, closedSafe: true  },
+    { key: 'crankcaseCurrent',  label: 'Crankcase Heater Curr', di: 2, closedSafe: true  },
+    { key: 'condFanOverload',   label: 'Cond Fan Overload',     di: 3, closedSafe: true  },
+    { key: 'compOverload',      label: 'Compressor Overload',   di: 4, closedSafe: true  },
+    { key: 'oilFailSwitch',     label: 'Oil Failure Switch',    di: 5, closedSafe: true  },
+    { key: 'hpSwitch',          label: 'HP Switch',             di: 6, closedSafe: true  },
+    { key: 'lpSwitch',          label: 'LP Switch',             di: 7, closedSafe: true  },
+    { key: 'autoRunPermissive', label: 'Auto-Run Permissive',   di: 8, closedSafe: true  },
+    { key: 'pumpdownSwitch',    label: 'Pumpdown Switch',       di: 9, closedSafe: true  },
   ];
 
   function toggleSafetyDi(index: number, value: boolean) {
@@ -166,7 +172,7 @@
   // immediately re-fetches the snapshot, after which a fresh open will
   // pick up the new values.
   let edits: Record<string, string> = {};
-  let aoMode: number[] = [0, 0, 0, 0];
+  let aoMode: number[] = [0, 0]; // Phase 8: 2 AOs
   let doRole: number[] = Array(10).fill(0);
   let failures: Record<string, { mode: number; delaySec: number }> = {};
   let fanOn: string[]  = ['','','','','',''];
@@ -257,9 +263,9 @@
     fanDiffOff = (sp.fanDiffOffP ?? []).slice(0, 6).map((v: any) => String(v));
     while (fanDiffOn.length  < 6) fanDiffOn.push('');
     while (fanDiffOff.length < 6) fanDiffOff.push('');
-    aoMode = (state.ioConfig?.aoMode ?? [0,0,0,0]).slice(0, 4);
+    aoMode = (state.ioConfig?.aoMode ?? [0,0]).slice(0, 2);
     doRole = (state.ioConfig?.doRole ?? Array(10).fill(0)).slice(0, 10);
-    while (aoMode.length < 4)  aoMode.push(0);
+    while (aoMode.length < 2)  aoMode.push(0);
     while (doRole.length < 10) doRole.push(0);
     const f = state.failures ?? {};
     failures = {};
@@ -420,13 +426,14 @@
           title: 'Safety Interlocks',
           rows: [
             { label: 'Phase Monitor',        value: ok(sf.phaseMonitor) },
+            { label: 'Crankcase Heater Curr',value: ok(sf.crankcaseCurrent) },
+            { label: 'Cond Fan Overload',    value: ok(sf.condFanOverload) },
+            { label: 'Compressor Overload',  value: ok(sf.compOverload) },
+            { label: 'Oil Failure Switch',   value: ok(sf.oilFailSwitch) },
             { label: 'HP Switch',            value: ok(sf.hpSwitch) },
             { label: 'LP Switch',            value: ok(sf.lpSwitch) },
-            { label: 'Compressor Overload',  value: ok(sf.compOverload) },
-            { label: 'Cond Fan Overload',    value: ok(sf.condFanOverload) },
-            { label: 'Run Prove',            value: ok(sf.runProve) },
-            { label: 'Pumpdown Switch',      value: sf.pumpdownSwitch ? 'Idle (closed)' : 'PUMPDOWN (open)' },
             { label: 'Auto-Run Permissive',  value: ok(sf.autoRunPermissive) },
+            { label: 'Pumpdown Switch',      value: sf.pumpdownSwitch ? 'Idle (closed)' : 'PUMPDOWN (open)' },
             { label: 'Lockout latched',      value: '0x' + ((sf.lockoutMask ?? 0) & 0xFF).toString(16).padStart(2, '0') },
           ],
         };
@@ -452,7 +459,7 @@
     <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
          on:click|stopPropagation
          on:keydown|stopPropagation
-         role="dialog" aria-modal="true" aria-labelledby="popup-title">
+         role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="popup-title">
       <header class="flex items-center justify-between border-b px-4 py-2 bg-gray-50 sticky top-0 z-10">
         <h3 id="popup-title" class="font-bold text-size-large">{detail.title}</h3>
         <Button size="sm" on:click={() => dispatch('close')} class="ml-2">Close</Button>

@@ -68,7 +68,8 @@ export function getHomePage(page?: string): string {
     case 'mnFreqCtrl.htm':
       return '/level1/fanspeed';
     case 'mnRampRate.htm':
-      return '/level1/ramp';
+      // Ramp rate UI was merged into the plenum-setpoints page.
+      return '/level1/plentemp';
     case 'mnHumidCtrl.htm':
       return '/level1/humidifier';
     case 'mnClimacellTimes.htm':
@@ -92,7 +93,7 @@ export function getDropDownPage(page: string): string {
     case '/level1/pile': return 'pile';
     case '/level1/runclock': return 'runclock';
     case '/level1/fanspeed': return 'fanspeed';
-    case '/level1/ramp': return 'ramp';
+    case '/level1/ramp': return 'plentemp';
     case '/level1/humidifier': return 'humidifier';
     case '/level1/climacell': return 'climacell';
     case '/level1/co2': return 'co2';

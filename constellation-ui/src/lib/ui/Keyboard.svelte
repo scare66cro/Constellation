@@ -10,9 +10,10 @@
 
 <script lang="ts">
   import Keyboard from 'simple-keyboard';
-  import { onMount, onDestroy, tick, createEventDispatcher } from 'svelte';
+  import { onMount, tick, createEventDispatcher } from 'svelte';
   import { t } from "svelte-i18n";
   import { frontMatterStore } from '$lib/store';
+  import { accountSettings } from '$lib/business/protoStores';
 	import Select from './Select.svelte';
 	import { getHttpUrl, safeJsonParse, isRebooting } from '$lib/business/util';
 
@@ -60,7 +61,12 @@
 
   $: currentKeyboardType = '';
   $: user = 'DEFAULT';
-  $: users = [] as Array<{text: string, value: string}>;
+  // Login user list comes from the AccountSettings proto store (envelope
+  // tag 33). Reactive — the dropdown re-populates whenever the firmware
+  // pushes an updated user roster, no fetch/retry needed.
+  $: users = (($accountSettings?.users ?? []) as Array<{ slot: number; userId: string }>) 
+    .map((u) => ({ text: u.userId, value: u.userId }))
+    .filter((u) => u.value !== '');
 
   $: init = !hidden;
   $: initPassword = !hidden;
@@ -119,82 +125,8 @@
     }
   }
 
-  let accountsLoaded = false;
-  let loadingAccounts = false;
-  let accountsRetryTimer: ReturnType<typeof setTimeout> | null = null;
-
-  async function fetchAccountsWithRetry(maxAttempts = 8, initialDelayMs = 500) {
-    if (accountsLoaded || loadingAccounts) return;
-    loadingAccounts = true;
-    let attempt = 0;
-    let delay = initialDelayMs;
-
-    const scheduleRetry = () => {
-      if (attempt >= maxAttempts) {
-        // Give up silently; allow keyboard without user list
-        loadingAccounts = false;
-        initPassword = false;
-        return;
-      }
-      accountsRetryTimer = setTimeout(tryOnce, delay);
-      delay = Math.min(delay * 2, 4000); // exponential backoff capped at 4s
-    };
-
-    const tryOnce = async () => {
-      attempt++;
-      // Skip while backend is rebooting if known
-      if (isRebooting()) {
-        scheduleRetry();
-        return;
-      }
-      try {
-        const response = await fetch(getHttpUrl(`/iot/accounts`));
-        const data = await safeJsonParse(response).catch(() => ({}));
-
-        const values = Object.values(data || {}).slice(0, 10) as string[];
-        const parsed = values
-          .map((value) => ({ text: value, value }))
-          .filter((item) => item.value !== '');
-
-        // If we didn't get any values, treat as not ready and retry
-        if (!parsed || parsed.length === 0) {
-          scheduleRetry();
-          return;
-        }
-
-        users = parsed as Array<{ text: string; value: string }>;
-        accountsLoaded = true;
-        loadingAccounts = false;
-
-        await tick();
-        // Add small delay for touch mode to prevent cursor jumping
-        setTimeout(() => {
-          inputRef?.focus();
-          const cursorPos = input.length;
-          inputRef?.setSelectionRange(cursorPos, cursorPos);
-          initPassword = false;
-        }, 50);
-      } catch {
-        // Network/parse failure – retry quietly
-        scheduleRetry();
-      }
-    };
-
-    tryOnce();
-  }
-
-  $: {
-    if (initPassword && inputType === 'loginPassword' && !accountsLoaded && !loadingAccounts) {
-      fetchAccountsWithRetry();
-    }
-  }
-
-  onDestroy(() => {
-    if (accountsRetryTimer) {
-      clearTimeout(accountsRetryTimer);
-      accountsRetryTimer = null;
-    }
-  });
+  // Phase 5.1 cleanup (S9d): legacy /iot/accounts fetch + retry loop
+  // removed; `users` derives reactively from $accountSettings above.
 
   onMount(async () => {
     alphaKeyboard = new Keyboard('.alphaKeyboard', {
@@ -541,7 +473,7 @@
     </div>
   </div>
 </div>
-<div class:hidden={hidden} class="opacity-50 fixed inset-0 z-40 bg-black" />
+<div class:hidden={hidden} class="opacity-50 fixed inset-0 z-40 bg-black"></div>
 
 <style lang="postcss">
   .alpha {

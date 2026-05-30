@@ -1,7 +1,7 @@
 <script lang="ts">
 	import GellertPage from '$lib/components/GellertPage.svelte';
   import { dataSelectionStore, navigationStore, pidStore } from '$lib/store';
-  import { getHttpUrl } from "$lib/business/util";
+
 	import Card from '$lib/ui/Card.svelte';
 	import Column from '$lib/ui/Column.svelte';
 	import Row from '$lib/ui/Row.svelte';
@@ -17,7 +17,6 @@
   let data = {};
 
   onMount(async () => {
-    $navigationStore.data = getHttpUrl(`/iot/pids`);
     data = await loadData();
     ready = true;
   });

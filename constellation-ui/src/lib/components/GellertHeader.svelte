@@ -20,7 +20,6 @@
 
 	let dateOutput: string = '';
 
-	let client: WsClient | undefined;
 	let networkClient: WsClient | undefined;
 
 
@@ -409,28 +408,30 @@
 onMount(async () => {
 	let ip: string;
 	let port: string;
-	client = new WsClient(getHttpUrl('/iot/ws'), 'header-data', async (data) => {
-		$headersStore = data as Headers;
+
+	// `$headersStore` is now driven by `headerComposite` wired in
+	// `+layout.svelte` (single-point bridge from typed proto stores).
+	// We just need to react to `setOptions` to populate the panel
+	// dropdown's first entry from the host-discovered ip:port.
+	const unsubHdr = headersStore.subscribe(async () => {
 		if ($navigationStore.setOptions) {
 			$navigationStore.setOptions = false;
 			ip = await getIP();
 			port = await getPort();
-			// Set current panel as first option
 			selectedPanel = `${ip}:${port}`;
 		}
 	});
-	client.connect();
 
 	// Set up TCP/IP data Polling listener to populate dropdown (lightweight updates)
 	networkClient = new WsClient(getHttpUrl('/iot/ws'), 'tcpip-data', (data) => {
 		processNetworkNodesFromPolling(data as unknown as { nodes: Array<{text: string, value: string}> });
 	});
 	networkClient.connect();
+
+	onDestroy(unsubHdr);
 });
 
 onDestroy(() => {
-	client?.close();
-	client = undefined;
 	networkClient?.close();
 	networkClient = undefined;
 	if (longPressTimer) {
@@ -473,6 +474,11 @@ onDestroy(() => {
 			>
 				{$t('global.current-mode')}: {toUpper(currentMode?.text) ?? "UNKNOWN MODE"}
 			</h2>
+			{#if $headersStore.EStop}
+				<div class="mt-1 px-3 py-1 mx-auto rounded-md bg-red-700 text-white font-extrabold text-size-large animate-pulse shadow-lg">
+					🛑 E-STOP — SYSTEM SHUT DOWN
+				</div>
+			{/if}
 		</div>
 		<div class="w-1/4 flex flex-col text-size-large">
 			<span class="ml-auto mr-2">{dateOutput}</span>

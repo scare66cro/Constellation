@@ -10,14 +10,16 @@
 	import { AdornmentType } from "$lib/business/adornmentType";
 	import SaveButton from "$lib/components/SaveButton.svelte";
   import { navigationStore, failureOptionsStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
-  import { cloneDeep, isEqual } from "lodash-es";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
 	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
-	import type { ArrayResponse } from "$lib/business/util";
   import ScrollableArea from "$lib/components/ScrollableArea.svelte";
+  import { failureSettings2 } from "$lib/business/protoStores";
+  import { writeProto } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
-  export let data: ArrayResponse;
+  // Phase 5.1: hydrated from the FailureSettings2 proto broadcast (envelope
+  // tag 54) instead of the legacy /iot/failures2 GET (deleted +page.ts).
 
   let title = $t('level2.failures2.failures-setup-2');
 
@@ -36,17 +38,45 @@
 
   $: ready = false;
   $: wait = false;
-  $: failures2 = [] as string[];
 
-  onMount(async () => {
-		try {
-      $navigationStore.data = getHttpUrl(`/iot/failures2`);
-      $navigationStore.isDirty = () => !isEqual(failures2, data.array);
-      failures2 = cloneDeep(data.array);
-		} catch (error) {
-      console.error(error);
-		}
-		ready = true;
+  // Build the 13-slot string array the existing template + SaveButton expect.
+  function fs2ToArray(fs2: any): string[] {
+    const v = fs2 ?? {};
+    return [
+      String(v.outAirMode    ?? 0),
+      String(v.outAirTimer   ?? 0),
+      String(v.outHumidMode  ?? 0),
+      String(v.outHumidTimer ?? 0),
+      String(v.highCo2Mode   ?? 0),
+      String(v.highCo2Timer  ?? 0),
+      String(v.co2Setpt      ?? 0),
+      String(v.lowHumidMode  ?? 0),
+      String(v.lowHumidTimer ?? 0),
+      String(v.lowHumidSet   ?? 0),
+      String(v.plenSenMode   ?? 0),
+      String(v.plenSenTimer  ?? 0),
+      String(v.plenSenDiff   ?? 0),
+    ];
+  }
+
+  let failures2: string[] = new Array(13).fill('0');
+  let originalFailures2: string[] = new Array(13).fill('0');
+
+  onMount(() => {
+    const unsub = failureSettings2.subscribe((fs2) => {
+      if (!fs2) return;
+      const fresh = fs2ToArray(fs2);
+      if (!ready || isEqual(failures2, originalFailures2)) {
+        failures2 = fresh;
+      }
+      originalFailures2 = fresh;
+      ready = true;
+      if (!$navigationStore.isDirty?.()) {
+        $navigationStore = { ...$navigationStore, invalidate: true };
+      }
+    });
+    $navigationStore.isDirty = () => !isEqual(failures2, originalFailures2);
+    return () => unsub();
   });
 </script>
 
@@ -106,7 +136,35 @@
       </Row>
     </Table>
       <svelte:fragment slot="footer-center">
-        <SaveButton {edit} bind:wait={wait} data={ failures2 } bind:original={data.array} route="failures2" bind:validation={validation} autoSave />
+        <SaveButton {edit} bind:wait={wait} data={ failures2 } bind:original={originalFailures2} route="failures2" bind:validation={validation} autoSave
+          onSave={async (d: string[]) => {
+            // Mirrors legacyShim OutAirMode encoder. 13 firmware fields
+            // (1-12 uint32, 13 float). All uint32 force-emitted (any can
+            // be 0 = action "ignore").
+            const ints = {
+              1:  parseInt(d[0],  10) || 0,  // OutAirMode
+              2:  parseInt(d[1],  10) || 0,  // OutAirTimer
+              3:  parseInt(d[2],  10) || 0,  // OutHumidMode
+              4:  parseInt(d[3],  10) || 0,  // OutHumidTimer
+              5:  parseInt(d[4],  10) || 0,  // HighCo2Mode
+              6:  parseInt(d[5],  10) || 0,  // HighCo2Timer
+              7:  parseInt(d[6],  10) || 0,  // Co2Setpt
+              8:  parseInt(d[7],  10) || 0,  // LowHumidMode
+              9:  parseInt(d[8],  10) || 0,  // LowHumidTimer
+              10: parseInt(d[9],  10) || 0,  // LowHumidSet
+              11: parseInt(d[10], 10) || 0,  // PlenSenMode
+              12: parseInt(d[11], 10) || 0,  // PlenSenTimer
+            };
+            await writeProto(TAG.FailureSettings2, {
+              outAirMode:    ints[1],  outAirTimer:   ints[2],
+              outHumidMode:  ints[3],  outHumidTimer: ints[4],
+              highCo2Mode:   ints[5],  highCo2Timer:  ints[6],
+              co2Setpt:      ints[7],
+              lowHumidMode:  ints[8],  lowHumidTimer: ints[9], lowHumidSet: ints[10],
+              plenSenMode:   ints[11], plenSenTimer:  ints[12],
+              plenSenDiff:   parseFloat(d[12]) || 0,  // float, field 13
+            });
+          }} />
       </svelte:fragment>
     </ScrollableArea>
   </Card>

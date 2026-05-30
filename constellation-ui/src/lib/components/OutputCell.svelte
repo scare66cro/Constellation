@@ -42,13 +42,13 @@
       <div class="w-full">
         <Select class="mx-12" inline={false} size="xl" bind:value={outputConfig} options={equip} {edit} on:change={dispatchChange} validation={validation}/>
       </div>
-      {#if ioConfig.ioNames[parseInt(ioConfig.config.outputConfig[pid],10)]?.split(':')[3] === '1'}
+      {#if ioConfig.ioNames[parseInt(ioConfig.config.outputConfig[pid],10)]?.renamable}
         <button
           class="absolute right-0 top-1/2 -translate-y-1/2 ml-2 text-sm hover:text-primary-500"
           on:click={() => {
             $keyboardStore.keyboardType = KeyboardTypes.Alpha;
             $keyboardStore.label = "Edit Equipment Name";
-            $keyboardStore.start = ioConfig.ioNames[parseInt(ioConfig.config.outputConfig[pid],10)]?.split(':')[0] || '';
+            $keyboardStore.start = ioConfig.ioNames[parseInt(ioConfig.config.outputConfig[pid],10)]?.name || '';
             $keyboardStore.inputType = 'text';
             $keyboardStore.resultReady = (name) => {
               dispatch('rename', { i, j, name, type: 0 });

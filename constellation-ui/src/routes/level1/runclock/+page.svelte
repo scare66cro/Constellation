@@ -4,7 +4,7 @@
 	import Card from "$lib/ui/Card.svelte";
 	import Button from "$lib/ui/Button.svelte";
 	import { frontMatterStore, navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
+
 	import Table from "$lib/ui/Table.svelte";
 	import Row from "$lib/ui/Row.svelte";
   import Column from "$lib/ui/Column.svelte";
@@ -12,10 +12,14 @@
 	import SaveButton from "$lib/components/SaveButton.svelte";
 	import { cloneDeep, isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import type { ArrayResponse } from "$lib/business/util";
   import { FooterNavigationAdapter } from "$lib/utils/footerNavigationAdapter";
+  import { runtimes as runtimesStore } from "$lib/business/protoStores";
+  import { writeProtoRaw } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
-  export let data: ArrayResponse;
+  // Phase 5.1: hydration migrated to $runtimes proto store. The legacy
+  // `+page.ts` loader was deleted — this page no longer needs a `data`
+  // prop; SaveButton binds against `originalRuntimes` for dirty tracking.
 
   let title = $t('level1.runclock.system-run-clock');
 
@@ -30,6 +34,9 @@
   $: currentRunOperation = '3'; // standby
 
   $: runtimes = [] as string[];
+  // Snapshot of the last hydrated value (used as `original` for SaveButton
+  // dirty-tracking and post-save baseline reset).
+  let originalRuntimes: string[] = [];
 
   $: onionMode = ($frontMatterStore?.panel as string[])?.[8] === '1';
 
@@ -45,15 +52,30 @@
     return operationColor[value] + (doHighLight ? ' ring-4 ring-white' : '');
   }
 
-  onMount(async () => {
-		try {
-      $navigationStore.data = getHttpUrl('/iot/runtimes');
-      $navigationStore.isDirty = () => !isEqual(runtimes, data.array);
-      runtimes = cloneDeep(data.array);
-		} catch (error) {
-      console.error(error);
-		}
-		ready = true;
+  /** Convert proto Runtimes payload → legacy 48-element string[] keyed
+   * by half-hour slot. Slot defaults to '3' (standby) when missing. */
+  function runtimesProtoToArray(rt: { entries: { slot: number; mode: number }[] } | null): string[] {
+    const out = new Array<string>(48).fill('3');
+    if (!rt) return out;
+    for (const e of rt.entries) {
+      if (e.slot >= 0 && e.slot < 48) out[e.slot] = String(e.mode || 3);
+    }
+    return out;
+  }
+
+  onMount(() => {
+    $navigationStore.isDirty = () => !isEqual(runtimes, originalRuntimes);
+    const unsub = runtimesStore.subscribe((rt) => {
+      // Live-push: only re-baseline while the user has no pending edits;
+      // otherwise we would clobber an in-progress change.
+      if (!$navigationStore.isDirty?.()) {
+        const next = runtimesProtoToArray(rt as any);
+        originalRuntimes = next;
+        runtimes = cloneDeep(next);
+        ready = true;
+      }
+    });
+    return () => unsub();
   });
 
   function selectAll() {
@@ -121,7 +143,29 @@
         <Button class="ml-4 !my-1 !bg-blue-400 !text-black {currentRunOperation === '4' && 'ring-4 ring-blue-500'}" size="xl" on:click={refrigeration} disabled={!edit}>{ $t('global.refrigeration') }</Button>
       {/if}
     </div>
-    <SaveButton {edit} bind:wait={wait} data={runtimes} bind:original={data.array} route="runtimes" autoSave />
+    <SaveButton {edit} bind:wait={wait} data={runtimes} bind:original={originalRuntimes} autoSave
+      onSave={async (d: string[]) => {
+        /* LpSettings_ApplyRuntime (Nova_Firmware/lp_am2434/lp_settings.c)
+         * reads RuntimeSettings field 1 as a *repeated submessage* — each
+         * inner blob is a RuntimeEntry { slot=1 (varint), mode=2 (varint) }.
+         * Slot is explicit, not positional. Encoding mirrors
+         * LpSettings_BuildRuntimeBody (same file) so a save round-trips
+         * bit-identically through the LP settings vault and is replayed
+         * on reconnect.
+         *
+         * Slot is force-encoded (slot 0 is valid). Mode is also force-
+         * encoded so RC_OFF (=0) slots aren't zero-suppressed away.
+         */
+        const buf: number[] = [];
+        for (let i = 0; i < 48; i++) {
+          const mode = (Number(d[i] ?? 3) | 0) & 0x7f;
+          // inner: tag(1<<3|0=varint) slot tag(2<<3|0=varint) mode
+          const inner = [0x08, i & 0x7f, 0x10, mode];
+          // outer: tag(1<<3|2=length-delim) len(=4) inner...
+          buf.push(0x0a, inner.length, ...inner);
+        }
+        await writeProtoRaw(TAG.Runtimes, new Uint8Array(buf));
+      }} />
   </Card>
 </GellertPage>
 

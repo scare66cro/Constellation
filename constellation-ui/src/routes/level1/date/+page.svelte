@@ -5,16 +5,15 @@
 	import TextField from "$lib/ui/TextField.svelte";
   import Select from "$lib/ui/Select.svelte";
 	import { navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
 	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
 	import SaveButton from "$lib/components/SaveButton.svelte";
 	import DatePicker from "$lib/ui/DatePicker.svelte";
 	import { format } from "date-fns";
-	import { cloneDeep, isEqual } from "lodash-es";
+	import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import { type ArrayResponse } from "$lib/business/util";
-
-  export let data: ArrayResponse;
+  import { dateTime } from "$lib/business/protoStores";
+  import { writeProto } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
   let title = $t('level1.date.set-date-time');
 
@@ -46,6 +45,7 @@
 
   let originalDate: { Date: string, Time: string, TimeType: string };
   let calendar = new Date();
+  let hydrated = false;
 
   $: time = '';
   $: ready = false;
@@ -57,6 +57,27 @@
     Time: getTime(time),
     TimeType: date[2],
   };
+
+  // Hydrate from the typed proto store on first frame; ignore subsequent
+  // firmware updates so the user's in-progress edits aren't clobbered.
+  $: if (!hydrated && $dateTime) {
+    date = [
+      $dateTime.dateStr ?? '',
+      $dateTime.timeStr ?? '',
+      String($dateTime.amPm ?? 0),
+    ];
+    if (date[0]) {
+      try { calendar = new Date(date[0]); } catch { /* keep default */ }
+    }
+    time = date[1];
+    originalDate = {
+      Date: format(calendar, "MM/dd/yyyy"),
+      Time: getTime(date[1]),
+      TimeType: date[2],
+    };
+    hydrated = true;
+    ready = true;
+  }
 
   function update() {
     if (date.length > 1) {
@@ -70,27 +91,9 @@
     date[0] = format(calendar, "MM/dd/yyyy");
   }
 
-  onMount(async () => {
-    try {
-      $navigationStore.data = getHttpUrl('/iot/date');
-      $navigationStore.isDirty = () => !isEqual(saveDate, originalDate);
-      date = cloneDeep(data.array);
-      
-      // Initialize calendar from the data
-      if (date?.length > 0 && date[0] !== '') {
-        calendar = new Date(date[0]);
-      }
-      
-      originalDate = {
-        Date: format(calendar, "MM/dd/yyyy"),
-        Time: getTime(date[1]),
-        TimeType: date[2],
-      };
-      time = date[1]
-    } catch (e) {
-      console.error(e);
-    }
-		ready = true;
+  onMount(() => {
+    $navigationStore.isDirty = () => !isEqual(saveDate, originalDate);
+    if (hydrated) ready = true;
   });
 </script>
 
@@ -111,7 +114,23 @@
         <Select bind:value={date[2]} class="w-64" size="xl" noeditclass="mr-auto" extended="mr-auto" options={timeOptions} {edit}/>
       </div>
     </div>
-    <SaveButton {edit} bind:wait={wait} data={saveDate} bind:original={originalDate} route="date" autoSave />
+    <SaveButton
+      {edit}
+      bind:wait={wait}
+      data={saveDate}
+      bind:original={originalDate}
+      onSave={async (d) => {
+        // Phase 5.1 — direct proto write. SETTINGS_FIELD[TAG.DateTime] = 26.
+        // Wire-compatible: DateTime (read) and DateTimeUpdate (write) share
+        // field numbers {1=dateStr, 2=timeStr, 3=amPm}.
+        await writeProto(TAG.DateTime, {
+          dateStr: d.Date ?? '',
+          timeStr: d.Time ?? '',
+          amPm: parseInt(d.TimeType ?? '0', 10) || 0,
+        });
+      }}
+      autoSave
+    />
   </Card>
 </GellertPage>
 

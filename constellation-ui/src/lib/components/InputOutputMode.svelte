@@ -18,28 +18,28 @@
     const equip: { text: string, value: string }[] = [];
     const ioConfig = type === 'input' ? aux.InputConfig : aux.OutputConfig;
 
-    let listInfo: string[];
-
     for (let i = 0; i < ioConfig.length; i += 1) {
         if (ioConfig[i] !== '-1') {
-            listInfo = aux.IoNames[i].split(':');
-            if (((potatoMode || pecanMode) && listInfo[1] === '1')
-                || (onionMode && listInfo[1] === '2')
-                || (beeMode && (listInfo[1] === '4' || listInfo[1] === '5'))
-                || listInfo[1] === '4' || listInfo[1] === '7') {
-                if ((type === 'output' && listInfo[2] === '0')
-                    || (type === 'input' && listInfo[2] === '1')
-                    || listInfo[2] === '2') {
-                    equip.push({ text: listInfo[0], value: listInfo[4]});
+            const entry = aux.IoNames[i];
+            if (!entry) continue;
+            const idStr = String(entry.index);
+            if (((potatoMode || pecanMode) && entry.mode === 1)
+                || (onionMode && entry.mode === 2)
+                || (beeMode && (entry.mode === 4 || entry.mode === 5))
+                || entry.mode === 4 || entry.mode === 7) {
+                if ((type === 'output' && entry.ioType === 0)
+                    || (type === 'input' && entry.ioType === 1)
+                    || entry.ioType === 2) {
+                    equip.push({ text: entry.name, value: idStr});
                 }
             }
         }
     }
     if (type === 'output' && ioConfig[40] === '1') {
-        listInfo = aux.IoNames[41].split(':');
-        equip.push({ text: listInfo[0], value: listInfo[4]});
-        listInfo = aux.IoNames[42].split(':');
-        equip.push({ text: listInfo[0], value: listInfo[4]});
+        const e41 = aux.IoNames[41];
+        if (e41) equip.push({ text: e41.name, value: String(e41.index) });
+        const e42 = aux.IoNames[42];
+        if (e42) equip.push({ text: e42.name, value: String(e42.index) });
     }
 
     return equip;
@@ -48,14 +48,14 @@
   function availSwitch(): { text: string, value: string }[] {
     const switches: { text: string, value: string }[] = [];
     for (let i = 0; i < aux.IoNames.length; i += 1) {
-      var listInfo = aux.IoNames[i].split(':');
-      if ((listInfo[2] === '3') && (
-        ((potatoMode || pecanMode) && listInfo[1] === '1')
-        || (onionMode && listInfo[1] === '2')
-        || (beeMode && (listInfo[1] === '4' || listInfo[1] === '5'))
-        || listInfo[1] === '4' || listInfo[1] === '7')
+      const entry = aux.IoNames[i];
+      if (entry.ioType === 3 && (
+        ((potatoMode || pecanMode) && entry.mode === 1)
+        || (onionMode && entry.mode === 2)
+        || (beeMode && (entry.mode === 4 || entry.mode === 5))
+        || entry.mode === 4 || entry.mode === 7)
       ) {
-        switches.push({ text: listInfo[0], value: listInfo[4]});
+        switches.push({ text: entry.name, value: String(entry.index) });
       }
     }
     return switches;

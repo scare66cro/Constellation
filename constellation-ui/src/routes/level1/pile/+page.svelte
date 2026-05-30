@@ -1,54 +1,72 @@
 <script lang="ts">
-	import { getAdornment, isHumidSensorType, isTempSensorType, sensorDisplayValue } from "$lib/business/util";
-	import { parseSensorFeeds, type SensorInfo } from "$lib/business/sensorFeeds";
+	import { getAdornment, isHumidSensorType, isTempSensorType, sensorDisplayValue, type SensorInfo } from "$lib/business/util";
+	import { SensorTypes } from "$lib/business/analog";
 	import GellertPage from "$lib/components/GellertPage.svelte";
 	import { navigationStore } from "$lib/store";
-  	import { getHttpUrl } from "$lib/business/util";
 	import Card from "$lib/ui/Card.svelte";
 	import Column from "$lib/ui/Column.svelte";
 	import Row from "$lib/ui/Row.svelte";
 	import Table from "$lib/ui/Table.svelte";
-	import { cloneDeep } from "lodash-es";
-	import { onDestroy, onMount } from "svelte";
+	import { onMount } from "svelte";
 	import { t } from "svelte-i18n";
-	import WsClient from "$lib/business/wsClient";
-
-	export let data: { sensors: SensorInfo[] };
+	// Phase 1 of proto-direct redesign: this page reads SensorData (tag 13)
+	// + SensorLabels (tag 28) directly from /proto/stream. No CGI/CSV.
+	// See docs/proto-direct-redesign-plan.md.
+	import { sensorData, sensorLabels } from "$lib/business/protoStores";
 
 	let title = $t('level1.pile.pile-sensors');
-	let client: WsClient | undefined;
 
 	$: ready = false;
 	$: level = $navigationStore.level;
-	$: sensors = [] as SensorInfo[];
-	$: tempSensors = sensors.filter((s) => isTempSensorType(s.type)).sort((a, b) => a.id - b.id);
-	$: humiditySensors = sensors.filter((s) => isHumidSensorType(s.type) && !isTempSensorType(s.type)).sort((a, b) => a.id - b.id);
 
-	onMount(async () => {
-		try {
-			sensors = cloneDeep(data.sensors ?? []);
-			$navigationStore.data = getHttpUrl('/iot/sensors');
-		} catch (error) {
-			console.log(error);
-		}
+	// Build a Map<index,label> per kind from the SensorLabels proto so we
+	// can render labels alongside live readings without polling a second
+	// endpoint. proto3 zero-suppression means an absent label_X array just
+	// yields an empty list — handled naturally by the .get() fallback.
+	$: tempLabelMap = new Map<number, string>(
+		($sensorLabels?.tempLabels ?? []).map((l) => [l.index, l.label])
+	);
+	$: humidLabelMap = new Map<number, string>(
+		($sensorLabels?.humidLabels ?? []).map((l) => [l.index, l.label])
+	);
+
+	// SensorReading → SensorInfo adapter. The proto already partitions by
+	// kind (temperatures vs humidities), so we synthesize a sensible type
+	// string for the existing UI helpers (sensorDisplayValue / getAdornment).
+	// `valid: false` from firmware → display as "dis" via the disabled flag.
+	function toSensorInfo(
+		readings: Array<{ index: number; value: number; valid: boolean }>,
+		labels: Map<number, string>,
+		type: SensorTypes
+	): SensorInfo[] {
+		return readings
+			.map((r) => ({
+				id: r.index,
+				label: labels.get(r.index) ?? '',
+				type: type as string,
+				value: r.valid ? r.value.toFixed(1) : '--',
+				offset: '0.0',
+				disabled: !r.valid,
+			}))
+			.sort((a, b) => a.id - b.id);
+	}
+
+	$: tempSensors = toSensorInfo(
+		$sensorData?.temperatures ?? [],
+		tempLabelMap,
+		SensorTypes.SENSOR_PILE_TEMP
+	).filter((s) => isTempSensorType(s.type));
+
+	$: humiditySensors = toSensorInfo(
+		$sensorData?.humidities ?? [],
+		humidLabelMap,
+		SensorTypes.SENSOR_PILE_HUMID
+	).filter((s) => isHumidSensorType(s.type) && !isTempSensorType(s.type));
+
+	$: sensors = [...tempSensors, ...humiditySensors];
+
+	onMount(() => {
 		ready = true;
-
-		client = new WsClient(
-			getHttpUrl('/iot/ws'),
-			'sensor-data',
-			(incoming) => {
-				const updated = parseSensorFeeds(incoming);
-				if (updated.length > 0) {
-					sensors = updated;
-				}
-			}
-		);
-		client.connect();
-	});
-
-	onDestroy(() => {
-		client?.close();
-		client = undefined;
 	});
 </script>
 

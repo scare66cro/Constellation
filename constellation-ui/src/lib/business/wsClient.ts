@@ -1,17 +1,19 @@
 /**
  * WebSocket client for the Agristar bridge server.
  *
- * Replaces PollingClient with a true WebSocket connection:
- *   - Subscribes to named channels (frontmatter-data, header-data, etc.)
- *   - Receives real-time pushes instead of polling every 3s
- *   - Automatic reconnection with exponential backoff
- *   - Falls back to HTTP polling if WebSocket fails persistently
- *   - Same public API as PollingClient for drop-in replacement
+ * Pure WebSocket transport — subscribes to named channels
+ * (frontmatter-data, header-data, etc.) and receives real-time pushes.
+ * Auto-reconnects with exponential backoff capped at 10 s.
  *
  * Protocol:
  *   Client → Server:  { "action": "subscribe",   "channel": "frontmatter-data" }
  *   Client → Server:  { "action": "unsubscribe", "channel": "frontmatter-data" }
  *   Server → Client:  { "channel": "frontmatter-data", "data": {...}, "ts": 123 }
+ *
+ * Note (S9k cleanup 2026-04-21): the HTTP polling fallback was removed
+ * — the per-channel `/iot/ws/{channel}` GET endpoints it used to hit
+ * (download-data, upgrade-data, tcpip-data) were retired with the
+ * legacy PollingClient.  WS reconnect is the only recovery path now.
  */
 
 import { statusStore, type Headers } from '$lib/store';
@@ -67,27 +69,19 @@ export default class WsClient {
   private maxReconnectDelay = 10_000;
   private closed = false;
 
-  // Polling fallback state
-  private pollHandle: ReturnType<typeof setInterval> | null = null;
-  private abortController: AbortController | null = null;
-  private pollingFallback = false;
-  private wsFailures = 0;
-  private readonly WS_FAILURE_THRESHOLD = 5; // fall back to polling after N consecutive WS failures
-
   constructor(url: string, channel: string, cb: SetData) {
     this.url = url;
     this.channel = channel;
     this.cb = cb;
   }
 
-  // ─── Public API (matches PollingClient) ───
+  // ─── Public API ───
 
   /**
    * Open the WebSocket connection and subscribe to the channel.
-   * Falls back to HTTP polling if WebSocket is unavailable.
    */
   public connect(): void {
-    if (this.ws || this.pollHandle) {
+    if (this.ws) {
       console.warn('[WsClient] Already connected or connecting.');
       return;
     }
@@ -97,7 +91,7 @@ export default class WsClient {
   }
 
   /**
-   * Close the connection and stop all polling/reconnection.
+   * Close the connection and stop reconnection.
    */
   public close(code = 1000, reason = 'Client closed connection'): void {
     this.closed = true;
@@ -118,9 +112,6 @@ export default class WsClient {
       this.ws = null;
     }
 
-    // Stop polling fallback
-    this.stopPolling();
-
     WsClient.instances.delete(this);
   }
 
@@ -136,9 +127,6 @@ export default class WsClient {
       this.ws.onopen = () => {
         console.log(`[WsClient] Connected to ${this.channel}`);
         this.reconnectAttempts = 0;
-        this.wsFailures = 0;
-        this.pollingFallback = false;
-        this.stopPolling(); // Stop fallback polling if it was active
 
         // Subscribe to the channel
         this.ws!.send(JSON.stringify({ action: 'subscribe', channel: this.channel }));
@@ -161,19 +149,10 @@ export default class WsClient {
       };
 
       this.ws.onerror = (_event) => {
-        this.wsFailures++;
-        // The onclose handler will fire after onerror, which handles reconnection
-        if (this.wsFailures >= this.WS_FAILURE_THRESHOLD && !this.pollingFallback) {
-          console.warn(
-            `[WsClient] ${this.wsFailures} consecutive WS failures for ${this.channel}, falling back to HTTP polling`
-          );
-          this.pollingFallback = true;
-          this.startPollingFallback();
-        }
+        // The onclose handler will fire after onerror, which handles reconnection.
       };
     } catch (err) {
       console.error(`[WsClient] Failed to create WebSocket for ${this.channel}:`, err);
-      this.wsFailures++;
       this.scheduleReconnect();
     }
   }
@@ -207,50 +186,6 @@ export default class WsClient {
     }, delay);
   }
 
-  // ─── HTTP polling fallback ───
-
-  private startPollingFallback(): void {
-    if (this.pollHandle) return;
-
-    const base = this.normalizeBase(this.url).replace(/\/$/, '');
-    const fullUrl = `${base}/${this.channel}`;
-
-    this.pollHandle = setInterval(async () => {
-      if (this.abortController) {
-        this.abortController.abort();
-      }
-      this.abortController = new AbortController();
-
-      try {
-        const resp = await fetch(fullUrl, {
-          cache: 'no-store',
-          credentials: 'include',
-          signal: this.abortController.signal,
-        });
-        statusStore.update((s: StatusState) => ({ ...s, status: resp.status }));
-
-        if (resp.ok) {
-          const json = await resp.json();
-          this.cb(json as Record<string, string | string[]>);
-        }
-      } catch (e) {
-        if (e instanceof Error && e.name === 'AbortError') return;
-        statusStore.update((s: StatusState) => ({ ...s, status: 0 }));
-      }
-    }, 3000);
-  }
-
-  private stopPolling(): void {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-    }
-    if (this.pollHandle) {
-      clearInterval(this.pollHandle);
-      this.pollHandle = null;
-    }
-  }
-
   // ─── Helpers ───
 
   private buildWsUrl(): string {
@@ -261,12 +196,6 @@ export default class WsClient {
     else if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
       url = 'ws://' + url;
     }
-    return url;
-  }
-
-  private normalizeBase(url: string): string {
-    if (url.startsWith('ws://')) return 'http://' + url.substring(5);
-    if (url.startsWith('wss://')) return 'https://' + url.substring(6);
     return url;
   }
 }

@@ -11,7 +11,9 @@
   import Column from "$lib/ui/Column.svelte";
   import { buildSensorList } from "$lib/business/charting";
   import { fetchDisplayOptions } from "$lib/business/displayUtils";
-	import { plotDataStore, datesStore, dataSelectionStore, keysStore, equipListStore, remoteListStore, historyStore } from "$lib/store";
+	import { plotDataStore, datesStore, dataSelectionStore, keysStore, equipListStore, remoteListStore, historyStore, frontMatterStore } from "$lib/store";
+  import { plenumSettings, sensorList } from "$lib/business/protoStores";
+  import { get } from "svelte/store";
   import { format } from "date-fns";
   import { heightsStore } from "$lib/store";
   import DataSelection from "$lib/components/DataSelection.svelte";
@@ -23,7 +25,6 @@
 	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
   import { t } from "svelte-i18n";
   import VirtualList from "$lib/components/Virtual/VirtualList.svelte";
-	import { safeJsonParse } from "$lib/business/util";
   import WsClient, { type DownloadProgress } from "$lib/business/wsClient";
   
   const drawerStore = getDrawerStore();
@@ -115,19 +116,29 @@
     if ($keysStore.accessLevel < 1) {
       goto("/history");
     }
-    Promise.all([
-      fetch(getHttpUrl('/iot/plensetup')),
-      fetch(getHttpUrl('/iot/frontmatter')),
-      fetch(getHttpUrl('/iot/avail/equipment')),
-      fetch(getHttpUrl('/iot/avail/remote')),
-      fetch(getHttpUrl('/iot/sensors/all')),
-    ]).then(async (responses) => {
-      const plen = await safeJsonParse(responses[0]);
-      const frontmatter = (await safeJsonParse(responses[1])).main;
-      $equipListStore = await safeJsonParse(responses[2]);
-      $remoteListStore = await safeJsonParse(responses[3]);
-      const sensors = await safeJsonParse(responses[4]);
-      const setPoints = plen.setpoints;
+    /* Apr 2026: dropped the `/iot/avail/equipment` and `/iot/avail/remote`
+     * GETs — both were bridge stubs returning hardcoded
+     * `['Equipment']`/`['Remote']`. The same defaults are now baked into
+     * `equipListStore`/`remoteListStore` at store-creation time. */
+    try {
+      // Pull the live `main` array from the global store (composite-fed).
+      // Was: a fifth HTTP call to `/iot/frontmatter`; now zero-RTT since
+      // `+layout.svelte` keeps `$frontMatterStore` warm via the typed
+      // proto stream.
+      const frontmatter = ($frontMatterStore?.main as string[]) ?? [];
+      // Sensors come from the typed `sensorList` proto store (derived
+      // from AnalogBoard frames) instead of `/iot/sensors/all`.
+      const sensors = get(sensorList);
+      // Plenum setpoints come from $plenumSettings (TAG 1) — was a /iot/plensetup
+      // GET that returned the wrong shape (bare array vs {setpoints:...}).
+      const plen = get(plenumSettings);
+      const setPoints: string[] = plen ? [
+        String(plen.tempSetpoint ?? 0),
+        String(plen.humidSetpoint ?? 0),
+        String(plen.humidSetpointRef ?? 0),
+        String(plen.burnerTempSetpoint ?? 0),
+        String(plen.burnerThreshold ?? 0),
+      ] : [];
       $dataSelectionStore.selections = buildSensorList(true, frontmatter, setPoints, sensors);
       $dataSelectionStore.selected = [];
       $historyStore = {
@@ -136,11 +147,10 @@
         inSequence: true, display: ''
       };
       dataReady = true;
-    })
-    .catch(() => {
+    } catch {
       dataReady = false;
       error = true;
-    });
+    }
   });
 
   function getArray(data: number | number[] | string): number[] | string[] {
@@ -223,6 +233,18 @@
         const resp = await fetch(url);
         if (resp.status !== 200) {
           error = true;
+        } else {
+          // Save the CSV body to the user's browser downloads folder.
+          // See userlog/+page.svelte::downloadFile for the same pattern.
+          const blob = await resp.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = objectUrl;
+          a.download = filename || 'activitylog.csv';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objectUrl);
         }
       } catch (e) {
         error = true;

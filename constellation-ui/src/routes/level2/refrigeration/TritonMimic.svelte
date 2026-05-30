@@ -104,7 +104,8 @@
   unboundedly on ultra-wide screens.  Aspect ratio matches viewBox.
 -->
 <div class="triton-mimic w-full" role="img" aria-label="Refrigeration unit schematic">
-  <svg viewBox="0 0 1000 420" preserveAspectRatio="xMidYMid meet" class="w-full h-auto">
+  <svg viewBox="0 0 1000 420" preserveAspectRatio="xMidYMid meet"
+       class="w-full h-auto" style="max-height: 500px;">
 
     <!-- ─── Defs: marker arrows + filters ─────────────────────────────── -->
     <defs>

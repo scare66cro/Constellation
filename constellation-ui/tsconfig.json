@@ -11,7 +11,12 @@
 		"strict": true,
 		"experimentalDecorators": true,
 		"emitDecoratorMetadata": true,
-		"verbatimModuleSyntax": true
+		"verbatimModuleSyntax": true,
+		// Vite is the actual bundler; using "bundler" resolution lets TS
+		// honour package.json `exports` maps (needed for the generated
+		// proto types' `@bufbuild/protobuf/wire` subpath import) without
+		// shadowing SvelteKit's auto-generated $lib / $proto path aliases.
+		"moduleResolution": "bundler"
 	}
 	// Path aliases are handled by https://kit.svelte.dev/docs/configuration#alias
 	//

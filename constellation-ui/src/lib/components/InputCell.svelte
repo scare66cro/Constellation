@@ -8,6 +8,7 @@
   import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
   import { t } from "svelte-i18n";
   import { createEventDispatcher } from "svelte";
+  import { resolveEquipmentLabel } from "$lib/business/equipmentMeta";
 
   export let ioConfig: IOConfigType;
   export let i: number;
@@ -42,9 +43,18 @@
 
 <Column class="w-5/12 border-r border-gray-400 px-2 text-size-xl">
   {#if j <= numInputs}
-    {#if i === 0 && j === 1}
+    {#if i === 0 && (j === 1 || j === 11)}
+      <!-- Hardware-pinned inputs: DI1 = Aux Low Limit, DI11 = E-Stop.
+           Firmware guarantees the mapping (lp_settings.c
+           io_config_pin_hardware_inputs); we just render whatever name
+           the IoEntry table has, with a `*` to flag that the operator
+           can't reassign it. -->
       <div class="my-2">
-        {ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]?.split(':')[0] ?? $t('global.none')}*
+        {#if ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]}
+          {resolveEquipmentLabel(ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)], $t)}*
+        {:else}
+          {$t('global.none')}*
+        {/if}
       </div>
     {:else}
       <div class="flex flex-row w-full items-center">
@@ -52,13 +62,13 @@
           <div class="w-full">
             <Select class="mx-12" inline={false} size="xl" bind:value={inputConfig} options={equip} {edit} on:change={dispatchChange} validation={validation}/>
           </div>
-          {#if ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]?.split(':')[3] === '1'}
+          {#if ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]?.renamable}
             <button
               class="absolute right-0 top-1/2 -translate-y-1/2 ml-2 text-sm hover:text-primary-500"
               on:click={() => {
                 $keyboardStore.keyboardType = KeyboardTypes.Alpha;
                 $keyboardStore.label = "Edit Input Name";
-                $keyboardStore.start = ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]?.split(':')[0] || '';
+                $keyboardStore.start = ioConfig.ioNames[parseInt(ioConfig.config.inputConfig[pid],10)]?.name || '';
                 $keyboardStore.inputType = 'text';
                 $keyboardStore.resultReady = (name) => {
                   dispatch('rename', { i, j, name, type: 1 });

@@ -1,76 +1,65 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+  import { onMount } from "svelte";
   import GellertPage from "$lib/components/GellertPage.svelte";
-	import Card from "$lib/ui/Card.svelte";
-	import Button from "$lib/ui/Button.svelte";
-	import { navigationStore } from "$lib/store";
+  import Card from "$lib/ui/Card.svelte";
+  import Button from "$lib/ui/Button.svelte";
+  import { navigationStore } from "$lib/store";
   import { getHttpUrl } from "$lib/business/util";
-	import Table from "$lib/ui/Table.svelte";
+  import Table from "$lib/ui/Table.svelte";
   import Row from "$lib/ui/Row.svelte";
   import Column from "$lib/ui/Column.svelte";
   import Select from "$lib/ui/Select.svelte";
   import TextField from "$lib/ui/TextField.svelte";
   import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
-	import SaveButton from "$lib/components/SaveButton.svelte";
-	import { cloneDeep, isEqual } from "lodash-es";
+  import SaveButton from "$lib/components/SaveButton.svelte";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import { safeJsonParse, type ArrayResponse } from "$lib/business/util";
-
-  export let data: ArrayResponse;
+  import { safeJsonParse } from "$lib/business/util";
+  import { emailSettings } from "$lib/business/protoStores";
+  import { useDraft, numField } from "$lib/business/useDraft";
+  import { writeProto } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
   let title = $t('level1.email.email-alerts');
 
-  let emailOptions = [
-    { text: $t('global.enable'), value: '0'},
-    { text: $t('level1.email.disable'), value: '1'},
+  $: emailOptions = [
+    { text: $t('global.enable'),         value: 0 },
+    { text: $t('level1.email.disable'),  value: 1 },
   ];
-
-  let authOptions = [
-    { text: 'StartTLS', value: '0'},
-    { text: 'TLS-SSL', value: '1'},
-    { text: $t('global.none'), value: '2'},
+  $: authOptions = [
+    { text: 'StartTLS',          value: 0 },
+    { text: 'TLS-SSL',           value: 1 },
+    { text: $t('global.none'),   value: 2 },
   ];
 
   let validation = {
-    'emailTo': '',
-    'emailFrom': '',
-    'emailPort': '',
-    'emailAccount': '',
-    'emailPassword': '',
-    'emailServer': ''
-  }
+    'emailTo': '', 'emailFrom': '', 'emailPort': '',
+    'emailAccount': '', 'emailPassword': '', 'emailServer': '',
+  };
 
-  let defaultDisplay = { text: $t('global.none'), value: 'not selected' };
+  $: defaultDisplay = { text: $t('global.none'), value: 'not selected' };
 
   $: ready = false;
-
   $: wait = false;
-
   $: displayOptions = [] as { text: string, value: string }[];
-
   $: edit = $navigationStore.level > 0;
-
   $: level = $navigationStore.level;
 
-  $: email = [] as string[];
+  const em = useDraft(emailSettings, TAG.EmailSettings);
+  const { draft, live, hydrated } = em;
+  const portStr = numField(draft, 'port', 'int');
 
   $: textSize = edit ? 'text-size-large' : 'text-size-xl';
   $: compSize = edit ? 'lg' : 'xl';
 
   onMount(async () => {
     try {
-      $navigationStore.data = getHttpUrl('/iot/email');
-      $navigationStore.isDirty = () => !isEqual(email, data.array)
-      email = cloneDeep(data.array);
-
-      if (data.array[0] === '0') {
-        ready = true;
-        await findDisplays();
-      }
+      $navigationStore.isDirty = () => !isEqual($draft, $live);
+      ready = true;
+      if ($draft.enabled === 0) await findDisplays();
     } catch (e) {
       console.error(e);
     }
-    ready = true;
   });
 
   async function findDisplays() {
@@ -80,11 +69,15 @@
     try {
       const displays = await safeJsonParse(result);
       for (let i = 0; i < displays.data.DisplayList?.length; i += 5) {
-        displayOptions.push({ text: `${displays.data.DisplayList[i]} ${displays.data.DisplayList[i + 2]}`, value: displays.data.DisplayList[i] });
+        displayOptions.push({
+          text: `${displays.data.DisplayList[i]} ${displays.data.DisplayList[i + 2]}`,
+          value: displays.data.DisplayList[i],
+        });
       }
       displayOptions = displayOptions;
-      if (email.length > 6) {
-        email[6] = displays.data.LocalIpAdd[0].split(':')[0];
+      // Auto-fill displayId with this controller's IP if user hasn't picked one.
+      if (!$draft.displayId) {
+        $draft.displayId = displays.data.LocalIpAdd[0].split(':')[0];
       }
     } catch (error) {
       console.error(error);
@@ -93,40 +86,46 @@
   }
 
   async function sendTestEmail() {
-    if (email[0] === '0') {
-      wait = true;
-      try {
-        const response = await fetch(getHttpUrl('/iot/email/test'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-      } catch (error) {
-        console.error('Error sending test email:', error);
-      } finally {
-        wait = false;
-      }
+    if ($draft.enabled !== 0) return;
+    wait = true;
+    try {
+      await fetch(getHttpUrl('/iot/email/test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      console.error('Error sending test email:', error);
+    } finally {
+      wait = false;
     }
+  }
+
+  async function saveEmail(): Promise<void> {
+    // Force-emit fields that legitimately can be 0 (port=0 unset, enabled=0
+    // on, authType=0 StartTLS) are declared once in forceFieldRegistry.ts —
+    // writeProto picks them up automatically.
+    await em.save();
   }
 </script>
 
 <GellertPage {wait} {ready} {title} {level} name="email">
   <Card class="w-3/4 mx-auto mt-1 flex flex-col">
-    {#if email.length > 7}
+    {#if $hydrated}
     <Table class="{textSize}">
       <Row>
         <Column class="xl:py-1 items-center">
           <p class="text-center">
             { $t('level1.email.send-email-alerts') }:
-            <Select bind:value={email[0]} class="w-96" size={compSize} options={emailOptions} {edit}/>
+            <Select bind:value={$draft.enabled} class="w-96" size={compSize} options={emailOptions} {edit}/>
           </p>
         </Column>
       </Row>
-      {#if email[0] === '0'}
+      {#if $draft.enabled === 0}
         <Row>
           <Column class="xl:py-1 items-center">
             <p class="text-center">
               { $t('level1.email.to') }:
-              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={email[7]} label="To" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailTo}/>
+              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={$draft.toAddr} label="To" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailTo}/>
             </p>
           </Column>
         </Row>
@@ -134,19 +133,19 @@
           <Column class="xl:py-1 items-center">
             <p class="text-center">
               { $t('level1.email.from') }:
-              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={email[8]} label="From" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailFrom}/>
+              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={$draft.fromAddr} label="From" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailFrom}/>
             </p>
           </Column>
         </Row>
       {/if}
     </Table>
-    {#if email[0] === '0'}
+    {#if $draft.enabled === 0}
       <Table class="test-size-xl">
         <Row>
           <Column class="xl:py-1 items-center">
             <p class="text-center {textSize}">
               { $t('level1.email.email-server') }:
-              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={email[1]} label="Email Server" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailServer}/>
+              <TextField class="w-full leading-snug" size={compSize} extended="w-1/2" bind:value={$draft.server} label="Email Server" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailServer}/>
             </p>
           </Column>
         </Row>
@@ -154,9 +153,9 @@
           <Column class="xl:py-1 items-center">
             <p class="text-center {textSize}">
               { $t('level1.email.authentication-type') }:
-              <Select bind:value={email[2]} class="w-96 mr-4" size={compSize} options={authOptions} {edit}/>
+              <Select bind:value={$draft.authType} class="w-96 mr-4" size={compSize} options={authOptions} {edit}/>
               { $t('global.port') }:
-              <TextField class="w-48" size={compSize} bind:value={email[3]} label="Port" keyboardType={KeyboardTypes.Numeric} {edit} validation={validation.emailPort}/>
+              <TextField class="w-48" size={compSize} bind:value={$portStr} label="Port" keyboardType={KeyboardTypes.Numeric} {edit} validation={validation.emailPort}/>
             </p>
           </Column>
         </Row>
@@ -164,9 +163,9 @@
           <Column class="xl:py-1 items-center">
             <p class="text-center {textSize}">
               { $t('level1.email.account') }:
-              <TextField class="w-full leading-snug" size={compSize} extended="w-1/3 mr-4" bind:value={email[4]} label="Account" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailAccount}/>
+              <TextField class="w-full leading-snug" size={compSize} extended="w-1/3 mr-4" bind:value={$draft.username} label="Account" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailAccount}/>
               { $t('global.password') }:
-              <TextField type="password" class="w-full leading-snug" size={compSize} extended="w-1/3" bind:value={email[5]} label="Password" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailPassword}/>
+              <TextField type="password" class="w-full leading-snug" size={compSize} extended="w-1/3" bind:value={$draft.password} label="Password" keyboardType={KeyboardTypes.Alpha} {edit} validation={validation.emailPassword}/>
             </p>
           </Column>
         </Row>
@@ -177,7 +176,7 @@
         <Column class="xl:py-1 items-center">
           <p class="text-center">
             { $t('level1.email.send-from-display') }:
-            <Select class="w-full" size={compSize} extended="w-1/2 mr-4" bind:value={email[6]} options={displayOptions} {edit} disabled={email[0] === '1'}/>
+            <Select class="w-full" size={compSize} extended="w-1/2 mr-4" bind:value={$draft.displayId} options={displayOptions} {edit} disabled={$draft.enabled === 1}/>
             {#if edit}
               <Button size={compSize} on:click={findDisplays}>{ $t('global.find') }</Button>
             {/if}
@@ -189,10 +188,11 @@
       <div class="w-1/3">
       </div>
       <div class="w-1/3 flex justify-center">
-        <SaveButton {edit} bind:wait={wait} data={email} bind:original={data.array} route="email" bind:validation={validation} autoSave />
+        <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} bind:validation={validation} autoSave
+          onSave={saveEmail} />
       </div>
       <div class="w-1/3 flex justify-end">
-        {#if edit && email[0] === '0'}
+        {#if edit && $draft.enabled === 0}
           <Button class="mr-4 !mb-1" size={compSize} on:click={sendTestEmail}>{ $t('level1.email.send-test-email') }</Button>
         {/if}
       </div>

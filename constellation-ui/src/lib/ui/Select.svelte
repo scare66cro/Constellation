@@ -4,7 +4,7 @@
 
   export let edit: boolean;
   export let options: PageType[] | undefined = undefined;
-  export let value: string | string[] | undefined | null;
+  export let value: string | number | string[] | undefined | null;
   export let multiple = false;
   export let disabled = false;
   export let validation = '';

@@ -8,10 +8,15 @@
 	import { getHttpUrl } from "$lib/business/util";
 
 	$: availableHeight = $heightsStore.main - $heightsStore.header - $heightsStore.footer - 20;
-	import WsClient from "$lib/business/wsClient";
+	// Phase 2 of proto-direct redesign: live drive metrics now arrive via
+	// the bridge-emitted VfdStatus proto (envelope tag 200), eliminating
+	// the 5 s `/vfd/fans` HTTP poll. Writes (control/param/meta/inject-fault)
+	// still use the existing REST endpoints — Phase 3 will tackle those.
+	import { vfdStatus, fanSpeedSettings as fanSpeedSettingsStore } from "$lib/business/protoStores";
+	import type { VfdDrive } from "$proto/agristar/vfd.js";
 	import { t } from "svelte-i18n";
 
-	export let data: { fans: { drives?: Drive[] } };
+	// Drives now arrive via the vfdStatus proto store; no SSR loader needed.
 
 	type VFDManufacturer = 'abb-acs310' | 'abb-acs380' | 'phase-tech-dxl' | 'generic';
 
@@ -139,7 +144,6 @@
 	let title = 'VFD Drives';
 	let ready = false;
 	let drives: Drive[] = [];
-	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let pollCount = 0;
 	let lastPollTime = '';
 	let sliderValues: Record<number, number> = {};
@@ -149,8 +153,17 @@
 	let costPerKwh = 0.11;
 	let hoursPerDay = 24;
 	let setAllSpeed = 5000;
-	let fanSpeedSettings: { max: number; min: number; refrig: number; recirc: number; current: number } | null = null;
-	let loadingFanSpeed = false;
+	// Fan speed setpoints (max/min/refrig/recirc + current cooling %) come
+	// from the FanSpeedSettings proto store (envelope tag 2). Reactive so
+	// the buttons update without a manual refresh — the legacy /iot/fanspeed
+	// fetch + Refresh/Load buttons have been retired.
+	$: fanSpeedDisplay = $fanSpeedSettingsStore ? {
+		max:     $fanSpeedSettingsStore.maxSpeed     ?? 0,
+		min:     $fanSpeedSettingsStore.minSpeed     ?? 0,
+		refrig:  $fanSpeedSettingsStore.refrigSpeed  ?? 0,
+		recirc:  $fanSpeedSettingsStore.recircSpeed  ?? 0,
+		current: $fanSpeedSettingsStore.prevSpeed    ?? 0,
+	} : null;
 	let paramsExpanded: Record<number, boolean> = {};
 	let fanControlMode: 'legacy' | 'vfd' = 'legacy';
 
@@ -163,25 +176,59 @@
 		}
 	}
 
+	// VfdDrive (proto) → Drive (page) adapter. The proto wire fields keep
+	// integer ×10 / ×100 scaling so the wire payload is small; this maps
+	// them back to the snapshot units the existing display logic expects.
+	function protoToDrive(d: VfdDrive): Drive {
+		return {
+			unitId: d.address,
+			online: d.connected !== 0,
+			label: d.label,
+			manufacturer: (d.manufacturer || 'generic') as VFDManufacturer,
+			controlWord: d.controlWord,
+			speedRefPercent: d.speedRefPercent,
+			statusWord: d.statusWord,
+			actualSpeedPercent: d.actualSpeedPercent,
+			outputFreqHz: d.outputFreqHzX10,
+			freqRefHz: d.freqRefHzX10,
+			motorSpeedRpm: d.motorSpeedRpm,
+			motorCurrentA: d.motorCurrentAX100,
+			motorTorquePercent: d.motorTorquePctX100,
+			motorPowerkW: d.motorPowerKwX100,
+			dcBusVoltage: d.busVoltage,
+			outputVoltage: d.outputVoltageX10,
+			driveTemp: d.driveTempX10,
+			faultCode: d.faultCode,
+			minFreqHz: d.minFreqHzX10,
+			maxFreqHz: d.maxFreqHzX10,
+			rampUpTime: d.rampUpTimeX10,
+			rampDownTime: d.rampDownTimeX10,
+			ratedCurrentA: d.ratedCurrentAX100,
+			ratedVoltage: d.ratedVoltage,
+			ratedFreqHz: d.ratedFreqHzX10,
+			ratedSpeedRpm: d.ratedSpeedRpm,
+			ratedPowerkW: d.ratedPowerKwX100,
+			running: d.running !== 0,
+			faulted: d.faultActive !== 0,
+			atReference: d.atReference !== 0,
+			direction: d.direction,
+		};
+	}
+
+	// React to every push from /proto/stream. The bridge emits whenever any
+	// drive's state changes (vfdClient.onUpdate hook in protoStream.ts), so
+	// updates land in the UI without polling.
+	$: if ($vfdStatus) {
+		updateDrives($vfdStatus.drives.map(protoToDrive));
+		pollCount++;
+		lastPollTime = new Date().toLocaleTimeString();
+	}
+
 	onMount(() => {
 		$navigationStore.data = getHttpUrl('/vfd/fans');
 		$navigationStore.isDirty = () => false;
-		if (data.fans?.drives) updateDrives(data.fans.drives);
 
-		// Poll VFD server every 5 seconds (standalone service, no WebSocket)
-		pollTimer = setInterval(async () => {
-			try {
-				const res = await fetch(getHttpUrl('/vfd/fans'));
-				const j = await res.json();
-				if (j?.drives) {
-					updateDrives(j.drives);
-					pollCount++;
-					lastPollTime = new Date().toLocaleTimeString();
-				}
-			} catch {}
-		}, 5000);
-
-		// Load fan control mode config
+		// Load fan control mode config (one-shot; not part of live status)
 		fetch(getHttpUrl('/vfd/fans/config'))
 			.then(r => r.json())
 			.then(j => { if (j.mode) fanControlMode = j.mode; })
@@ -190,7 +237,7 @@
 		ready = true;
 	});
 
-	onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
+	onDestroy(() => { /* vfdStatus store auto-unsubscribes on component destroy */ });
 
 	// ── Actions (manufacturer-agnostic) ──
 
@@ -305,22 +352,8 @@
 		} catch (e) { console.error('Set-all params error:', e); }
 	}
 
-	async function fetchFanSpeedSettings() {
-		loadingFanSpeed = true;
-		try {
-			const res = await fetch(getHttpUrl('/iot/fanspeed'));
-			const json = await res.json();
-			const s = json.speed ?? json.data?.speed ?? [];
-			fanSpeedSettings = {
-				max: parseFloat(s[0]) || 0,
-				min: parseFloat(s[1]) || 0,
-				refrig: parseFloat(s[2]) || 0,
-				recirc: parseFloat(s[3]) || 0,
-				current: parseFloat(s[8]) || 0,
-			};
-		} catch (e) { console.error('Fetch fan speed error:', e); }
-		loadingFanSpeed = false;
-	}
+	// Phase 5.1 cleanup: fetchFanSpeedSettings() removed — fanSpeedDisplay is
+	// now reactively derived from the FanSpeedSettings proto store above.
 
 	async function applyFanSpeedToAll(percent: number) {
 		const ref = Math.round(percent * 100); // convert e.g. 25 → 2500
@@ -459,35 +492,31 @@
 					<!-- Fan Speed Page integration -->
 					<div class="fanspeed-section">
 						<h4>Apply from Fan Speed Page</h4>
-						{#if fanSpeedSettings}
+						{#if fanSpeedDisplay}
 							<div class="fanspeed-grid">
-								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedSettings?.current ?? 0)}>
-									<span class="fs-value">{fanSpeedSettings.current}%</span>
+								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedDisplay?.current ?? 0)}>
+									<span class="fs-value">{fanSpeedDisplay.current}%</span>
 									<span class="fs-label">Current Cooling</span>
 								</button>
-								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedSettings?.max ?? 0)}>
-									<span class="fs-value">{fanSpeedSettings.max}%</span>
+								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedDisplay?.max ?? 0)}>
+									<span class="fs-value">{fanSpeedDisplay.max}%</span>
 									<span class="fs-label">Cooling Max</span>
 								</button>
-								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedSettings?.min ?? 0)}>
-									<span class="fs-value">{fanSpeedSettings.min}%</span>
+								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedDisplay?.min ?? 0)}>
+									<span class="fs-value">{fanSpeedDisplay.min}%</span>
 									<span class="fs-label">Cooling Min</span>
 								</button>
-								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedSettings?.refrig ?? 0)}>
-									<span class="fs-value">{fanSpeedSettings.refrig}%</span>
+								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedDisplay?.refrig ?? 0)}>
+									<span class="fs-value">{fanSpeedDisplay.refrig}%</span>
 									<span class="fs-label">Refrigeration</span>
 								</button>
-								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedSettings?.recirc ?? 0)}>
-									<span class="fs-value">{fanSpeedSettings.recirc}%</span>
+								<button class="fanspeed-btn" on:click={() => applyFanSpeedToAll(fanSpeedDisplay?.recirc ?? 0)}>
+									<span class="fs-value">{fanSpeedDisplay.recirc}%</span>
 									<span class="fs-label">Recirculation</span>
 								</button>
 							</div>
-							<button class="btn btn-refresh" on:click={fetchFanSpeedSettings}>↻ Refresh</button>
 						{:else}
-							<button class="btn btn-load" on:click={fetchFanSpeedSettings}
-								disabled={loadingFanSpeed}>
-								{loadingFanSpeed ? 'Loading...' : '📥 Load Fan Speed Settings'}
-							</button>
+							<p class="text-sm opacity-70">Waiting for fan speed settings…</p>
 						{/if}
 					</div>
 					<div class="set-all-params">

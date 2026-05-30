@@ -16,8 +16,16 @@
   import { t } from "svelte-i18n";
 	import { getHomePage } from "$lib/business/paging";
 	import type { ArrayResponse } from "$lib/business/util";
+	import { basicSetup, basicComposite } from "$lib/business/protoStores";
+	import { writeProto } from "$lib/business/protoWrite";
+	import { TAG } from "$lib/business/protoTags";
 	
-  export let data: ArrayResponse;
+  // Phase 5.1 proto-direct hydration: `data` is sourced from
+  // `basicComposite` (BasicSetup proto tag 11) instead of /iot/basic.
+  // The legacy `ArrayResponse` shape (`{ array: string[] }`) is
+  // preserved so the existing positional indexing + AES decrypt logic
+  // for `array[8]` (loginPw) continues to work unchanged.
+  let data: ArrayResponse = { array: new Array(11).fill('0') };
 
   let title = $t('level2.basic.basic-setup');
   let edit = true;
@@ -158,7 +166,7 @@
         console.error('DH secret not available after retries');
       }
       
-      $navigationStore.data = getHttpUrl(`/iot/basic`);
+      $navigationStore.data = '';
       $navigationStore.isDirty = () => {
         const decrypted = decryptData(data.array);
         return !isEqual(basic, decrypted);
@@ -185,6 +193,28 @@
       passwordReady = true;
 		}
 		ready = true;
+  });
+
+  onMount(() => {
+    // Subscribe to the BasicSetup proto store; each fresh frame replaces
+    // `data.array` (unless the user has unsaved edits), which retriggers
+    // the reactive decrypt block above to re-render the password field.
+    const unsub = basicComposite.subscribe((view) => {
+      if (!view) return;
+      if (!$navigationStore.isDirty?.()) {
+        data = view;
+      }
+    });
+    return () => unsub();
+  });
+
+  onMount(() => {
+    const unsub = basicSetup.subscribe(() => {
+      if (!$navigationStore.isDirty?.()) {
+        $navigationStore = { ...$navigationStore, invalidate: true };
+      }
+    });
+    return () => unsub();
   });
 </script>
 
@@ -239,6 +269,39 @@
         </Column>
       </Row>
     </Table>
-    <SaveButton {edit} bind:wait={wait} data={encryptedData} bind:original={data.array} route="basic" bind:validation={validation} on:complete={update}/>
+    <SaveButton {edit} bind:wait={wait} data={encryptedData} bind:original={data.array} route="basic" bind:validation={validation} on:complete={update}
+      onSave={async (d: string[]) => {
+        // Field map matches firmware apply_basic_setup
+        // (Nova_Firmware/lp_am2434/lp_settings.c::LpSettings_ApplyBasicSetup)
+        // and read-side decodeBasicSetup (novaDataStore.ts).
+        // UI array indexes: [0]=storageName, [1]=tempType, [3]=homePage,
+        // [4]=systemMode, [7]=multiView, [8]=dlr0 (encrypted pw),
+        // [9]=loginSecure, [10]=animations.
+        //
+        // Force-varint every numeric field. proto3 zero-suppression
+        // would silently drop tempType=Fahrenheit (0), systemMode=Potato
+        // (0), multiView=OFF (0), localLogin=disabled (0), and
+        // animations=OFF (0). The firmware decoder patches in place,
+        // so any omitted field stays at the previous value, making
+        // any "switch back to default" save fail invisibly.
+        const tempType   = parseInt(d[1] ?? '0', 10) || 0;
+        const systemMode = parseInt(d[4] ?? '0', 10) || 0;
+        const multiView  = parseInt(d[7] ?? '0', 10) || 0;
+        const localLogin = parseInt(d[9] ?? '0', 10) || 0;
+        const animations = parseInt(d[10] ?? '0', 10) || 0;
+        // Zero-meaningful fields registered in forceFieldRegistry.ts
+        // (tempType/systemMode/multiView/localLogin/animations); writeProto
+        // force-emits them automatically.
+        await writeProto(TAG.BasicSetup, {
+          storageName: d[0] ?? '',
+          homePage:    d[3] ?? '',
+          loginPw:     d[8] ?? '',
+          tempType,
+          systemMode,
+          multiView,
+          localLogin,
+          animations,
+        });
+      }}/>
   </Card>
 </GellertPage>

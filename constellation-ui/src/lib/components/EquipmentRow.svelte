@@ -17,6 +17,16 @@
   export let panelSwitchColor = 'bg-gray-200';
   export let edit: boolean = false;
   export let wait: boolean = false;
+  /** When false, the dropdown shows AUTO / OFF only (no MANUAL).
+   * Used by 2-way switches like Cure where MANUAL is meaningless
+   * (cure-mode itself changes the device UI). */
+  export let allowManual: boolean = true;
+  /** Per-row labels for the OFF and MANUAL options. Equipment with
+   * physical position semantics (doors) overrides these to
+   * "Close" / "Open" — same wire values (1 / 2), more intuitive
+   * to the operator. */
+  export let offLabel: string = '';
+  export let manualLabel: string = '';
 
   // Derive 3-way mode from remoteStatus:
   // '0' = auto (ARM controls), '1' = off (forced off), '2' = manual (forced on)
@@ -60,8 +70,10 @@
           on:change={onModeChange}
         >
           <option value="auto">{$t('global.auto')}</option>
-          <option value="off">{$t('global.off')}</option>
-          <option value="manual">{$t('global.manual')}</option>
+          <option value="off">{offLabel || $t('global.off')}</option>
+          {#if allowManual}
+            <option value="manual">{manualLabel || $t('global.manual')}</option>
+          {/if}
         </select>
       {:else}
         <span class="{panelSwitchColor}">{panelSwitchStatus}</span>

@@ -1,52 +1,86 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+  import { onMount } from "svelte";
   import GellertPage from "$lib/components/GellertPage.svelte";
-	import Card from "$lib/ui/Card.svelte";
-	import Table from "$lib/ui/Table.svelte";
-	import Row from "$lib/ui/Row.svelte";
+  import Card from "$lib/ui/Card.svelte";
+  import Table from "$lib/ui/Table.svelte";
+  import Row from "$lib/ui/Row.svelte";
   import Column from "$lib/ui/Column.svelte";
-	import Select from "$lib/ui/Select.svelte";
-	import TextField from "$lib/ui/TextField.svelte";
-	import { navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
-	import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
-	import { AdornmentType } from "$lib/business/adornmentType";
-	import SaveButton from "$lib/components/SaveButton.svelte";
-  import { cloneDeep, isEqual } from "lodash-es";
+  import Select from "$lib/ui/Select.svelte";
+  import TextField from "$lib/ui/TextField.svelte";
+  import { navigationStore } from "$lib/store";
+  import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
+  import { AdornmentType } from "$lib/business/adornmentType";
+  import SaveButton from "$lib/components/SaveButton.svelte";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
+  import { miscSettings, sensorList as sensorListStore } from "$lib/business/protoStores";
+  import { useDraft, numField } from "$lib/business/useDraft";
+  import { SensorTypes, type SensorInfo } from "$lib/business/analog";
+  import { TAG } from "$lib/business/protoTags";
 
-  export let data: { miscData: string[], outputConfig: string[], pwmConfig: string[] };
+  // ─── Proto-direct state ──────────────────────────────────────────────
+  // Reference implementation for the proto-direct migration pattern
+  // (see /memories/agristar-principles.md and useDraft.ts). Replaces
+  // the legacy `miscData: string[14]` positional-index page state — see
+  // the git history of this file for the bug-prone shape it replaced
+  // (slot [4] vs [5] cavityMode mirror, off-by-one cascades, etc.).
+  const misc = useDraft(miscSettings, TAG.MiscSettings);
+  const { draft, hydrated, live } = misc;
 
+  // String mirrors for TextField (string-typed). numField() handles the
+  // two-way string↔number bridge so the typed draft stays the source of
+  // truth without per-page parseInt/String() boilerplate.
+  const defrostIntervalStr = numField(draft, 'defrostInterval', 'int');
+  const defrostDurationStr = numField(draft, 'defrostDuration', 'int');
+  const heatTempThreshStr  = numField(draft, 'heatTempThresh',  'float');
+  const cavityDiffStr      = numField(draft, 'cavityDiff',      'float');
+  const cavityDutyStr      = numField(draft, 'cavityDutyOrSensor', 'int');
+  const enthalpyOffPctStr  = numField(draft, 'enthalpyOffPct',  'int');
+
+  // ─── Derived UI state ────────────────────────────────────────────────
   $: title = $t('level1.miscellaneous.miscellaneous-program-parameters');
+  $: ready = false;
+  $: wait = false;
+  $: level = $navigationStore.level;
+  $: edit = $navigationStore.level > 0;
+  $: useEnthalpy = $draft.refrigMode === 2;
+  $: textSize = edit ? 'text-size-large' : 'text-size-xl';
+  $: compSize = edit ? 'lg' : 'xl';
 
+  $: isOff = $draft.cavityMode === 1;
+  $: isManual = $draft.cavityMode === 2;
+  $: isAuto = $draft.cavityMode === 3;
+
+  // ─── Option lists (typed numeric values matching proto fields) ───────
   $: refrigModeOptions = [
-    { text: $t('level1.miscellaneous.economizer'), value: '0' },
-    { text: $t('level1.miscellaneous.refrigeration-only'), value: '1' },
-    { text: $t('level1.miscellaneous.enthalpy-cooling'), value: '2' },
+    { text: $t('level1.miscellaneous.economizer'), value: 0 },
+    { text: $t('level1.miscellaneous.refrigeration-only'), value: 1 },
+    { text: $t('level1.miscellaneous.enthalpy-cooling'), value: 2 },
   ];
-  $: controlTargetOptions = [
-    { text: $t('level1.miscellaneous.cavity-heater-control'), value: '0' },
-    { text: $t('level1.miscellaneous.pile-fan-control'), value: '1' },
+  $: cavityTargetOptions = [
+    { text: $t('level1.miscellaneous.cavity-heater-control'), value: 0 },
+    { text: $t('level1.miscellaneous.pile-fan-control'), value: 1 },
   ];
-
-  $: controlOptions = [
-  // Backend expects 1=Off, 2=Manual, 3=Automatic
-  { text: $t('global.off'), value: '1' },
-  { text: $t('global.manual'), value: '2' },
-  { text: $t('global.automatic'), value: '3' },
+  $: cavityModeOptions = [
+    // Backend expects 1=Off, 2=Manual, 3=Automatic
+    { text: $t('global.off'), value: 1 },
+    { text: $t('global.manual'), value: 2 },
+    { text: $t('global.automatic'), value: 3 },
   ];
-
   $: keypadOptions = [
-    { text: $t('level1.miscellaneous.standard'), value: '0' },
-    { text: $t('level1.miscellaneous.alphabetic'), value: '1' },
+    { text: $t('level1.miscellaneous.standard'), value: 0 },
+    { text: $t('level1.miscellaneous.alphabetic'), value: 1 },
   ];
-
   $: standbyOptions = [
-    { text: $t('global.off'), value: '0' },
-    { text: $t('global.on'), value: '1' },
+    { text: $t('global.off'), value: 0 },
+    { text: $t('global.on'), value: 1 },
   ];
 
-  // Removed locale options: handled in Preferences page
+  // Pile-temperature sensor list for cavity Auto mode.
+  type Option = { text: string; value: number };
+  $: sensorOptions = (($sensorListStore as SensorInfo[]) ?? [])
+    .filter((s) => s.type === SensorTypes.SENSOR_PILE_TEMP && !(s as any).disabled)
+    .map((s): Option => ({ text: s.label, value: Number(s.id) }));
 
   let validation = {
     'defrostInterval': '',
@@ -56,207 +90,124 @@
     'cavityDutyCycle': '',
     'refrigThresh': '',
     'enthTarget': '',
+  };
+
+  // ─── Cavity-mode change: apply per-mode defaults ─────────────────────
+  let prevCavityMode: number | null = null;
+  $: if ($hydrated && $draft.cavityMode !== prevCavityMode) {
+    if (prevCavityMode !== null) onCavityModeChange($draft.cavityMode, prevCavityMode);
+    prevCavityMode = $draft.cavityMode;
   }
-
-  $: miscData = [] as string[];
-  $: outputConfig = data?.outputConfig ?? [];
-  $: pwmConfig = data?.pwmConfig ?? [];
-  $: ready = false;
-  $: wait = false;
-  $: level = $navigationStore.level;
-  $: edit = $navigationStore.level > 0;
-  $: useEnthalpy = miscData?.[0] === '2';
-  $: textSize = edit ? 'text-size-large' : 'text-size-xl';
-  $: compSize = edit ? 'lg' : 'xl';
-  let showImageManager = false;
-
-  // Dynamic Cavity Control UI state
-  // Indices per backend mapping:
-  // 4: selCtrlMode (target), 5: selCavityCtrl, 6: cavityDiff, 7: cavityDutyCycle or SensorId
-  $: selCavityCtrl = miscData?.[5] ?? '1';
-  $: isOff = selCavityCtrl === '1';
-  $: isManual = selCavityCtrl === '2';
-  $: isAuto = selCavityCtrl === '3';
-  let prevSelCavityCtrl: string | null = null;
-
-  type Option = { text: string; value: string };
-  let sensorOptions: Option[] = [];
-
-  function ensureDefaultsForMode(): void {
-    // Called when mode changes to set sensible defaults
-    // Guard against missing or invalid miscData
-    if (!miscData || !Array.isArray(miscData)) {
-      return;
+  function onCavityModeChange(next: number, prev: number) {
+    if (next === 2 && prev !== 2) {
+      // Switching to Manual → default duty cycle to 50.
+      cavityDutyStr.set('50');
     }
-    
-    if (isManual) {
-      // Default duty cycle to 50 if empty
-      if (!miscData?.[7] || isNaN(Number(miscData[7]))) {
-        miscData[7] = '50';
-      }
-    } else if (isAuto) {
-      // Default sensor to first available
-      const current = miscData?.[7];
-      const hasCurrent = !!current && sensorOptions.some((o) => o.value === current);
-      if (!hasCurrent && sensorOptions.length > 0) {
-        miscData[7] = sensorOptions[0].value;
+    if (next === 3) {
+      // Switching to Automatic → ensure a valid pile sensor is selected.
+      const cur = $draft.cavityDutyOrSensor;
+      const valid = sensorOptions.some((o) => o.value === cur);
+      if (!valid && sensorOptions.length > 0) {
+        cavityDutyStr.set(String(sensorOptions[0].value));
       }
     }
   }
 
-  // Removed changeLocale: handled in Preferences page
-    onMount(async () => {
-      try {
-        $navigationStore.data = getHttpUrl('/iot/misc');
-        $navigationStore.isDirty = () => !isEqual(miscData, data.miscData);
-        miscData = cloneDeep(data.miscData ?? []);
-        // Load pile temperature sensor labels for Automatic mode sensor selection
-        try {
-          const r = await fetch(getHttpUrl('/iot/ramp'), {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include'
-          });
-          
-          if (!r.ok) {
-            console.warn(`Failed to fetch ramp data: ${r.status} ${r.statusText}`);
-            // Continue without sensor options - automatic mode will be disabled
-            sensorOptions = [];
-          } else {
-            const j = await r.json();
-            const pile = (j?.pile ?? []) as string[];
-            const opts: Option[] = [];
-            for (let i = 0; i + 1 < pile.length; i += 2) {
-              const text = pile[i];
-              const value = pile[i + 1];
-              if (typeof text === 'string' && typeof value === 'string') {
-                opts.push({ text, value });
-              }
-            }
-            sensorOptions = opts;
-            // After loading sensors, ensure defaults are valid for current mode
-            ensureDefaultsForMode();
-          }
-        } catch (e) {
-          console.warn('Failed to load sensor labels for Automatic mode (network error)', e);
-          // Set empty sensor options to gracefully handle offline state
-          sensorOptions = [];
-        }
-      } catch (error) {
-        console.error('Error initializing miscellaneous page:', error);
-        // Ensure miscData is at least an empty array to prevent render crashes
-        if (!miscData || !Array.isArray(miscData)) {
-          miscData = [];
-        }
-      }
-      ready = true;
-    });
-
-  // Handle change from user to avoid reactive cycles
-  function handleSelCavityCtrlChange(event: Event) {
-    const newVal = (event.target as HTMLSelectElement).value;
-    const prev = prevSelCavityCtrl ?? miscData[5];
-    miscData[5] = newVal;
-    // When switching back to Manual, reset duty cycle to 50
-    if (newVal === '2' && prev !== '2') {
-      miscData[7] = '50';
-    }
-    // When switching to Automatic, ensure a valid sensor is selected
-    if (newVal === '3') {
-      const hasCurrent = !!miscData?.[7] && sensorOptions.some((o) => o.value === miscData[7]);
-      if (!hasCurrent && sensorOptions.length > 0) {
-        miscData[7] = sensorOptions[0].value;
-      }
-      prevSelCavityCtrl = newVal;
-    }
-    miscData = miscData;
+  // ─── Save (proto-direct, typed) ──────────────────────────────────────
+  // Zero-meaningful fields (mode=econ, intervals=disabled, kbPref=standard
+  // …) are registered in forceFieldRegistry.ts, so writeProto force-emits
+  // them automatically. See firmware apply_misc() in nova_dataexc.c for
+  // the wire field numbers.
+  async function save(): Promise<void> {
+    await misc.save();
   }
+
+  onMount(() => {
+    $navigationStore.isDirty = () => !isEqual($draft, $live);
+    ready = true;
+  });
 </script>
 
 <GellertPage {wait} {ready} {title} {level} name="miscellaneous">
   <Card class="mx-auto mt-2 flex flex-col container-wide">
-    {#if miscData && Array.isArray(miscData) && miscData.length > 12}
-      {#if outputConfig?.[13] !== '-1' || pwmConfig?.[1]?.split(':')[2] !== '-1'}
-        <Table class="mb-2">
-          <Row>
-            <Column class="m-2 {textSize}">
-              { $t('global.refrigeration-mode') }: <Select class="ml-2 w-128" size={compSize} bind:value={miscData[0]} options={refrigModeOptions} {edit}/>
-            </Column>
-          </Row>
-          {#if useEnthalpy}
-            <Row>
-              <Column class="m-2 {textSize}">
-                { $t('level1.miscellaneous.enthalpy-cooling-will-turn-off-if-refrigeration-is') }
-                <TextField class="w-36" size={compSize} bind:value={miscData[12]} {edit} label="Enthalpy On" keyboardType={KeyboardTypes.Numeric} adornmentType={AdornmentType.Percent} validation={validation.enthTarget}/>
-                { $t('level1.miscellaneous.or-greater') }
-              </Column>
-            </Row>
-          {/if}
-          <Row>
-            <Column class="m-2 {textSize}">
-              { $t('level1.miscellaneous.refrigeration-will-air-defrost-every') }
-              <TextField class="w-36" size={compSize} bind:value={miscData[1]} {edit} label="Defrost Start" keyboardType={KeyboardTypes.Numeric} validation={validation.defrostInterval}/>
-              { $t('level1.miscellaneous.hours-for') }
-              <TextField class="w-36" size={compSize} bind:value={miscData[2]} {edit} label="Defrost Duration" keyboardType={KeyboardTypes.Numeric} validation={validation.defrostTime}/>
-              { $t('global.minutes') }.
-            </Column>
-          </Row>
-        </Table>
-      {/if}
-      {#if outputConfig?.[4] !== '-1'}
-        <Table class="mb-2">
-          <Row>
-            <Column class="px-2 {textSize}">
-              { $t('level1.miscellaneous.heater-will-turn-on-if-plenum-temperature-is') }
-              <TextField class="w-36" size={compSize} bind:value={miscData[3]} {edit} label="Heater On Temperature" keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.tempThresh}/>
-              { $t('level1.miscellaneous.below-plenum-setpoint') }
-            </Column>
-          </Row>
-        </Table>
-      {/if}
-      {#if outputConfig?.[5] !== '-1'}
-        <Table class="mb-2">
-          <Row>
-            <Column class={textSize}>
-              <!-- selCtrlMode (target) -->
-              <Select class="ml-2 w-144" size={compSize} bind:value={miscData[10]} options={controlTargetOptions} {edit}/>
-              <!-- selCavityCtrl (1=Off, 2=Manual, 3=Automatic) -->
-              <Select class="ml-2 w-128" size={compSize} bind:value={miscData[4]} options={controlOptions} {edit} on:change={handleSelCavityCtrlChange}/>
-            </Column>
-          </Row>
-          <Row>
-            <Column class={textSize}>
-              { $t('level1.miscellaneous.temperature-differential') }: <TextField class="w-36" size={compSize} bind:value={miscData[6]} {edit} label="Temperature Differential" keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.cavityDiff} disabled={isOff}/>
-            </Column>
-          </Row>
-          {#if isManual}
-            <Row>
-              <Column class={textSize}>
-                { $t('global.duty-cycle') }: <TextField class="w-36" size={compSize} bind:value={miscData[7]} {edit} label="Duty Cycle" keyboardType={KeyboardTypes.Numeric} adornmentType={AdornmentType.Percent} validation={validation.cavityDutyCycle} disabled={isOff}/>
-              </Column>
-            </Row>
-          {:else if isAuto}
-            <Row>
-              <Column class={textSize}>
-                { $t('global.automatic') }: <Select class="ml-2 w-128" size={compSize} bind:value={miscData[7]} options={sensorOptions} {edit} disabled={isOff}/>
-              </Column>
-            </Row>
-          {/if}
-          <Row>
-            <Column class={textSize}>
-              { $t('level1.miscellaneous.run-in-standby') }: <Select class="ml-2 w-96" size={compSize} bind:value={miscData[13]} options={standbyOptions} {edit}/>
-            </Column>
-          </Row>
-        </Table>
-      {/if}
+    {#if $hydrated}
       <Table class="mb-2">
         <Row>
-          <Column class={textSize}>
-            { $t('level1.miscellaneous.system-keypad-preference') }: <Select class="ml-2 w-96" size={compSize} bind:value={miscData[8]} options={keypadOptions} {edit}/>
+          <Column class="m-2 {textSize}">
+            { $t('global.refrigeration-mode') }: <Select class="ml-2 w-128" size={compSize} bind:value={$draft.refrigMode} options={refrigModeOptions} {edit}/>
+          </Column>
+        </Row>
+        {#if useEnthalpy}
+          <Row>
+            <Column class="m-2 {textSize}">
+              { $t('level1.miscellaneous.enthalpy-cooling-will-turn-off-if-refrigeration-is') }
+              <TextField class="w-36" size={compSize} bind:value={$enthalpyOffPctStr} {edit} label="Enthalpy On" keyboardType={KeyboardTypes.Numeric} adornmentType={AdornmentType.Percent} validation={validation.enthTarget}/>
+              { $t('level1.miscellaneous.or-greater') }
+            </Column>
+          </Row>
+        {/if}
+        <Row>
+          <Column class="m-2 {textSize}">
+            { $t('level1.miscellaneous.refrigeration-will-air-defrost-every') }
+            <TextField class="w-36" size={compSize} bind:value={$defrostIntervalStr} {edit} label="Defrost Start" keyboardType={KeyboardTypes.Numeric} validation={validation.defrostInterval}/>
+            { $t('level1.miscellaneous.hours-for') }
+            <TextField class="w-36" size={compSize} bind:value={$defrostDurationStr} {edit} label="Defrost Duration" keyboardType={KeyboardTypes.Numeric} validation={validation.defrostTime}/>
+            { $t('global.minutes') }.
           </Column>
         </Row>
       </Table>
-      <SaveButton {edit} bind:wait={wait} data={miscData} bind:original={data.miscData} route="misc" bind:validation={validation} autoSave />
+
+      <Table class="mb-2">
+        <Row>
+          <Column class="px-2 {textSize}">
+            { $t('level1.miscellaneous.heater-will-turn-on-if-plenum-temperature-is') }
+            <TextField class="w-36" size={compSize} bind:value={$heatTempThreshStr} {edit} label="Heater On Temperature" keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.tempThresh}/>
+            { $t('level1.miscellaneous.below-plenum-setpoint') }
+          </Column>
+        </Row>
+      </Table>
+
+      <Table class="mb-2">
+        <Row>
+          <Column class={textSize}>
+            <Select class="ml-2 w-144" size={compSize} bind:value={$draft.cavityTarget} options={cavityTargetOptions} {edit}/>
+            <Select class="ml-2 w-128" size={compSize} bind:value={$draft.cavityMode} options={cavityModeOptions} {edit}/>
+          </Column>
+        </Row>
+        <Row>
+          <Column class={textSize}>
+            { $t('level1.miscellaneous.temperature-differential') }: <TextField class="w-36" size={compSize} bind:value={$cavityDiffStr} {edit} label="Temperature Differential" keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.Temperature} validation={validation.cavityDiff} disabled={isOff}/>
+          </Column>
+        </Row>
+        {#if isManual}
+          <Row>
+            <Column class={textSize}>
+              { $t('global.duty-cycle') }: <TextField class="w-36" size={compSize} bind:value={$cavityDutyStr} {edit} label="Duty Cycle" keyboardType={KeyboardTypes.Numeric} adornmentType={AdornmentType.Percent} validation={validation.cavityDutyCycle} disabled={isOff}/>
+            </Column>
+          </Row>
+        {:else if isAuto}
+          <Row>
+            <Column class={textSize}>
+              { $t('global.automatic') }: <Select class="ml-2 w-128" size={compSize} bind:value={$draft.cavityDutyOrSensor} options={sensorOptions} {edit} disabled={isOff}/>
+            </Column>
+          </Row>
+        {/if}
+        <Row>
+          <Column class={textSize}>
+            { $t('level1.miscellaneous.run-in-standby') }: <Select class="ml-2 w-96" size={compSize} bind:value={$draft.cavityStandbyOn} options={standbyOptions} {edit}/>
+          </Column>
+        </Row>
+      </Table>
+
+      <Table class="mb-2">
+        <Row>
+          <Column class={textSize}>
+            { $t('level1.miscellaneous.system-keypad-preference') }: <Select class="ml-2 w-96" size={compSize} bind:value={$draft.kbPref} options={keypadOptions} {edit}/>
+          </Column>
+        </Row>
+      </Table>
+
+      <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} bind:validation={validation} autoSave onSave={save} />
     {/if}
   </Card>
 </GellertPage>

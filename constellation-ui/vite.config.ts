@@ -1,7 +1,12 @@
+/// <reference types="vitest" />
 import { purgeCss } from 'vite-plugin-tailwind-purgecss';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
-
+import { defineConfig, type UserConfig } from 'vite';
+// NOTE: defineConfig is imported from 'vite' (not 'vitest/config') because
+// vitest 2.x bundles a nested vite 5 copy whose Plugin<any> type is
+// nominally distinct from our root vite 6 — using vitest/config triggers
+// a sveltekit() plugin overload mismatch. The `test` block is still
+// honored by vitest at runtime; we widen UserConfig to include it.
 export default defineConfig({
 	plugins: [sveltekit(), purgeCss()],
 	// JSON named exports cause a conflict because our locale file has a top-level key named "global".
@@ -33,6 +38,18 @@ export default defineConfig({
 				target: 'ws://localhost:9001',
 				ws: true,
 			},
+			// Phase 0.3+ proto-direct binary stream (see docs/proto-direct-redesign-plan.md)
+			'/proto/stream': {
+				target: 'ws://localhost:9001',
+				ws: true,
+			},
+			// Phase 0.4+ proto-direct typed write path (`POST /proto/write/<field>`).
+			// Must be registered AFTER `/proto/stream` so the WS entry matches first.
+			// Without this, UI POSTs return 404 from Vite and saves silently fail.
+			'/proto': {
+				target: 'http://localhost:9001',
+				changeOrigin: true,
+			},
 			'/iot': {
 				target: 'http://localhost:9001',
 				changeOrigin: true,
@@ -51,4 +68,4 @@ export default defineConfig({
 	optimizeDeps: {
 		include: ['svelte-i18n']
 	}
-});
+} as UserConfig & { test?: { include?: string[] } });

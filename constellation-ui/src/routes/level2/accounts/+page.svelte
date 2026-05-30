@@ -16,10 +16,15 @@
   import { checkKeys, safeJsonParse, type ArrayResponse } from "$lib/business/util";
   import { t } from "svelte-i18n";
   import ScrollableArea from "$lib/components/ScrollableArea.svelte";
+  import { accountSettings } from "$lib/business/protoStores";
+  import { writeProtoRaw, buildForceVarintBytes, wrapAsLengthDelim } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
-  // data.array = UserAccounts from ARM (usernames, slots 0-9)
-  // data.meta  = { factory, slots[], cloudLinks[], currentSession } from /iot/accounts-meta
-  export let data: ArrayResponse & { meta?: any };
+  // data.meta  = { factory, slots[], cloudLinks[], currentSession } from
+  // /iot/accounts-meta. Username list (formerly data.array) now derives
+  // from $accountSettings.users (proto envelope tag 34). Bridge GET
+  // /iot/accounts is no longer consumed.
+  export let data: { meta?: any };
 
   let title = `${$t('level2.accounts.set-level')} 1 ${$t('level2.accounts.user-accounts')}`;
   let edit = true;
@@ -29,7 +34,9 @@
   $: ready = false;
   $: wait = false;
   $: users = [] as string[];
-  $: $keysStore.hasLevel1Password = (data.array.length < 12 || data.array[11] === '0') ? false : true;
+  // hasLevel1Password is a property of the proto store (passwordDefined)
+  // not of the username array; derive directly when accountSettings arrives.
+  $: $keysStore.hasLevel1Password = !!$accountSettings?.passwordDefined;
   $: passwords = Array(10).fill('');
 
   // ── Role / metadata state (pass 1: local only) ──
@@ -258,10 +265,38 @@
 
   $: encryptedData = getEncryptedData(users, passwords, $keysStore.secret);
 
+  /**
+   * Phase 5.1 proto-direct save (settings field 34 / TAG.AccountSettings).
+   *
+   * Firmware apply_accounts (nova_dataexc.c):
+   *   field 1 = repeated UserAccount { 1=slot, 2=id, 3=password }
+   *   field 2 = login_pw string
+   *
+   * Constraint: this bridge does NOT have the DH shared secret, so the
+   * AES-encrypted blobs (`users`, `passwords` produced by getEncryptedData)
+   * are forwarded opaquely. Firmware will store them truncated to
+   * PASSWORD_LEN — same legacy behaviour, just via the typed proto path.
+   * Real per-slot id/pw extraction needs the DH secret; tracked as a
+   * separate workstream (firmware-side decryption).
+   */
+  async function saveAccounts(d: { users: string, passwords: string }): Promise<void> {
+    const usersBytes = new TextEncoder().encode(d?.users ?? '');
+    const pwBytes    = new TextEncoder().encode(d?.passwords ?? '');
+    // Single UserAccount entry at slot 0 carrying both encrypted blobs.
+    // Slot 0 is force-encoded (proto3 would suppress 0).
+    const slot = buildForceVarintBytes({ 1: 0 });
+    const id   = wrapAsLengthDelim(2, usersBytes);
+    const pw   = wrapAsLengthDelim(3, pwBytes);
+    const userInner = new Uint8Array(slot.length + id.length + pw.length);
+    userInner.set(slot, 0);
+    userInner.set(id, slot.length);
+    userInner.set(pw, slot.length + id.length);
+    const userTLV = wrapAsLengthDelim(1, userInner);
+    await writeProtoRaw(TAG.AccountSettings, userTLV);
+  }
+
   onMount(async () => {
     try {
-      $navigationStore.data = getHttpUrl('/iot/accounts');
-      users = Object.values(data.array).slice(0, 10);
       applyMeta(data.meta);
       // Kick off audit fetch in parallel — failure is non-fatal.
       refreshAudit();
@@ -269,6 +304,26 @@
     } finally {
       ready = true;
     }
+  });
+
+  onMount(() => {
+    // Live username hydration from the AccountSettings proto store. Slots
+    // 0..9 are sparse — fill empty strings for missing slots so the
+    // template's positional rendering stays stable.
+    const unsub = accountSettings.subscribe((acct) => {
+      if (!acct) return;
+      const slots: string[] = Array(10).fill('');
+      for (const u of acct.users ?? []) {
+        if (typeof u?.slot === 'number' && u.slot >= 0 && u.slot < 10) {
+          slots[u.slot] = u.userId ?? '';
+        }
+      }
+      users = slots;
+      if (!$navigationStore.isDirty?.()) {
+        $navigationStore = { ...$navigationStore, invalidate: true };
+      }
+    });
+    return () => unsub();
   });
 
 </script>
@@ -495,7 +550,7 @@
         {/if}
       </div>
 
-      <SaveButton slot="footer-center" edit={showPasswords} bind:wait={wait} data={encryptedData} original={[]} route="accounts" on:complete={update}/>
+      <SaveButton slot="footer-center" edit={showPasswords} bind:wait={wait} data={encryptedData} original={[]} on:complete={update} onSave={saveAccounts}/>
       <Button slot="footer-right" size="xl" class="w-24 md:w-64 xl:w-5/6 {error ? '!variant-ghost-error' : ''}" on:click={getPasswords}>{error ? $t('global.retry') : $t('global.show-passwords')}</Button>
     </ScrollableArea>
   </Card>

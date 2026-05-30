@@ -14,7 +14,7 @@
         return true;
     }
     let isDisabledDueToKeyboard = false;
-    let keyboardHideTimeout: NodeJS.Timeout;
+    let keyboardHideTimeout: ReturnType<typeof setTimeout>;
 
   // Watch for keyboard visibility changes
 

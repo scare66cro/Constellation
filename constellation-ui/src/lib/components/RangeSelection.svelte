@@ -12,6 +12,11 @@
   let maxDate = addDays(new Date(), 1);
   let minDate: Date | undefined = undefined;
 
+  // `downloadFromBackup` selected the SD-card backup partition's start
+  // date on AS2; on Constellation there's no backup partition (logs
+  // live in pg on the rpi5 SSD), so the flag now just collapses to the
+  // database start date. The prop is kept so the existing call sites
+  // don't have to change.
   let records = {
     database: {
       activityCount: 0,
@@ -19,7 +24,6 @@
       percentUsed: 0,
       startDate: '',
     },
-    sdcard: [] as string[],
   };
 
   function parseDate(value: string | Date | undefined): Date | undefined {
@@ -40,18 +44,12 @@
     return result;
   }
 
-  // Recalculate minDate when downloadFromBackup changes or records are loaded
+  // Recalculate minDate when records are loaded.
   $: {
-    if (records.database?.startDate || records.sdcard?.length) {
+    if (records.database?.startDate) {
       const dbStartDate = parseDate(records.database?.startDate);
-      const sdCardDate = parseDate(records.sdcard?.[2]);
+      minDate = startOfDay(dbStartDate ?? new Date());
 
-      // Use SD card date when downloading from backup, otherwise use database startDate
-      const preferredMin = downloadFromBackup 
-        ? (sdCardDate ?? dbStartDate ?? new Date())
-        : (dbStartDate ?? new Date());
-      minDate = startOfDay(preferredMin);
-      
       // Clamp store dates to valid range
       $historyStore.startDate = clampDate($historyStore.startDate, minDate, maxDate);
       $historyStore.endDate = clampDate($historyStore.endDate, minDate, maxDate);

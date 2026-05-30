@@ -8,7 +8,7 @@
 	import Card from "$lib/ui/Card.svelte";
   import { buildSensorList } from "$lib/business/charting";
   import { fetchDisplayOptions } from "$lib/business/displayUtils";
-  import { plotDataStore, datesStore, dataSelectionStore, keysStore, historyStore } from "$lib/store";
+  import { plotDataStore, datesStore, dataSelectionStore, keysStore, historyStore, frontMatterStore } from "$lib/store";
   import { format } from "date-fns";
   import { heightsStore } from "$lib/store";
   import Chart, { ChartData, createChartData, createSeries } from "$lib/components/Chart.svelte";
@@ -18,6 +18,8 @@
   import DownloadFile from "$lib/components/DownloadFile.svelte";
   import { goto } from "$app/navigation";
   import { getHttpUrl } from "$lib/business/util";
+  import { plenumSettings, sensorList } from "$lib/business/protoStores";
+  import { get } from "svelte/store";
 	import VirtualList from "$lib/components/Virtual/VirtualList.svelte";
 	import { safeJsonParse } from "$lib/business/util";
   import WsClient, { type DownloadProgress } from '$lib/business/wsClient';
@@ -183,6 +185,20 @@
         const resp = await fetch(url);
         if (resp.status !== 200) {
           error = true;
+        } else {
+          // Save the CSV body to the user's browser downloads folder.
+          // Bridge sets Content-Disposition: attachment; filename="…",
+          // but `fetch()` won't honor that — we have to materialise the
+          // blob and click a temporary anchor ourselves.
+          const blob = await resp.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = objectUrl;
+          a.download = filename || 'userlog.csv';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objectUrl);
         }
       } catch (e) {
         error = true;
@@ -213,15 +229,26 @@
         progress = {...data as DownloadProgress};
     });
 
-    Promise.all([
-      fetch(getHttpUrl('/iot/plensetup')),
-      fetch(getHttpUrl('/iot/sensors/all')),
-      fetch(getHttpUrl('/iot/frontmatter')),
-    ]).then(async (responses) => {
-      const plen = await safeJsonParse(responses[0]);
-      const sensors = await safeJsonParse(responses[1]);
-      const frontmatter = (await safeJsonParse(responses[2])).main;
-      const setPoints = plen.setpoints;
+    // Apr 2026: sensors come from the typed `sensorList` proto store
+    // (derived from AnalogBoard frames) instead of `/iot/sensors/all`.
+    try {
+      const sensors = get(sensorList);
+      // Pull the live `main` array from the global store (composite-fed).
+      // Was: a third HTTP call to `/iot/frontmatter`; now zero-RTT since
+      // `+layout.svelte` keeps `$frontMatterStore` warm via the typed
+      // proto stream.
+      const frontmatter = ($frontMatterStore?.main as string[]) ?? [];
+      // Plenum setpoints (specifically humidSetpointRef at slot [2]) for
+      // buildSensorList come from $plenumSettings (TAG 1) — was a /iot/plensetup
+      // GET that returned the wrong shape (bare array, not {setpoints:...}).
+      const plen = get(plenumSettings);
+      const setPoints: string[] = plen ? [
+        String(plen.tempSetpoint ?? 0),
+        String(plen.humidSetpoint ?? 0),
+        String(plen.humidSetpointRef ?? 0),
+        String(plen.burnerTempSetpoint ?? 0),
+        String(plen.burnerThreshold ?? 0),
+      ] : [];
       $dataSelectionStore.selections = buildSensorList(false, frontmatter, setPoints, sensors);
       $dataSelectionStore.selected = [];
       $historyStore = {
@@ -230,10 +257,9 @@
         inSequence: true, display: ''
       };
       dataReady = true;
-    })
-    .catch(() => {
+    } catch {
       error = true;
-    })
+    }
   });
 
   onDestroy(() => {

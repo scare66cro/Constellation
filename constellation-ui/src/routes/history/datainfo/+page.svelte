@@ -10,6 +10,11 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
 
+  // Storage info now reports the rpi5 SSD partition that holds the
+  // bridge process + Postgres `paneldb`. The legacy `sdcard[]` 10-slot
+  // array (a verbatim AS2 RTS/ACK shape) was deleted Apr 2026 — Nova
+  // LP-AM2434 has no SD card; pg lives on the rpi5 SSD per
+  // /memories/repo/pg-logging-on-rpi5.md.
   let records = {
     database: {
       activityCount: 0,
@@ -17,9 +22,24 @@
       percentUsed: 0,
       startDate: new Date(),
     },
-    sdcard: [] as string[],
+    storage: {
+      mount: '',
+      totalBytes: 0,
+      usedBytes: 0,
+      freeBytes: 0,
+      percentUsed: 0,
+    },
   };
   let ready = false;
+
+  function formatBytes(bytes: number): string {
+    if (!bytes) return '0';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let v = bytes;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+  }
 
   onMount(async () => {
     if ($keysStore.accessLevel < 1) {
@@ -39,16 +59,9 @@
 <GellertPage title={$t('level1.history.sd-card-information')} level={1} name="history" {ready}>
   <Card class="mx-auto mb-0 w-3/4 flex flex-col">
     <Table class="text-size-xl">
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.capacity-records')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[3]}</Column></Row>
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.records-used')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[4]}</Column></Row>
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.percent-used')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[5]}</Column></Row>
-    </Table>
-    <div class="text-center font-bold text-size-xl">{$t('level1.history.write-errors')}</div>
-    <Table class="text-size-xl">
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.history-log')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[7]}</Column></Row>
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.activity-log')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[6]}</Column></Row>
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.statistics-record')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[8]}</Column></Row>
-      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.total')}</Column><Column class="w-1/2 xl:py-1">{records.sdcard[9]}</Column></Row>
+      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.capacity-records')}</Column><Column class="w-1/2 xl:py-1">{formatBytes(records.storage.totalBytes)}</Column></Row>
+      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.records-used')}</Column><Column class="w-1/2 xl:py-1">{formatBytes(records.storage.usedBytes)}</Column></Row>
+      <Row><Column class="w-1/2 xl:py-1 border-r border-gray-400">{$t('level1.history.percent-used')}</Column><Column class="w-1/2 xl:py-1">{records.storage.percentUsed} %</Column></Row>
     </Table>
   </Card>
   <Card class="mx-auto w-3/4 flex flex-col">

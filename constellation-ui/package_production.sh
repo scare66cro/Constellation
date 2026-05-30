@@ -1,107 +1,150 @@
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════════
-# Package the Agristar bridge server + SvelteKit UI for deployment
-# to production Raspberry Pi 5 hardware.
+###############################################################################
+# Package the Constellation bridge server + SvelteKit UI for production.
 #
-# Creates:  deploy/agristar-vfd-upgrade.tar.gz
+# Produces:  server/deploy/constellation-bridge-<timestamp>.tar.gz
+#
+# Layout inside the tarball (matches what install.sh expects):
+#   bridge-server/
+#     dist/                                  (nested tree as emitted by tsc)
+#       constellation-ui/server/src/*.js     (transport + bridge logic)
+#       generated/ts/agristar/*.js           (proto codecs)
+#     package.json
+#     package-lock.json
+#   ui-svelte/
+#     index.js handler.js env.js shims.js client/ server/
+#     package.json package-lock.json
+#   agristar-bridge.service                  (systemd unit)
+#   install.sh
+#
+# Sim-only modules are EXCLUDED from the bridge package (orbit physics,
+# rs485 panel, vfd simulator, etc.). Production talks to real hardware.
 #
 # To install on a Pi:
-#   scp agristar-vfd-upgrade.tar.gz gellert@<PI_IP>:/tmp/
+#   scp constellation-bridge-*.tar.gz gellert@<PI_IP>:/tmp/
 #   ssh gellert@<PI_IP>
-#   cd /tmp && tar xzf agristar-vfd-upgrade.tar.gz && sudo bash install.sh
-#
-# Or use deploy.sh to deploy directly over SSH:
-#   ./deploy/deploy.sh gellert@<PI_IP> --vfd-host=<GATEWAY_IP> --vfd-port=502
-# ═══════════════════════════════════════════════════════════════════
-set -e
+#   cd /tmp && tar xzf constellation-bridge-*.tar.gz && sudo bash install.sh
+###############################################################################
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$SCRIPT_DIR/server"
 BUILD_DIR="$SCRIPT_DIR/build"
-DEPLOY_DIR="$SCRIPT_DIR/server/deploy"
-PKG_DIR="/tmp/agristar-vfd-pkg"
-PKG_NAME="agristar-vfd-upgrade.tar.gz"
+DEPLOY_DIR="$SERVER_DIR/deploy"
+PKG_DIR="$(mktemp -d -t constellation-pkg-XXXXXX)"
+TS="$(date +%Y%m%d-%H%M%S)"
+PKG_NAME="constellation-bridge-${TS}.tar.gz"
+
+# Files in server/dist/constellation-ui/server/src/ that are SIMULATOR-ONLY
+# and must NOT ship to production. Update this list when adding new sim
+# modules; do NOT keep a positive whitelist (it bit-rots — see
+# /memories/repo/rpi5-deployment.md).
+SIM_BLOCKLIST=(
+  orbitSimulator.js   # storage temp/humid/CO2 physics model
+  rs485Panel.js       # SCADA validation panel that injects fake analog data
+  rs485Responder.js   # RS-485 stub responder
+  vfdSimulator.js     # in-process VFD drive emulator
+)
+
+mkdir -p "$DEPLOY_DIR"
 
 echo "╔═══════════════════════════════════════════════════════╗"
-echo "║  Agristar VFD Fan Control — Production Packager      ║"
+echo "║  Constellation — Production Packager                 ║"
 echo "╚═══════════════════════════════════════════════════════╝"
-
-# Step 1: Verify builds exist
+echo "  Tarball : $DEPLOY_DIR/$PKG_NAME"
+echo "  Staging : $PKG_DIR"
 echo ""
-echo "[1/4] Checking build outputs..."
 
-if [ ! -f "$SERVER_DIR/dist/index.js" ]; then
-  echo "  Bridge server not built. Building..."
-  cd "$SERVER_DIR" && npx tsc
+# ─── 1. Build outputs ─────────────────────────────────────────────────────
+echo "[1/4] Verifying / building outputs..."
+
+if [ ! -f "$SERVER_DIR/dist/constellation-ui/server/src/index.js" ]; then
+  echo "  Bridge server not built. Running tsc..."
+  (cd "$SERVER_DIR" && npx tsc)
 fi
-echo "  ✓ Bridge server: $SERVER_DIR/dist/index.js"
+echo "  ✓ Bridge dist tree"
 
 if [ ! -f "$BUILD_DIR/index.js" ]; then
-  echo "  ERROR: SvelteKit UI not built. Run: cd ui-svelte && npx vite build"
+  echo "  ERROR: SvelteKit UI not built. Run: npm run build" >&2
   exit 1
 fi
-echo "  ✓ SvelteKit UI:  $BUILD_DIR/index.js"
+echo "  ✓ SvelteKit build/"
 
-# Step 2: Create package directory
+# ─── 2. Stage bridge-server ───────────────────────────────────────────────
 echo ""
-echo "[2/4] Assembling package..."
-rm -rf "$PKG_DIR"
-mkdir -p "$PKG_DIR/bridge-server/dist"
-mkdir -p "$PKG_DIR/ui-svelte"
+echo "[2/4] Staging bridge-server (excluding ${#SIM_BLOCKLIST[@]} sim modules)..."
 
-# Bridge server — only production files (no simulator, responder, panel)
-BRIDGE_FILES=(
-  index.js apiRoutes.js dataCache.js serialBridge.js protocol.js
-  wsManager.js logDataStore.js equipDescTransfer.js upgradeManager.js
-  warningTranslator.js simConfig.js vfdClient.js vfdRegisterMaps.js
-)
-for f in "${BRIDGE_FILES[@]}"; do
-  cp "$SERVER_DIR/dist/$f" "$PKG_DIR/bridge-server/dist/"
-  # Also copy source maps if they exist
-  [ -f "$SERVER_DIR/dist/${f}.map" ] && cp "$SERVER_DIR/dist/${f}.map" "$PKG_DIR/bridge-server/dist/"
+mkdir -p "$PKG_DIR/bridge-server"
+# Build rsync exclude args from SIM_BLOCKLIST.
+EXCLUDES=()
+for f in "${SIM_BLOCKLIST[@]}"; do
+  EXCLUDES+=(--exclude="$f" --exclude="${f}.map")
 done
+# Copy the entire dist/ tree, preserving structure (relative imports
+# between server/src/*.js and generated/ts/agristar/*.js depend on it).
+rsync -a "${EXCLUDES[@]}" "$SERVER_DIR/dist/" "$PKG_DIR/bridge-server/dist/"
+
 cp "$SERVER_DIR/package.json" "$PKG_DIR/bridge-server/"
 [ -f "$SERVER_DIR/package-lock.json" ] && cp "$SERVER_DIR/package-lock.json" "$PKG_DIR/bridge-server/"
 
-# SvelteKit UI — full build output
+INCLUDED=$(find "$PKG_DIR/bridge-server/dist" -name '*.js' | wc -l)
+echo "  ✓ $INCLUDED .js files staged"
+
+# ─── 3. Stage SvelteKit UI ────────────────────────────────────────────────
+mkdir -p "$PKG_DIR/ui-svelte"
 cp -r "$BUILD_DIR"/* "$PKG_DIR/ui-svelte/"
-# Also include package.json for the SvelteKit runtime
 cp "$SCRIPT_DIR/package.json" "$PKG_DIR/ui-svelte/"
 [ -f "$SCRIPT_DIR/package-lock.json" ] && cp "$SCRIPT_DIR/package-lock.json" "$PKG_DIR/ui-svelte/"
+echo "  ✓ ui-svelte/ staged"
 
-# Systemd service files
-cp "$SERVER_DIR/deploy/agristar-bridge.service" "$PKG_DIR/"
+# ─── 4. Systemd unit + install script ─────────────────────────────────────
+# Write a fresh service file (the tracked one in server/deploy/ has the
+# legacy flat-dist ExecStart=node dist/index.js path).
+cat > "$PKG_DIR/agristar-bridge.service" <<'UNIT'
+[Unit]
+Description=Constellation Bridge (proto/COBS over UART + Modbus VFD + REST/WS)
+After=network.target
+After=dev-ttyAMA0.device
 
-echo "  ✓ Bridge server dist/ (${#BRIDGE_FILES[@]} modules)"
-echo "  ✓ SvelteKit UI build/"
-echo "  ✓ systemd service file"
+[Service]
+Type=simple
+User=gellert
+Group=dialout
+WorkingDirectory=/home/gellert/Gellert/bridge-server
+ExecStart=/usr/bin/node dist/constellation-ui/server/src/index.js
+Restart=always
+RestartSec=5
 
-# Step 3: Create install script
-echo ""
-echo "[3/4] Generating install script..."
+# Bridge HTTP / WebSocket port
+Environment=PORT=3001
 
-cat > "$PKG_DIR/install.sh" << 'INSTALL_SCRIPT'
+# Real hardware UART to Nova AM2434
+Environment=SERIAL_PORT=/dev/ttyAMA0
+Environment=SERIAL_BAUD=230400
+
+# VFD Modbus TCP gateway; set VFD_HOST= (empty) to disable VFD scanning.
+Environment=VFD_HOST=127.0.0.1
+Environment=VFD_PORT=502
+Environment=VFD_MAX_SCAN=8
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agristar-bridge
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > "$PKG_DIR/install.sh" <<'INSTALL_SCRIPT'
 #!/bin/bash
-# ═══════════════════════════════════════════════════════════════════
-# Agristar VFD Fan Control — Production Installer
+###############################################################################
+# Constellation production installer (run as root: sudo bash install.sh)
 #
-# Installs the bridge server (replaces iotclient) and updated
-# SvelteKit UI with VFD Modbus fan control support.
-#
-# Usage:
-#   sudo bash install.sh [--vfd-host=IP] [--vfd-port=PORT] [--vfd-scan=N]
-#
-# Defaults:
-#   --vfd-host=127.0.0.1  (Modbus TCP gateway IP)
-#   --vfd-port=502        (Modbus TCP port)
-#   --vfd-scan=8          (max drive unit ID to scan)
-# ═══════════════════════════════════════════════════════════════════
-set -e
+# Defaults can be overridden with --vfd-host, --vfd-port, --vfd-scan.
+###############################################################################
+set -euo pipefail
 
-# Parse args
-VFD_HOST="127.0.0.1"
-VFD_PORT="502"
-VFD_SCAN="8"
+VFD_HOST="127.0.0.1"; VFD_PORT="502"; VFD_SCAN="8"
 for arg in "$@"; do
   case $arg in
     --vfd-host=*) VFD_HOST="${arg#*=}" ;;
@@ -110,130 +153,95 @@ for arg in "$@"; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GELLERT_HOME="/home/gellert/Gellert"
 BRIDGE_DIR="$GELLERT_HOME/bridge-server"
 UI_DIR="$GELLERT_HOME/ui-svelte"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "╔═══════════════════════════════════════════════════════╗"
-echo "║  Agristar VFD Fan Control — Installing               ║"
-echo "╠═══════════════════════════════════════════════════════╣"
-echo "║  VFD Gateway : ${VFD_HOST}:${VFD_PORT}"
-echo "║  Max Scan ID : ${VFD_SCAN}"
-echo "╚═══════════════════════════════════════════════════════╝"
-echo ""
+echo "╔════════════════════════════════════════════════════════╗"
+echo "║  Installing Constellation                              ║"
+echo "║  VFD: ${VFD_HOST}:${VFD_PORT}  scan=${VFD_SCAN}"
+echo "╚════════════════════════════════════════════════════════╝"
 
-# 1. Stop existing services
-echo "[1/7] Stopping services..."
-systemctl stop iotclient.service 2>/dev/null || true
+# 1. Stop services
+echo "[1/6] Stopping services"
+systemctl stop iotclient.service     2>/dev/null || true
 systemctl stop agristar-bridge.service 2>/dev/null || true
-systemctl stop uisvelte.service 2>/dev/null || true
-echo "  ✓ Services stopped"
+systemctl stop uisvelte.service      2>/dev/null || true
 
-# 2. Install bridge server
-echo "[2/7] Installing bridge server..."
-mkdir -p "$BRIDGE_DIR/dist"
-cp -f "$SCRIPT_DIR/bridge-server/dist/"*.js "$BRIDGE_DIR/dist/"
+# 2. Bridge server
+echo "[2/6] Installing bridge-server → $BRIDGE_DIR"
+mkdir -p "$BRIDGE_DIR"
+# Wipe the old dist tree so renamed/removed files don't linger.
+rm -rf "$BRIDGE_DIR/dist"
+cp -r "$SCRIPT_DIR/bridge-server/dist" "$BRIDGE_DIR/"
 cp -f "$SCRIPT_DIR/bridge-server/package.json" "$BRIDGE_DIR/"
-[ -f "$SCRIPT_DIR/bridge-server/package-lock.json" ] && cp -f "$SCRIPT_DIR/bridge-server/package-lock.json" "$BRIDGE_DIR/"
+[ -f "$SCRIPT_DIR/bridge-server/package-lock.json" ] && \
+  cp -f "$SCRIPT_DIR/bridge-server/package-lock.json" "$BRIDGE_DIR/"
 chown -R gellert:gellert "$BRIDGE_DIR"
-echo "  ✓ Bridge server files installed"
 
-# 3. Install Node.js dependencies
-echo "[3/7] Installing bridge dependencies..."
-cd "$BRIDGE_DIR"
-su -c "npm ci --omit=dev 2>&1 | tail -3" gellert
-echo "  ✓ Dependencies installed"
+# 3. Bridge deps
+echo "[3/6] Installing bridge dependencies"
+( cd "$BRIDGE_DIR" && su -c "npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -5" gellert )
 
-# 4. Install SvelteKit UI
-echo "[4/7] Installing SvelteKit UI..."
-# Back up current UI
-[ -d "$UI_DIR" ] && mv "$UI_DIR" "${UI_DIR}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+# 4. SvelteKit UI
+echo "[4/6] Installing ui-svelte → $UI_DIR"
+[ -d "$UI_DIR" ] && mv "$UI_DIR" "${UI_DIR}.bak.$(date +%Y%m%d%H%M%S)"
 mkdir -p "$UI_DIR"
 cp -r "$SCRIPT_DIR/ui-svelte/"* "$UI_DIR/"
-cd "$UI_DIR"
-su -c "npm ci --omit=dev 2>&1 | tail -3" gellert
+( cd "$UI_DIR" && su -c "npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -5" gellert )
 chown -R gellert:gellert "$UI_DIR"
-echo "  ✓ SvelteKit UI installed"
 
-# 5. Install systemd service for bridge
-echo "[5/7] Installing bridge service..."
-# Set VFD parameters in service file
-sed -e "s|Environment=VFD_HOST=.*|Environment=VFD_HOST=${VFD_HOST}|" \
-    -e "s|Environment=VFD_PORT=.*|Environment=VFD_PORT=${VFD_PORT}|" \
-    -e "s|Environment=VFD_MAX_SCAN=.*|Environment=VFD_MAX_SCAN=${VFD_SCAN}|" \
+# 5. Systemd unit
+echo "[5/6] Installing systemd unit"
+sed -e "s|^Environment=VFD_HOST=.*|Environment=VFD_HOST=${VFD_HOST}|" \
+    -e "s|^Environment=VFD_PORT=.*|Environment=VFD_PORT=${VFD_PORT}|" \
+    -e "s|^Environment=VFD_MAX_SCAN=.*|Environment=VFD_MAX_SCAN=${VFD_SCAN}|" \
     "$SCRIPT_DIR/agristar-bridge.service" > /etc/systemd/system/agristar-bridge.service
 systemctl daemon-reload
-echo "  ✓ Bridge service installed"
-
-# 6. Update lighttpd proxy — route /iot to bridge:3001
-echo "[6/7] Updating lighttpd proxy..."
-LCONF="/etc/lighttpd/lighttpd.conf"
-if [ -f "$LCONF" ]; then
-  if grep -q '127.0.0.1:2035' "$LCONF"; then
-    sed -i 's|127.0.0.1:2035|127.0.0.1:3001|g' "$LCONF"
-    echo "  Patched: iotclient:2035 → bridge:3001"
-  elif grep -q '127.0.0.1:3001' "$LCONF"; then
-    echo "  Already pointing to bridge:3001"
-  fi
-  systemctl restart lighttpd
-fi
-# Disable iotclient (bridge replaces it)
 systemctl disable iotclient.service 2>/dev/null || true
-echo "  ✓ lighttpd updated"
 
-# 7. Start services
-echo "[7/7] Starting services..."
-systemctl enable agristar-bridge
-systemctl start agristar-bridge
-systemctl enable uisvelte
-systemctl start uisvelte
-echo "  ✓ Services started"
+# Patch lighttpd if present (legacy iotclient port → bridge port)
+LCONF="/etc/lighttpd/lighttpd.conf"
+if [ -f "$LCONF" ] && grep -q '127.0.0.1:2035' "$LCONF"; then
+  sed -i 's|127.0.0.1:2035|127.0.0.1:3001|g' "$LCONF"
+  systemctl restart lighttpd 2>/dev/null || true
+fi
+
+# 6. Start
+echo "[6/6] Starting services"
+systemctl enable agristar-bridge uisvelte
+systemctl start  agristar-bridge uisvelte
+sleep 2
+systemctl --no-pager status agristar-bridge | head -8
+systemctl --no-pager status uisvelte        | head -8
 
 echo ""
-echo "╔═══════════════════════════════════════════════════════╗"
-echo "║  Installation complete!                              ║"
-echo "╠═══════════════════════════════════════════════════════╣"
-echo "║                                                      ║"
-echo "║  Bridge  : systemctl status agristar-bridge          ║"
-echo "║  UI      : systemctl status uisvelte                 ║"
-echo "║  Logs    : journalctl -u agristar-bridge -f          ║"
-echo "║  VFD     : curl localhost:3001/iot/fans/status        ║"
-echo "║                                                      ║"
-echo "║  To roll back:                                       ║"
-echo "║    systemctl stop agristar-bridge                    ║"
-echo "║    systemctl enable iotclient && systemctl start it  ║"
-echo "║    sed -i 's|:3001|:2035|' /etc/lighttpd/lighttpd.conf║"
-echo "║    systemctl restart lighttpd                        ║"
-echo "║                                                      ║"
-echo "╚═══════════════════════════════════════════════════════╝"
+echo "Done. Logs:"
+echo "  journalctl -u agristar-bridge -f"
+echo "  journalctl -u uisvelte        -f"
 INSTALL_SCRIPT
-
 chmod +x "$PKG_DIR/install.sh"
-echo "  ✓ install.sh generated"
+echo "  ✓ install.sh + agristar-bridge.service"
 
-# Step 4: Create tarball
+# ─── 5. Tarball ───────────────────────────────────────────────────────────
 echo ""
-echo "[4/4] Creating package..."
-cd /tmp
+echo "[3/4] Verifying staged tree..."
+( cd "$PKG_DIR" && find . -maxdepth 3 -type d | sort )
+
+echo ""
+echo "[4/4] Creating tarball..."
 tar czf "$DEPLOY_DIR/$PKG_NAME" -C "$PKG_DIR" .
 rm -rf "$PKG_DIR"
-
 PKGSIZE=$(du -h "$DEPLOY_DIR/$PKG_NAME" | cut -f1)
-echo "  ✓ $PKG_NAME ($PKGSIZE)"
+echo "  ✓ $DEPLOY_DIR/$PKG_NAME ($PKGSIZE)"
 
 echo ""
-echo "╔═══════════════════════════════════════════════════════╗"
-echo "║  Package ready: server/deploy/$PKG_NAME"
-echo "╠═══════════════════════════════════════════════════════╣"
-echo "║                                                      ║"
-echo "║  To deploy to production:                            ║"
-echo "║    scp server/deploy/$PKG_NAME gellert@<PI_IP>:/tmp/"
-echo "║    ssh gellert@<PI_IP>"
-echo "║    cd /tmp && tar xzf $PKG_NAME"
-echo "║    sudo bash install.sh --vfd-host=<GATEWAY_IP>      ║"
-echo "║                                                      ║"
-echo "║  Or use the direct deploy script:                    ║"
-echo "║    ./deploy/deploy.sh gellert@<PI_IP>                ║"
-echo "║                                                      ║"
-echo "╚═══════════════════════════════════════════════════════╝"
+echo "╔════════════════════════════════════════════════════════╗"
+echo "║  Package ready                                         ║"
+echo "╠════════════════════════════════════════════════════════╣"
+echo "║  scp $PKG_NAME gellert@<PI>:/tmp/"
+echo "║  ssh gellert@<PI>                                      ║"
+echo "║  cd /tmp && tar xzf $PKG_NAME"
+echo "║  sudo bash install.sh --vfd-host=<GATEWAY_IP>          ║"
+echo "╚════════════════════════════════════════════════════════╝"

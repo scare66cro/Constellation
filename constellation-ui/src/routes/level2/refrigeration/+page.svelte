@@ -14,15 +14,22 @@
 	import Button from "$lib/ui/Button.svelte";
 	import { goto } from "$app/navigation";
 	import { pidStore, frontMatterStore, navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
 	import SaveButton from "$lib/components/SaveButton.svelte";
-  import { cloneDeep, isEqual } from "lodash-es";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-	import type { ArrayResponse } from "$lib/business/util";
   import TritonScadaSection from "./TritonScadaSection.svelte";
   import RefrigerantPTChart from "./RefrigerantPTChart.svelte";
+  import ScrollableArea from "$lib/components/ScrollableArea.svelte";
+  import { refrigSettings } from "$lib/business/protoStores";
+  import { writeProtoRaw, buildForceVarintBytes, buildForceFloatBytes, wrapAsLengthDelim } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
-  export let data: ArrayResponse & { tritons?: { slot: number; connected: boolean; label: string }[] };
+  // Phase 5.1: refrig page now hydrates from the RefrigSettings proto
+  // broadcast (envelope tag 44 / settings field 5) directly. The legacy
+  // /iot/refrigeration GET is no longer consumed by the UI; +page.ts only
+  // loads the bridge-side Triton sidecar (orbit-only metadata, no proto
+  // representation).
+  export let data: { tritons?: { slot: number; connected: boolean; label: string }[] };
 
   let title = $t('level2.refrigeration.refrigeration-setup');
   let edit = true;
@@ -69,7 +76,8 @@
 
   $: ready = false;
   $: wait = false;
-  $: refrigeration = [] as string[];
+  let refrigeration: string[] = new Array(23).fill('0');
+  let originalRefrigeration: string[] = new Array(23).fill('0');
   $: refrigData = $frontMatterStore?.refrigData as string[];
   $: available = refrigIndex.map((index, i) => {
     if (refrigData?.[i] !== '-1') {
@@ -78,24 +86,138 @@
   })?.filter((i) => i !== undefined) as number[];
   $: remaining = available ? available.length % 2 : 0;
 
-  onMount(async () => {
-    try {
-      $navigationStore.data = getHttpUrl(`/iot/refrigeration`);
-      $navigationStore.isDirty = () => !isEqual(refrigeration, data.array);
-      refrigeration = cloneDeep(data.array);
-    } catch (error) {
-      console.error(error);
+  // Compose the 23-slot string[] the existing template + saveRefrigeration
+  // expect from the proto store. Layout matches legacy UI_SendRefrig() CSV
+  // (see novaAdapter.ts refrigSettings handler):
+  //   [0..11]  stages 1-6 on/off pairs
+  //   [12..15] PIDU
+  //   [16]     Refrig.Purge mode
+  //   [17]     Co2.Purge.RefrigThresh
+  //   [18]     Log.PID.Refrig (not in RefrigSettings; left 0 here)
+  //   [19,20]  stage 7 on/off
+  //   [21,22]  stage 8 on/off
+  // Trim the f32→f64 precision noise that creeps in on the wire (e.g.
+  // 1.1f → 1.100000023841858 in JS). Round to 4 decimals — matches the UI's
+  // PIDU keypad precision — and re-stringify so "5.0" displays as "5".
+  function fmtFloat(v: any): string {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '0';
+    return String(parseFloat(n.toFixed(4)));
+  }
+  function rsToArray(rs: any): string[] {
+    const stages = rs?.stages ?? [];
+    const stage = (i: number) => ({
+      on:  String(stages[i]?.on  ?? 0),
+      off: String(stages[i]?.off ?? 0),
+    });
+    const out: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const s = stage(i);
+      out.push(s.on, s.off);
     }
-    ready = true;
+    out.push(
+      fmtFloat(rs?.pGain),
+      fmtFloat(rs?.iGain),
+      fmtFloat(rs?.dGain),
+      fmtFloat(rs?.uLimit),
+      String(rs?.purge ?? 0),
+      String(rs?.purgeThreshold ?? 0),
+      '0',  // Log.PID.Refrig — not part of RefrigSettings
+    );
+    const s6 = stage(6); const s7 = stage(7);
+    out.push(s6.on, s6.off, s7.on, s7.off);
+    return out;
+  }
+
+  onMount(() => {
+    const unsub = refrigSettings.subscribe((rs) => {
+      if (!rs) return;
+      const fresh = rsToArray(rs);
+      if (!ready || isEqual(refrigeration, originalRefrigeration)) {
+        refrigeration = fresh;
+      }
+      originalRefrigeration = fresh;
+      ready = true;
+      if (!$navigationStore.isDirty?.()) {
+        $navigationStore = { ...$navigationStore, invalidate: true };
+      }
+    });
+    $navigationStore.isDirty = () => !isEqual(refrigeration, originalRefrigeration);
+    return () => unsub();
   });
 
   function gotoLogs() {
     $pidStore.returnPage = '/level2/refrigeration';
     goto('/level2/pid');
   }
+
+  /**
+   * Phase 5.1 proto-direct save (settings field 5 / TAG.RefrigSettings).
+   *
+   * Page state `refrigeration: string[23]`:
+   *   [0..11]  = 6 stage on/off pairs (idx 0,2,4,6,8,10 = on; 1,3,... = off)
+   *   [12..15] = PIDU (P, I, D, U) — floats
+   *   [16]     = legacy RefrigerationPurge mode
+   *   [17]     = PurgeThreshold
+   *   [18]     = reserved (unused on the wire)
+   *   [19..22] = stages 7+8 on/off (only present on 8-stage builds)
+   *
+   * Firmware apply_refrig (nova_dataexc.c, field 5):
+   *   field 2  = repeated RefrigStage { 1=on, 2=off } (force-varint inside)
+   *   field 3..6 = PIDU floats
+   *   field 10 = Refrig.Purge      (force-varint, 0 = off mode)
+   *   field 11 = Co2.Purge.RefrigThresh (force-varint)
+   * apply_refrig clears stage_idx on every call — we MUST send all
+   * configured stages in order, no gaps.
+   */
+  async function saveRefrigeration(arr: string[]): Promise<void> {
+    if (!arr || arr.length === 0) return;
+    const parts: Uint8Array[] = [];
+
+    // ── Stages 1–6 (indices 0,2,4,6,8,10) ──
+    for (let s = 0; s < 6; s++) {
+      const on  = arr[s * 2];
+      const off = arr[s * 2 + 1];
+      if (on === undefined || on === '' || off === undefined || off === '') continue;
+      const inner = buildForceVarintBytes({ 1: parseInt(on) || 0, 2: parseInt(off) || 0 });
+      parts.push(wrapAsLengthDelim(2, inner));
+    }
+    // ── Stages 7–8 (indices 19,21) — same field 2, appended in order ──
+    for (const baseIdx of [19, 21]) {
+      const on  = arr[baseIdx];
+      const off = arr[baseIdx + 1];
+      if (on === undefined || on === '' || off === undefined || off === '') continue;
+      const inner = buildForceVarintBytes({ 1: parseInt(on) || 0, 2: parseInt(off) || 0 });
+      parts.push(wrapAsLengthDelim(2, inner));
+    }
+
+    // ── PIDU (fields 3,4,5,6 — floats, force-encoded since 0 valid) ──
+    parts.push(buildForceFloatBytes({
+      3: parseFloat(arr[12] ?? '0') || 0,
+      4: parseFloat(arr[13] ?? '0') || 0,
+      5: parseFloat(arr[14] ?? '0') || 0,
+      6: parseFloat(arr[15] ?? '0') || 0,
+    }));
+
+    // ── Purge mode (field 10) + Purge threshold (field 11) ──
+    parts.push(buildForceVarintBytes({
+      10: parseInt(arr[16] ?? '0') || 0,
+      11: parseInt(arr[17] ?? '0') || 0,
+    }));
+
+    // Concatenate all parts into one outer payload.
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+
+    await writeProtoRaw(TAG.RefrigSettings, out);
+  }
 </script>
 
 <GellertPage {wait} {title} {ready} level={2} name="refrigeration">
+  <ScrollableArea>
   <!--
     Legacy stages / PID / purge-threshold UI.
     Renders only when at least one refrigeration stage is configured.  When no
@@ -137,14 +259,6 @@
       </Row>
       <Row>
         <Column colspan={2}>
-          <p class="text-center mx-auto my-1 text-size-large">
-            { $t('level2.refrigeration.refrigeration-purge-mode-is') }
-            <span class="italic text-gray-500">→ <a href="/level1/co2" class="underline">CO<sub>2</sub> {$t('level1.co2.level-purge-control')}</a></span>
-          </p>
-        </Column>
-      </Row>
-      <Row>
-        <Column colspan={2}>
           <p class="text-center mx-4 text-size-large">
             { $t('global.pid-controller-output-logging-options') }:
             <Button size="lg" on:click={gotoLogs} class="ml-2">{ $t('global.logs') }</Button>
@@ -152,7 +266,7 @@
         </Column>
       </Row>
     </Table>
-    <SaveButton {edit} bind:wait={wait} data={refrigeration} bind:original={data.array} route="refrigeration" bind:validation={validation} autoSave />
+    <SaveButton {edit} bind:wait={wait} data={refrigeration} bind:original={originalRefrigeration} bind:validation={validation} autoSave onSave={saveRefrigeration} />
   </Card>
   {/if}
 
@@ -167,6 +281,7 @@
                       cutInP={activeCutInP}
                       cutOutP={activeCutOutP}
                       dischargeTargetP={activeDischargeTargetP} />
+  </ScrollableArea>
 </GellertPage>
 
 

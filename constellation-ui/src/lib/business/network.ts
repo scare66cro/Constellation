@@ -1,6 +1,9 @@
 import { navigationStore, headersStore } from "$lib/store";
 import { get } from "svelte/store";
-import { getHttpUrl, safeJsonParse } from "./util";
+import { networkConfig } from "./protoStores";
+import type { NetworkData } from "./protoStores";
+
+export type { NetworkData } from "./protoStores";
 
 export type NetworkNode = {
   text: string;
@@ -19,12 +22,6 @@ export type NetworkPanel = {
   humidColor: string;
   fullAddress: string;
   panelName: string;
-};
-export type NetworkData = {
-  NetworkMonitor: string[];
-  ClientIpAdd: string[];
-  LocalIpAdd: string[];
-  LocalIpMask: string[];
 };
 /**
  * Processes NetworkMonitor data to extract network panels with subnet filtering
@@ -187,24 +184,15 @@ export async function processNetworkNodes(nodes: string[], addOffset: number, ip
 }
 
 export async function getIP(): Promise<string> {
-  try {
-    const response = await fetch(getHttpUrl('/iot/network'));
-    const parsed = await safeJsonParse(response);
-    const display = parsed?.LocalIpAdd?.[0];
-    return display ?? "";
-  } catch (e) {
-    console.error(e);
-    return "";
-  }
+  // S9g: was `fetch('/iot/network')`. Now reads directly from the typed
+  // NetworkConfig proto store. Returns '' when the store hasn't yet
+  // received its first frame (matches legacy fetch-fail behaviour).
+  return get(networkConfig)?.ipAddr ?? "";
 }
 
 export async function getPort(): Promise<string> {
-  try {
-    const response = await fetch(getHttpUrl('/iot/port'));
-    const parsed = await safeJsonParse(response);
-    return parsed?.data ?? "80";
-  } catch (e) {
-    console.error(e);
-    return "80";
-  }
+  // S9g: was `fetch('/iot/port')`. NetworkConfig.httpPort is a uint32
+  // — fall back to '80' when unset (matches legacy default).
+  const p = get(networkConfig)?.httpPort;
+  return p ? String(p) : "80";
 }

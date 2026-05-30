@@ -45,12 +45,16 @@
   }
 
   async function update() {
-    await fetch(getHttpUrl('/iot/PostSave.jsp'), {
-      method: 'POST',
-			headers: {
-				'Content-Type': 'application/json'
-			}
-    });
+    /* `/iot/PostSave.jsp` was the legacy ARM2 bulk-commit endpoint; the
+     * bridge handler was removed in the 2026-04-21 S9k cleanup
+     * (apiRoutes.ts:1199-1201) on the assumption that no UI page still
+     * called it. This page slipped through that audit and was POSTing
+     * into a 404 on every save — silently, since we never checked
+     * resp.ok. The actual save already happened via SaveButton's POST
+     * to /iot/config (apiRoutes.ts:705) before this handler fired, so
+     * functionality wasn't broken; this just removes the dead call.
+     * `invalidate` re-runs +page.ts so the page-data prop refreshes
+     * with whatever the bridge persisted. */
     await invalidate($navigationStore.data);
     iotClient = cloneDeep(data);
   }

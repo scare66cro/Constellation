@@ -36,9 +36,13 @@ function createPersistedStore(key: string, startValue: any) {
 		DateTime: string;
 		CurrentMode: number;
 		PanelName: string;
+		/** True when the panel-mounted E-Stop is open (system in SHUTDOWN).
+		 * Sourced from `SystemStatus.estopActive` (firmware reads STORAGE
+		 * orbit DI11). */
+		EStop: boolean;
 	}
 
-	const headers: Headers = { DateTime: '', CurrentMode: 0, PanelName: 'Agristar Panel' };
+	const headers: Headers = { DateTime: '', CurrentMode: 0, PanelName: 'Agristar Panel', EStop: false };
 
 	export interface Navigation {
 		level: number;
@@ -390,14 +394,6 @@ let auxiliaryOptions: AuxiliaryOptionsType = {
 	availSensors: (ref) => { return [] },
 };
 
-let equipmentOptions = {
-	getStatus: (equipment: any, eq: string, remote: string, input: string, output: string) => ({ status: '', color: '' }),
-	getRefrigStatus: (remote: string, input: string, output: string, diag: string) => ({ status: '', color: '' }),
-	getAuxSwitch: (edit: boolean, status: string, switch1: string[], switch2: string[], auxiliary: number) => ({ status: '', color: '' }),
-	getSwitchStatus: (value: string) => ({ status: '', color: '' }),
-	getDoorDiagStatus: (input: string, output: string, diag: string) => ({ status: '', color: '' }),
-};
-
 let yesNoOptions: Array<{ text: string, value: string }> = [];
 
 let failureOptions: {
@@ -409,8 +405,14 @@ let failureOptions: {
 
 export type LabelIndex = { availLabels: string[], availEquip: number[] };
 
-let equipList: LabelIndex = { availLabels: [], availEquip: [] };
-let remoteList: LabelIndex = { availLabels: [], availEquip: [] };
+/* Apr 2026: Activity-log column-header lists. Previously hydrated from
+ * `/iot/avail/equipment` + `/iot/avail/remote` GETs that returned
+ * hardcoded `['Equipment']`/`['Remote']` stubs (no real backing data).
+ * Now seeded with the same defaults at store-creation time and the
+ * bridge routes deleted. If/when real per-source equipment lists land,
+ * swap to a typed proto store. */
+let equipList: LabelIndex = { availLabels: ['Equipment'], availEquip: [0] };
+let remoteList: LabelIndex = { availLabels: ['Remote'], availEquip: [1] };
 
 export type HomePage = { page: string, initialized: boolean };
 let homePage = {
@@ -468,7 +470,6 @@ export const keysStore = writable(keys);
 export const pageTranslationsStore = writable(pageTranslations);
 export const modeToColorStore = writable(modeToColor);
 export const auxiliaryOptionsStore = writable(auxiliaryOptions);
-export const equipmentOptionsStore = writable(equipmentOptions);
 export const yesNoOptionsStore = writable(yesNoOptions);
 export const failureOptionsStore = writable(failureOptions);
 export const equipListStore = writable(equipList);

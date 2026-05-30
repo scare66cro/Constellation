@@ -1,3 +1,5 @@
+import type { IoEntry } from "$lib/business/ioConfig";
+
 export type Rule = {
   type: string,
   io: string,
@@ -14,7 +16,7 @@ export type Rule = {
 export class Auxiliary {
   InputConfig: string[] = [];
   OutputConfig: string[] = [];
-  IoNames: string[] = [];
+  IoNames: IoEntry[] = [];
   systemMode: string = '';
   auxProg: string[] = [];
   rules: Rule[] = [];

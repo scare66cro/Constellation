@@ -9,36 +9,34 @@
 	import TextField from "$lib/ui/TextField.svelte";
 	import { AdornmentType } from "$lib/business/adornmentType";
   import RefreshList from "$lib/components/RefreshList.svelte";
-  import WsClient from "$lib/business/wsClient";
-  import { processNetworkMonitorData, type NetworkData, type NetworkPanel } from "$lib/business/network";
-  import { getHttpUrl, navigateToStoragePanel, extractStorageInfo, checkHostAvailable } from "$lib/business/util";
+  import { processNetworkMonitorData, type NetworkPanel } from "$lib/business/network";
+  import { networkComposite } from "$lib/business/protoStores";
+  import { navigateToStoragePanel, extractStorageInfo } from "$lib/business/util";
   import { t } from "svelte-i18n";
   import { goto } from "$app/navigation";
 
   let title = $t('level1.network.network-monitor');
-
-  let client: WsClient | undefined;
 
   $: ready = false;
   $: wait = false;
   $: level = $navigationStore.level;
   $: network = [] as NetworkPanel[];
 
-  onMount(async () => {
-		client = new WsClient(getHttpUrl('/iot/ws'), 'network-data', (data) => processNetworkData(data as NetworkData));
-		client.connect();
+  onMount(() => {
+    // S9g: was a WsClient subscription to `network-data`. The bridge
+    // stub never had live peer telemetry; the proto-direct composite
+    // delivers the same shape (LocalIp/Mask + configured node list)
+    // and updates reactively when networkConfig/networkNodes change.
+    const unsub = networkComposite.subscribe((data) => {
+      if (!data) return;
+      const { panels } = processNetworkMonitorData(data);
+      network = panels;
+      ready = true;
+    });
+    return unsub;
   });
 
-  onDestroy(() => {
-		client?.close();
-		client = undefined;
-	});
-
-  function processNetworkData(data: NetworkData) {
-    const { panels } = processNetworkMonitorData(data);
-    network = panels;
-		ready = true;
-  }
+  onDestroy(() => {});
 
   function tempColor(color: string): string {
     let retcolor = 'black';
@@ -99,17 +97,17 @@
   }
 
   async function refreshList() {
+    // S9g: was POST /iot/network (no-op stub on the bridge anyway). The
+    // composite is reactive — every networkConfig / networkNodes update
+    // refreshes the panel list automatically. Brief wait flash for UX.
     wait = true;
-    try {
-      await fetch(getHttpUrl('/iot/network'), { method: 'POST' });
-    } catch (error) {
-      network = [];
-    }
+    await new Promise((r) => setTimeout(r, 100));
     wait = false;
   }
 </script>
 
-<GellertPage {wait} {ready} {title} {level} name='network' action={RefreshList} on:click={refreshList}>
+<!-- svelte-ignore -->
+<GellertPage {wait} {ready} {title} {level} name='network' action={RefreshList as any} on:click={refreshList}>
   <Card class="mt-2 flex flex-col mx-2">
     <Table class="mb-2">
       <Row class="font-bold text-size-large">

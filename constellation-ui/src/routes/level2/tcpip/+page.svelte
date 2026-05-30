@@ -15,6 +15,7 @@
   import { getModalStore, type ModalSettings } from "@skeletonlabs/skeleton";
   import Button from "$lib/ui/Button.svelte";
   import { getHttpUrl, updateIotConnection, startRebootPause, isLoopbackAccess } from "$lib/business/util";
+  import { networkConfig } from "$lib/business/protoStores";
 
   const modalStore = getModalStore();
 
@@ -27,8 +28,10 @@
     LocalDns: string[];
   };
 
-  // Acknowledge potential extra props from SvelteKit load function
-  export let data: TCPIPConfig & { props?: any };
+  // Acknowledge potential extra props from SvelteKit load function (legacy
+  // SSR loader has been deleted as part of the proto-direct migration; this
+  // remains for type-shape backwards-compat with any remaining callers).
+  export let data: Partial<TCPIPConfig> & { props?: any } = {};
 
   let level = 2;
   let title = `TCP/IP ${$t('level2.tcpip.setup')}`;
@@ -55,7 +58,7 @@
 
   // Keyboard visibility handling - disable save button when keyboard is visible
   let isDisabledDueToKeyboard = false;
-  let keyboardHideTimeout: NodeJS.Timeout;
+  let keyboardHideTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // Watch for keyboard visibility changes
   $: {
@@ -220,36 +223,32 @@
     }
   }
 
-  onMount(async () => {
-    $navigationStore.data = getHttpUrl('/iot/tcpip');
-
-    // Initialize component state using the potentially larger 'data' object as before
-    ipMode = data.LocalIpMode[0];
-    const tcpip = data.LocalIpAdd[0].split(':')
-    localip = tcpip[0].split('.');
-    port = data.HttpPort[0];
-    mask = data.LocalIpMask[0].split('.');
-    gateway = data.LocalIpGateway[0].split('.');
-    if (gateway === undefined || gateway.length < 4) {
-      gateway = Array(4).fill('');
+  // Hydrate inputs from the proto store as soon as it produces its first
+  // frame. The bridge replays cached frames immediately on subscribe so this
+  // typically settles within one round-trip. Re-runs only when `originalData`
+  // is null (initial load) — once the user starts editing we leave their
+  // unsaved changes alone.
+  $: if ($networkConfig && originalData === null) {
+    const nc = $networkConfig;
+    ipMode  = String(nc.ipMode ?? 1);
+    localip = (nc.ipAddr || '').split('.');
+    while (localip.length < 4) localip.push('');
+    mask    = (nc.ipMask || '').split('.');
+    while (mask.length < 4) mask.push('');
+    gateway = (nc.ipGateway || '').split('.');
+    while (gateway.length < 4) gateway.push('');
+    port    = nc.httpPort ? String(nc.httpPort) : '';
+    const pubParts = (nc.publicIp || '').split('.');
+    publicIP = [0, 1, 2, 3].map((i) => (pubParts[i] !== undefined && pubParts[i] !== '' ? pubParts[i] : '0'));
+    const dnsServers = nc.dns ?? [];
+    if (dnsServers[0]) {
+      const parts = dnsServers[0].split('.');
+      dns1 = [0, 1, 2, 3].map((i) => (parts[i] !== undefined && parts[i] !== '' ? parts[i] : ''));
     }
-    // Normalize public IP to 4 octets; backend may send '0' instead of '0.0.0.0'
-    const publicIpRaw = data?.HttpPort?.[1];
-    const parts = (publicIpRaw ?? '').split('.');
-    publicIP = [0, 1, 2, 3].map((i) => (parts[i] !== undefined && parts[i] !== '' ? parts[i] : '0'));
-
-    // Initialize DNS servers
-    const dnsServers = data.LocalDns || [];
-    if (dnsServers.length > 0) {
-      const dns1Parts = dnsServers[0].split('.');
-      dns1 = [0, 1, 2, 3].map((i) => (dns1Parts[i] !== undefined && dns1Parts[i] !== '' ? dns1Parts[i] : ''));
+    if (dnsServers[1]) {
+      const parts = dnsServers[1].split('.');
+      dns2 = [0, 1, 2, 3].map((i) => (parts[i] !== undefined && parts[i] !== '' ? parts[i] : ''));
     }
-    if (dnsServers.length > 1) {
-      const dns2Parts = dnsServers[1].split('.');
-      dns2 = [0, 1, 2, 3].map((i) => (dns2Parts[i] !== undefined && dns2Parts[i] !== '' ? dns2Parts[i] : ''));
-    }
-
-    // Capture original snapshot using the normalized current inputs so dirty check is consistent
     originalData = {
       HttpPort: [port, publicIP.join('.')],
       LocalIpAdd: [localip.join('.')],
@@ -259,6 +258,10 @@
       LocalDns: dnsServers,
     };
     ready = true;
+  }
+
+  onMount(() => {
+    $navigationStore.data = '';
   });
 
   onDestroy(() => {

@@ -11,11 +11,12 @@
 	import Select from '$lib/ui/Select.svelte';
   import { navigationStore, pidStore } from '$lib/store';
   import { getHttpUrl } from "$lib/business/util";
+  import { pidLogSettings } from "$lib/business/protoStores";
+  import { writeProto } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 	import SaveButton from '$lib/components/SaveButton.svelte';
   import { cloneDeep, isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-
-  export let data: { pidWrap: string, logDoors: string, logRefrig: string };
 
   let title = $t('level2.pid.pid-logs');
 
@@ -25,53 +26,58 @@
 
   $: ready = false;
   $: wait = false;
-  $: pid = {} as { pidWrap: string, logDoors: string, logRefrig: string };
+  let pid = { pidWrap: '0', logDoors: '0', logRefrig: '0' };
+  let original = { pidWrap: '0', logDoors: '0', logRefrig: '0' };
+  let hydrated = false;
+
+  $: if (!hydrated && $pidLogSettings) {
+    pid = {
+      pidWrap:   String($pidLogSettings.wrap ?? 0),
+      logDoors:  String($pidLogSettings.logDoors ?? 0),
+      logRefrig: String($pidLogSettings.logRefrig ?? 0),
+    };
+    original = { ...pid };
+    recordDoors = pid.logDoors === '1';
+    recordRefrig = pid.logRefrig === '1';
+    hydrated = true;
+    ready = true;
+  }
 
   onMount(async () => {
     try {
-      $navigationStore.data = getHttpUrl(`/iot/pid`);
-      $navigationStore.isDirty = () => !isEqual(pid, data);
-      pid = cloneDeep(data);
-      recordDoors = pid.logDoors === '1';
-      recordRefrig = pid.logRefrig === '1';
+      $navigationStore.isDirty = () => !isEqual(pid, original);
+      if (hydrated) ready = true;
     } catch (error) {
       console.error(error);
     }
-    ready = true;
   });
 
-  async function postDoorsButton() {
+  // Toggle handlers: proto-direct save of PidLogSettings (TAG=67, sfield=37).
+  // Force-encode logDoors/logRefrig because 0 is a meaningful value (Off);
+  // proto3 zero-suppression would otherwise drop it and the firmware
+  // in-place patcher would leave the previous ON state intact.
+  // wrap is also force-encoded for the same reason — even though we're
+  // not touching it, sending the partial-message overrides require all
+  // three fields to keep the firmware row consistent.
+  async function saveLogToggles() {
     wait = true;
-    await fetch(getHttpUrl('/iot/button'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        tag: 'button2',
-        btnPIDDoorLog: recordDoors ? 'Turn On': 'Turn Off',
-      }),
-    });
-    pid.logDoors = recordDoors ? '1' : '0';
-    wait = false;
-  }
-
-  async function postRefrigButton() {
-    wait = true;
-    await fetch(getHttpUrl('/iot/button'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        tag: 'button2',
-        btnPIDRefrigLog: recordRefrig ? 'Turn On': 'Turn Off',
-      }),
-    });
+    pid.logDoors  = recordDoors  ? '1' : '0';
     pid.logRefrig = recordRefrig ? '1' : '0';
-    wait = false;
+    const wrap      = parseInt(pid.pidWrap,   10) || 0;
+    const logDoors  = parseInt(pid.logDoors,  10) || 0;
+    const logRefrig = parseInt(pid.logRefrig, 10) || 0;
+    try {
+      await writeProto(TAG.PidLogSettings, { wrap, logDoors, logRefrig });
+      original = { ...pid };  // toggle survived; suppress dirty-prompt
+    } finally {
+      wait = false;
+    }
   }
 
+  // Clear handler: bridge truncates pg `pid_log` table directly
+  // (rpi5 Postgres lives outside firmware — see /memories/repo/pg-logging-on-rpi5.md).
+  // The /iot/button shape is preserved for now; once /api/logs/clear-pid
+  // gets a typed route this can move to a fetch on that path.
   async function postClearButton() {
     wait = true;
     await fetch(getHttpUrl('/iot/button'), {
@@ -133,7 +139,7 @@
               background="bg-gray-400"
               active="bg-primary-900"
               bind:checked={recordDoors}
-              on:change={postDoorsButton}
+              on:change={saveLogToggles}
               data-touch-interactive="true"
             />
           </div>
@@ -154,7 +160,7 @@
               background="bg-gray-400"
               active="bg-primary-900"
               bind:checked={recordRefrig}
-              on:change={postRefrigButton}
+              on:change={saveLogToggles}
               data-touch-interactive="true"
             />
           </div>
@@ -182,7 +188,16 @@
         </Column>
       </Row>
     </Table>
-    <SaveButton edit={true} bind:wait={wait} data={pid} bind:original={data}  route="pid" autoSave />
+    <SaveButton edit={true} bind:wait={wait} data={pid} bind:original={original}  route="pid" autoSave
+      onSave={async (d: { pidWrap: string, logDoors: string, logRefrig: string }) => {
+        // wrap/logDoors/logRefrig are bool toggles where 0 = OFF.
+        // forceFieldRegistry.ts pins all three on the wire so OFF
+        // propagates correctly (proto3 would otherwise drop the 0).
+        const wrap      = parseInt(d.pidWrap,   10) || 0;
+        const logDoors  = parseInt(d.logDoors,  10) || 0;
+        const logRefrig = parseInt(d.logRefrig, 10) || 0;
+        await writeProto(TAG.PidLogSettings, { wrap, logDoors, logRefrig });
+      }} />
   </Card>
 </GellertPage>
 

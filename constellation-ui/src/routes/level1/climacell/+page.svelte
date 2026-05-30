@@ -4,17 +4,17 @@
 	import Card from "$lib/ui/Card.svelte";
 	import Button from "$lib/ui/Button.svelte";
 	import { navigationStore } from "$lib/store";
-  import { getHttpUrl } from "$lib/business/util";
 	import Table from "$lib/ui/Table.svelte";
 	import Row from "$lib/ui/Row.svelte";
   import Column from "$lib/ui/Column.svelte";
 	import RunTime from "$lib/components/RunTime.svelte";
 	import SaveButton from "$lib/components/SaveButton.svelte";
-  import { cloneDeep, isEqual } from "lodash-es";
+  import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
   import { FooterNavigationAdapter } from "$lib/utils/footerNavigationAdapter";
-
-  export let data: { runtimes: string[] };
+  import { climacellTimes as climacellTimesStore } from "$lib/business/protoStores";
+  import { writeProtoRaw } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
 
   let title = $t('level1.climacell.climacell-control');
 
@@ -28,7 +28,17 @@
 
   $: currentRunOperation = '2';
 
-  $: runtimes = [] as string[];
+  let runtimes: string[] = [];
+  let original: string[] = [];
+  let hydrated = false;
+
+  $: if (!hydrated && $climacellTimesStore) {
+    const slots = $climacellTimesStore.hourlyEfficiency ?? [];
+    runtimes = Array.from({ length: 48 }, (_, i) => String(slots[i] ?? '1'));
+    original = [...runtimes];
+    hydrated = true;
+    ready = true;
+  }
 
   let operationColor: Record<string, string> = {
     '1': 'bg-red-500 !text-black',
@@ -41,15 +51,9 @@
     return operationColor[value] + (doHighLight ? ' ring-4 ring-white' : '');
   }
 
-  onMount(async () => {
-    try {
-      $navigationStore.data = getHttpUrl('/iot/climacelltimes');
-      $navigationStore.isDirty = () => !isEqual(runtimes, data.runtimes)
-      runtimes = cloneDeep(data.runtimes);
-    } catch (e) {
-      console.error(e);
-    }
-		ready = true;
+  onMount(() => {
+    $navigationStore.isDirty = () => !isEqual(runtimes, original);
+    if (hydrated) ready = true;
   });
 
   function selectAll() {
@@ -108,7 +112,22 @@
       <Button class="ml-4 !bg-lime-300 !text-black {currentRunOperation === '3' && 'ring-4 ring-lime-500'}" size="xl" on:click={auto} disabled={!edit}>{ $t('global.auto') }</Button>
       <Button class="ml-4 !bg-blue-400 !text-black {currentRunOperation === '4' && 'ring-4 ring-blue-500'}" size="xl" on:click={cooling} disabled={!edit}>{ $t('level1.climacell.cooling-only') }</Button>
     </div>
-    <SaveButton {edit} bind:wait={wait} data={runtimes} bind:original={data.runtimes} route="climacelltimes" autoSave />
+    <SaveButton {edit} bind:wait={wait} data={runtimes} bind:original={original} autoSave
+      onSave={async (d: string[]) => {
+        /* Firmware decoder reads field 1 as repeated UNPACKED varints
+         * (one tag 0x08 + varint per slot, 48 slots). proto3 default
+         * "packed" encoding from ts-proto would be silently ignored, so
+         * we hand-build the inner bytes and bypass the typed encoder.
+         * See apply_climacell_times in nova_dataexc.c. */
+        const buf: number[] = [];
+        for (let i = 0; i < 48; i++) {
+          const v = Number(d[i] ?? 1) | 0;
+          buf.push(0x08); // (1 << 3) | wireType 0 (varint)
+          // value range 1..4 → single-byte varint
+          buf.push(v & 0x7f);
+        }
+        await writeProtoRaw(TAG.ClimacellTimes, new Uint8Array(buf));
+      }} />
   </Card>
 </GellertPage>
 

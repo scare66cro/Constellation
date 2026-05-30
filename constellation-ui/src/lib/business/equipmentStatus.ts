@@ -1,495 +1,488 @@
-import { get } from "svelte/store";
-import { equipmentOptionsStore } from "$lib/store";
-import { t } from "svelte-i18n";
+// ════════════════════════════════════════════════════════════════════════
+// equipmentStatus.ts — proto-direct equipment row builder
+//
+// History: this file used to read a 102-element flat CSV array
+// (`Equipment.eqStatus[N]`) at hand-positioned legacy AS2 byte offsets
+// (`eqStatus[37]` for fan remote, `eqStatus[79]` for refrig stage input,
+// etc.). Those offsets only matched the AS2 wire format coincidentally —
+// the proto bridge flattened typed `EquipState` items into uniform
+// 3-tuples (outputOn/remoteOff/alarm), so most positional reads were
+// silently incorrect.
+//
+// New design: pages bind directly to typed `EquipState` items via
+// `Equipment.eqByIdx(EQ.X)`. Input semantics (closed=good vs
+// open=good vs standby) come from the shared `interpretEquipmentInput`
+// helper in `equipmentEnum.ts`. Software-switch state (Auto/Off/Manual)
+// comes from `EquipState.remoteOff` directly — no CPLD panel switches
+// in Constellation, so no synthesized switch byte either.
+//
+// Pages still receive the same render-shape they always did
+// (`equipmentStatus`, `panelSwitchStatus`, `outputColor`, …) so the
+// EquipmentRow / RefrigerationRow / HumidifierRow / DoorDiagRow
+// components do not change.
+// ════════════════════════════════════════════════════════════════════════
 
-export type Equipment = { eqStatus: string[],  pwmConfig: string[], outputConfig: string[], ioNames: string[], auxSwitches: string[], miscData: string[], systemMode: string };
+import { get } from 'svelte/store';
+import { t } from 'svelte-i18n';
+import type { IoEntry } from '$lib/business/ioConfig';
+import type { EquipState } from '../../../../generated/ts/agristar/equipment.js';
+import {
+	EQ,
+	REMOTE,
+	interpretEquipmentInput,
+	interpretRemoteState,
+} from './equipmentEnum.js';
 
-export function getOutputColor(value: string): string {
-  return value === '1' ? 'text-green-700 font-bold' : 'text-red-500 font-bold';
+/**
+ * Composite payload consumed by the equipment page and any other
+ * surface that needs an "everything-equipment" snapshot. Built by
+ * `equipmentComposite` in `protoStores.ts`.
+ *
+ *   eqItems     — typed EquipState array, one per firmware-emitted item
+ *   eqByIdx     — accessor: returns the EquipState for an EQ enum value
+ *                 (or undefined if firmware didn't emit one for that slot)
+ *   pwmConfig   — legacy `eqIdx:enabled:portId:duty` strings (still CSV
+ *                 because the PWM page hasn't been migrated yet)
+ *   outputConfig — eq-indexed string array; '-1' when unassigned. Pages
+ *                  test `outputConfig[eqIdx] !== '-1'` to gate row render.
+ *   ioNames     — IoEntry[] for label resolution and renamable lookup
+ *   auxSwitches — legacy CPLD aux switch state (carried for layout
+ *                 decisions only; software switches replace functional use)
+ *   miscData    — preserved 14-element legacy misc CSV (cavity / defrost)
+ *   systemMode  — basicSetup.systemMode as string
+ */
+export type Equipment = {
+	eqItems: EquipState[];
+	eqByIdx: (idx: number) => EquipState | undefined;
+	pwmConfig: string[];
+	outputConfig: string[];
+	ioNames: IoEntry[];
+	auxSwitches: string[];
+	miscData: string[];
+	systemMode: string;
+};
+
+export function getOutputColor(on: boolean): string {
+	return on ? 'text-green-700 font-bold' : 'text-red-500 font-bold';
 }
 
-export function exists(ioName: string[], outConfig: string[]) {
-  return (ioName && outConfig[parseInt(ioName[4], 10)] !== '-1')
+/**
+ * Whether an equipment row should render. For real equipment with an
+ * IoEntry, the cell exists when its index is mapped to a wired output
+ * (outConfig[idx] !== '-1'). Aggregate rows (cure, refrig master, etc.)
+ * pass `undefined` and always render.
+ */
+export function exists(io: IoEntry | undefined, outConfig: string[]): boolean {
+	if (!io) return true;
+	return outConfig[io.index] !== '-1';
 }
 
-export function renamedAs(ioName: string[], defaultName: string): string {
-  return (ioName[3] === '1' && ioName[0] !== defaultName) ? ioName[0] : defaultName;
+/**
+ * Pick the user-renamed label when the firmware marks the entry as
+ * renamable AND the user has actually changed it. Otherwise fall back
+ * to the i18n default for the equipment row.
+ */
+export function renamedAs(io: IoEntry | undefined, defaultName: string): string {
+	if (!io) return defaultName;
+	return io.renamable && io.name && io.name !== defaultName ? io.name : defaultName;
 }
 
-function buildDoorDiagEquipment(
-  equipment: Equipment, eq: string,
-  name: string, btn: string, obj: string[], diagStatus: string, switchStatus: string,
-  outputStatus: string, inputStatus: string, edit: boolean, target: string,
-) {
-  const equipmentStore = get(equipmentOptionsStore);
+/* ───────────────────────────────────────────────────────────────────── */
+/* Internal helpers                                                       */
+/* ───────────────────────────────────────────────────────────────────── */
 
-  let panel: { status: string | undefined, color: string | undefined } = { status: undefined, color: undefined };
-  panel = equipmentStore.getSwitchStatus(switchStatus);
-
-  let input = equipmentStore.getDoorDiagStatus(inputStatus, outputStatus, diagStatus);
-  return {
-    exists: exists(obj, equipment.outputConfig),
-    name: eq,
-    equipmentName: renamedAs(obj, name),
-    equipmentStatus: input.status,
-    panelSwitchStatus: panel.status,
-    equipOn: true,
-    diagOn: diagStatus === '2',
-    remSwitchName: btn,
-    outputColor: getOutputColor(outputStatus),
-    statusColor: input.color,
-    panelSwitchColor: panel.color,
-    edit,
-    target,
-  };
+/** Translate an i18n key through the global svelte-i18n store. */
+function tr(key: string): string {
+	const $t = get(t);
+	return $t(key);
 }
 
-function buildEquipment(
-  equipment: Equipment,
-  eq: string,
-  name: string, btn: string, obj: string[],
-  switchStatus: string, remoteStatus: string,
-  outputStatus: string, inputStatus: string, edit: boolean, switch1Use: string[], switch2Use: string[],
-  auxiliary = -1,
-) {
-  const equipmentStore = get(equipmentOptionsStore);
+/** Render-shape returned by every `getEquipment` case. Matches the
+ * props historically expected by the EquipmentRow / RefrigerationRow /
+ * HumidifierRow / DoorDiagRow components. */
+type RowShape = {
+	exists: boolean;
+	name: string;
+	equipmentName: string;
+	equipmentStatus: string | undefined;
+	panelSwitchStatus: string | undefined;
+	equipOn: boolean;
+	diagOn?: boolean;
+	remoteStatus?: string;
+	remSwitchName: string;
+	outputColor: string;
+	statusColor: string | undefined;
+	panelSwitchColor: string | undefined;
+	edit: boolean;
+	target?: string;
+	/** Hides the MANUAL option in EquipmentRow's mode dropdown.
+	 * Used by 2-way switches (currently only cure). */
+	allowManual?: boolean;
+	/** Per-row override of the OFF / MANUAL dropdown labels. Doors
+	 * use "Close" / "Open" instead of "Off" / "Manual" — same wire
+	 * values, more intuitive for an actuator. */
+	offLabel?: string;
+	manualLabel?: string;
+};
 
-  let panel: { status: string | undefined, color: string | undefined } = { status: undefined, color: undefined };
-  if (auxiliary === -1) {
-      panel = equipmentStore.getSwitchStatus(switchStatus);
-  } else {
-      panel = equipmentStore.getAuxSwitch(edit, switchStatus, switch1Use, switch2Use, auxiliary);
-  }
+/** Standard equipment row builder. Reads input semantics from the
+ * shared category table and software-switch state from `remoteOff`. */
+function buildRow(
+	equipment: Equipment,
+	rowName: string,
+	defaultLabel: string,
+	btn: string,
+	io: IoEntry | undefined,
+	state: EquipState | undefined,
+	edit: boolean,
+): RowShape {
+	const remote = state?.remoteOff ?? REMOTE.AUTO;
+	const inputOn = state?.inputOn ?? false;
+	const outputOn = state?.outputOn ?? false;
+	const eqIdx = state?.eqIndex ?? io?.index ?? -1;
 
-  let input = equipmentStore.getStatus(equipment, eq, remoteStatus, inputStatus, outputStatus);
-  return {
-    exists: exists(obj, equipment.outputConfig),
-    name: eq,
-    equipmentName: renamedAs(obj, name),
-    equipmentStatus: input.status,
-    panelSwitchStatus: panel.status,
-    equipOn: remoteStatus !== '1',
-    remoteStatus,
-    remSwitchName: btn,
-    outputColor: getOutputColor(outputStatus),
-    statusColor: input.color,
-    panelSwitchColor: panel.color,
-    edit : edit,
-  };
+	const sw = interpretRemoteState(remote);
+	const inSt = interpretEquipmentInput(eqIdx, inputOn);
+
+	return {
+		exists: exists(io, equipment.outputConfig),
+		name: rowName,
+		equipmentName: renamedAs(io, defaultLabel),
+		equipmentStatus: tr(inSt.statusKey),
+		panelSwitchStatus: tr(sw.statusKey),
+		equipOn: remote !== REMOTE.OFF,
+		remoteStatus: String(remote),
+		remSwitchName: btn,
+		outputColor: getOutputColor(outputOn),
+		statusColor: inSt.color,
+		panelSwitchColor: sw.color,
+		edit,
+	};
 }
 
-function buildRefrigEquipment(
-  equipment: Equipment, eq: string,
-  name: string, btn: string, obj: string[], diagStatus: string, remoteStatus: string,
-  outputStatus: string, inputStatus: string, edit: boolean,
-) {
-  const equipmentStore = get(equipmentOptionsStore);
+/** Refrigeration-stage / master row. Adds the `diagOn` boolean used by
+ * RefrigerationRow to render the diagnostic indicator (alarm severity
+ * critical = stage in diag mode). */
+function buildRefrigRow(
+	equipment: Equipment,
+	rowName: string,
+	defaultLabel: string,
+	btn: string,
+	io: IoEntry | undefined,
+	state: EquipState | undefined,
+	masterRemote: number,
+	edit: boolean,
+): RowShape {
+	// Refrig stages display the master refrigeration's remoteOff in the
+	// switch column (per AS2 convention) — individual stage cannot be
+	// turned off from the UI; user toggles the master.
+	const sw = interpretRemoteState(masterRemote);
+	const inputOn = state?.inputOn ?? false;
+	const outputOn = state?.outputOn ?? false;
+	const alarm = state?.alarm ?? 0;
+	const eqIdx = state?.eqIndex ?? io?.index ?? -1;
+	const diagOn = alarm === 2;
 
-  let panel: { status: string | undefined, color: string | undefined } = { status: undefined, color: undefined };
-  panel = equipmentStore.getSwitchStatus(equipment.eqStatus[15]);
-  let input = equipmentStore.getRefrigStatus(remoteStatus, inputStatus, outputStatus, diagStatus);
-  return {
-    exists: exists(obj, equipment.outputConfig),
-    name: eq,
-    equipmentName: renamedAs(obj, name),
-    equipmentStatus: input.status,
-    panelSwitchStatus: panel.status,
-    equipOn: remoteStatus !== '1',
-    diagOn: diagStatus === '2',
-    remoteStatus,
-    remSwitchName: btn,
-    outputColor: getOutputColor(outputStatus),
-    statusColor: input.color,
-    panelSwitchColor: panel.color,
-    edit : edit,
-  };
+	const inSt = interpretEquipmentInput(eqIdx, inputOn);
+	// Diagnostic mode wins the status display.
+	const status = diagOn
+		? { statusKey: 'global.diag-on', color: 'text-blue-500' }
+		: { statusKey: inSt.statusKey, color: inSt.color };
+
+	return {
+		exists: exists(io, equipment.outputConfig),
+		name: rowName,
+		equipmentName: renamedAs(io, defaultLabel),
+		equipmentStatus: tr(status.statusKey),
+		panelSwitchStatus: tr(sw.statusKey),
+		equipOn: masterRemote !== REMOTE.OFF,
+		diagOn,
+		remoteStatus: String(masterRemote),
+		remSwitchName: btn,
+		outputColor: getOutputColor(outputOn),
+		statusColor: status.color,
+		panelSwitchColor: sw.color,
+		edit,
+	};
 }
 
-function getDoorStatus(main: string[]): string {
-  if (isNaN(parseInt(main[15]))) {
-    return main[15];
-  } else {
-    return main[15] + '%';
-  }
+/** Door diagnostic row. Door % open comes from the front-matter
+ * `main[15]` slot (still legacy CSV — front-matter migration is a
+ * separate phase). The diag state lives in the door equipment alarm. */
+function buildDoorDiagRow(
+	equipment: Equipment,
+	rowName: string,
+	defaultLabel: string,
+	btn: string,
+	io: IoEntry | undefined,
+	state: EquipState | undefined,
+	doorPercent: string,
+	edit: boolean,
+	target: string,
+): RowShape {
+	const remote = state?.remoteOff ?? REMOTE.AUTO;
+	const outputOn = state?.outputOn ?? false;
+	const alarm = state?.alarm ?? 0;
+	const diagOn = alarm === 2;
+
+	const sw = interpretRemoteState(remote);
+	// Diag mode shows "open"/"close" depending on the alarm code; if the
+	// door equipment is healthy the row falls back to the % open string.
+	let statusKey = 'global.off';
+	let color = 'text-red-500 font-bold';
+	if (diagOn) {
+		statusKey = 'global.open';
+		color = 'text-blue-500 font-bold';
+	} else if (alarm === 1) {
+		statusKey = 'global.close';
+		color = 'text-red-700 font-bold';
+	} else if (alarm === 0) {
+		statusKey = 'global.diag-off';
+		color = 'text-black font-bold';
+	}
+
+	return {
+		exists: exists(io, equipment.outputConfig),
+		name: rowName,
+		equipmentName: renamedAs(io, defaultLabel),
+		equipmentStatus: doorPercent || tr(statusKey),
+		panelSwitchStatus: tr(sw.statusKey),
+		equipOn: remote !== REMOTE.OFF,
+		diagOn,
+		remSwitchName: btn,
+		outputColor: getOutputColor(outputOn),
+		statusColor: color,
+		panelSwitchColor: sw.color,
+		edit,
+		target,
+	};
 }
 
-export function getEquipment(equipment: Equipment, eq: string, edit: boolean, main: string[]) {
-  const $t = get(t);
-  const switch1Use = equipment.auxSwitches[0].split(':');
-  const switch2Use = equipment.auxSwitches[1].split(':');
-
-  switch (eq) {
-    case 'fan':
-      return buildEquipment(equipment, eq, $t('level2.failures1.fan'), 'fanBtn',
-        [$t('equipment.fan-green-light'), '', '1'],
-        equipment.eqStatus[0],
-        equipment.eqStatus[37],
-        equipment.eqStatus[2],
-        equipment.eqStatus[1],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'climacell':
-      return buildEquipment(equipment, eq, $t('equipment.climacell'), 'climacellBtn', 
-        equipment.ioNames[3].split(':'),
-        equipment.eqStatus[3],
-        equipment.eqStatus[38],
-        equipment.eqStatus[5],
-        equipment.eqStatus[4],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'heat':
-      return buildEquipment(equipment, eq, $t('equipment.heat'), 'heatBtn', 
-        equipment.ioNames[4].split(':'),
-        equipment.eqStatus[48],
-        equipment.eqStatus[48],
-        equipment.eqStatus[28],
-        equipment.eqStatus[27],
-        edit,
-        switch1Use, switch2Use,
-        -2
-      );
-    case 'cavity':
-      return buildEquipment(equipment, eq, $t('equipment.cavity-heat'), 'cavHeatBtn', 
-        equipment.ioNames[5].split(':'),
-        equipment.eqStatus[36],
-        equipment.eqStatus[49], 
-        equipment.eqStatus[32], 
-        equipment.eqStatus[31], 
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'pile':
-      return buildEquipment(equipment, eq, $t('equipment.cavity-heat'), 'cavHeatBtn', 
-        [$t('equipment.pile-fan'), '', '', '1'],
-        equipment.eqStatus[36],
-        equipment.eqStatus[49], 
-        equipment.eqStatus[32], 
-        equipment.eqStatus[31], 
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'aux1Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-1'), 'aux1Btn', 
-        equipment.ioNames[25].split(':'),
-        equipment.eqStatus[47],
-        equipment.eqStatus[47], 
-        equipment.eqStatus[61], 
-        equipment.eqStatus[60],
-        edit,
-        switch1Use, switch2Use,
-        1, 
-      );
-    case 'aux2Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-2'), 'aux2Btn', 
-        equipment.ioNames[26].split(':'),
-        equipment.eqStatus[53],
-        equipment.eqStatus[53], 
-        equipment.eqStatus[63], 
-        equipment.eqStatus[62],
-        edit,
-        switch1Use, switch2Use,
-        2, 
-      );
-    case 'aux3Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-3'), 'aux3Btn', 
-        equipment.ioNames[27].split(':'),
-        equipment.eqStatus[94],
-        equipment.eqStatus[94], 
-        equipment.eqStatus[65], 
-        equipment.eqStatus[64],
-        edit,
-        switch1Use, switch2Use,
-        3, 
-      );
-    case 'aux4Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-4'), 'aux4Btn', 
-        equipment.ioNames[28].split(':'),
-        equipment.eqStatus[95],
-        equipment.eqStatus[95], 
-        equipment.eqStatus[67], 
-        equipment.eqStatus[66],
-        edit,
-        switch1Use, switch2Use,
-        4, 
-      );
-    case 'aux5Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-5'), 'aux5Btn', 
-        equipment.ioNames[29].split(':'),
-        equipment.eqStatus[96],
-        equipment.eqStatus[96], 
-        equipment.eqStatus[69], 
-        equipment.eqStatus[68],
-        edit,
-        switch1Use, switch2Use,
-        5, 
-      );
-    case 'aux6Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-6'), 'aux6Btn', 
-        equipment.ioNames[30].split(':'),
-        equipment.eqStatus[97],
-        equipment.eqStatus[97], 
-        equipment.eqStatus[71], 
-        equipment.eqStatus[70],
-        edit,
-        switch1Use, switch2Use,
-        6, 
-      );
-    case 'aux7Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-7'), 'aux7Btn', 
-        equipment.ioNames[31].split(':'),
-        equipment.eqStatus[98],
-        equipment.eqStatus[98], 
-        equipment.eqStatus[73], 
-        equipment.eqStatus[72],
-        edit,
-        switch1Use, switch2Use,
-        7, 
-      );
-    case 'aux8Switch':
-      return buildEquipment(equipment, eq, $t('equipment.auxiliary-8'), 'aux8Btn', 
-        equipment.ioNames[32].split(':'),
-        equipment.eqStatus[99],
-        equipment.eqStatus[99],
-        equipment.eqStatus[75],
-        equipment.eqStatus[74],
-        edit,
-        switch1Use, switch2Use,
-        8, 
-      );
-    case 'refrig':
-      let stRefrig = 0;
-      for (let i = 0; i < 10; i += 1) {
-        if (equipment.outputConfig[i + 13] !== '-1' && equipment.eqStatus[i + 17] === '1') {
-          stRefrig = 1;
-          if (equipment.eqStatus[i < 6 ? i + 41 : (i - 6) + 89] === '2') {
-            stRefrig = 2;
-          }
-        }
-      }
-      const refrigMainRow = buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration'), 'refrigBtn',
-        ['', '', '0'],
-        stRefrig.toString(),
-        equipment.eqStatus[50],
-        (equipment.eqStatus[16] === '0' || stRefrig === 1) ? '1' : '0',
-        equipment.eqStatus[79],
-        edit,
-      );
-      if (stRefrig === 0) {
-        refrigMainRow.outputColor = 'text-red-500 font-bold';
-      }
-      return refrigMainRow;
-    case 'doordiag':
-      return buildDoorDiagEquipment(equipment, eq, $t('level2.pid.fresh-air-doors'), 'doorDiag', 
-      equipment.ioNames[0].split(':'),
-      equipment.eqStatus[100],
-      equipment.eqStatus[29],
-      equipment.eqStatus[15],
-      getDoorStatus(main),
-      edit,
-      equipment.eqStatus[101],
-    );
-
-    case 'refrig1':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-1'), 'refr1Btn',
-        equipment.ioNames[13].split(':'),
-        equipment.eqStatus[41],
-        equipment.eqStatus[50],
-        equipment.eqStatus[17],
-        equipment.eqStatus[79],
-        edit,
-      );
-    case 'refrig2':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-2'), 'refr2Btn',
-        equipment.ioNames[14].split(':'),
-        equipment.eqStatus[42],
-        equipment.eqStatus[50],
-        equipment.eqStatus[18],
-        equipment.eqStatus[80],
-        edit,
-      );
-    case 'refrig3':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-3'), 'refr3Btn',
-        equipment.ioNames[15].split(':'),
-        equipment.eqStatus[43],
-        equipment.eqStatus[50],
-        equipment.eqStatus[19],
-        equipment.eqStatus[81],
-        edit,
-      );
-    case 'refrig4':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-4'), 'refr4Btn',
-        equipment.ioNames[16].split(':'),
-        equipment.eqStatus[44],
-        equipment.eqStatus[50],
-        equipment.eqStatus[20],
-        equipment.eqStatus[82],
-        edit,
-      );
-    case 'refrig5':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-5'), 'refr5Btn',
-        equipment.ioNames[17].split(':'),
-        equipment.eqStatus[45],
-        equipment.eqStatus[50],
-        equipment.eqStatus[21],
-        equipment.eqStatus[83],
-        edit,
-      );
-    case 'refrig6':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-6'), 'refr6Btn',
-        equipment.ioNames[18].split(':'),
-        equipment.eqStatus[46],
-        equipment.eqStatus[50],
-        equipment.eqStatus[22],
-        equipment.eqStatus[84],
-        edit,
-      );
-    case 'refrig7':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-7'), 'refr7Btn',
-        equipment.ioNames[19].split(':'),
-        equipment.eqStatus[89],
-        equipment.eqStatus[50],
-        equipment.eqStatus[23],
-        equipment.eqStatus[85],
-        edit,
-      );
-    case 'refrig8':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.refrigeration-stage-8'), 'refr8Btn',
-        equipment.ioNames[20].split(':'),
-        equipment.eqStatus[90],
-        equipment.eqStatus[50],
-        equipment.eqStatus[24],
-        equipment.eqStatus[86],
-        edit,
-      );
-    case 'defrost1':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.defrost-1'), 'defrost1Btn',
-        equipment.ioNames[21].split(':'),
-        equipment.eqStatus[91],
-        equipment.eqStatus[50],
-        equipment.eqStatus[25],
-        equipment.eqStatus[87],
-        edit,
-      );
-    case 'defrost2':
-      return buildRefrigEquipment(equipment, eq, $t('equipment.defrost-2'), 'defrost2Btn',
-        equipment.ioNames[22].split(':'),
-        equipment.eqStatus[92],
-        equipment.eqStatus[50],
-        equipment.eqStatus[26],
-        equipment.eqStatus[88],
-        edit,
-      );
-    case 'humid1':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-1-head'), 'humid1PumpBtn', 
-        equipment.ioNames[7].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[39], 
-        equipment.eqStatus[10], 
-        equipment.eqStatus[9],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'pump1':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-1-pump'), 'humid1PumpBtn', 
-        equipment.ioNames[8].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[39], 
-        equipment.eqStatus[11], 
-        equipment.eqStatus[9],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'humid2':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-2-head'), 'humid2PumpBtn',
-        equipment.ioNames[7].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[40], 
-        equipment.eqStatus[13], 
-        equipment.eqStatus[12],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'pump2':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-2-pump'), 'humid2PumpBtn',
-        equipment.ioNames[7].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[40], 
-        equipment.eqStatus[14], 
-        equipment.eqStatus[12],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'humid3':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-3-head'), 'humid3PumpBtn',
-        equipment.ioNames[7].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[93], 
-        equipment.eqStatus[77], 
-        equipment.eqStatus[76],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'pump3':
-      return buildEquipment(equipment, eq, $t('equipment.humidifier-3-pump'), 'humid3PumpBtn',
-        equipment.ioNames[7].split(':'),
-        equipment.eqStatus[8],
-        equipment.eqStatus[93], 
-        equipment.eqStatus[78], 
-        equipment.eqStatus[76],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'door':
-      return buildEquipment(equipment, eq, $t('level2.pid.fresh-air-doors'), 'doorBtn', 
-        equipment.ioNames[0].split(':'),
-        equipment.eqStatus[29],
-        '', 
-        equipment.eqStatus[15],
-        getDoorStatus(main),
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'cure':
-      return buildEquipment(equipment, eq, $t('global.cure'), 'cureBtn',
-        [$t('global.cure'), '', '1'],
-        equipment.eqStatus[8], equipment.eqStatus[52],
-        equipment.eqStatus[8], 
-        equipment.eqStatus[8] === '1' && equipment.eqStatus[2] === '1' && equipment.eqStatus[52] === '0' ? '0' : '1',
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'burner':
-      return buildEquipment(equipment, eq, $t('equipment.burner'), 'burnerBtn',
-        equipment.ioNames[6].split(':'),
-        equipment.eqStatus[3],
-        equipment.eqStatus[51],
-        equipment.eqStatus[7],
-        equipment.eqStatus[6],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'lights1':
-      return buildEquipment(equipment, eq, $t('equipment.bay-lights-1'), 'lights1Btn',
-        equipment.ioNames[23].split(':'),
-        equipment.eqStatus[54],
-        equipment.eqStatus[54],
-        equipment.eqStatus[57],
-        equipment.eqStatus[56],
-        edit,
-        switch1Use, switch2Use,
-      );
-    case 'lights2':
-      return buildEquipment(equipment, eq, $t('equipment.bay-lights-2'), 'lights2Btn',
-        equipment.ioNames[24].split(':'),
-        equipment.eqStatus[55],
-        equipment.eqStatus[55],
-        equipment.eqStatus[59],
-        equipment.eqStatus[58],
-        edit,
-        switch1Use, switch2Use,
-      );
-  }
+function getDoorPercent(main: string[] | undefined): string {
+	if (!main) return '';
+	const v = main[15];
+	if (v === undefined) return '';
+	return isNaN(parseInt(v)) ? v : `${v}%`;
 }
 
+/* ───────────────────────────────────────────────────────────────────── */
+/* Public entry point                                                     */
+/* ───────────────────────────────────────────────────────────────────── */
+
+/**
+ * Build the render-shape for a single equipment row. The page calls
+ * this once per row name, both at first paint and on every
+ * `equipmentComposite` update.
+ *
+ * `eq` is the row identifier (matches the legacy AS2 string keys
+ * 'fan', 'climacell', 'refrig', 'refrig1'..'refrig8', 'humid1', etc.)
+ * — kept as strings so the equipment page's existing layout-decision
+ * code (`addEquipment(equipment, 'climacell', counts)`) does not need
+ * to change.
+ */
+export function getEquipment(
+	equipment: Equipment,
+	eq: string,
+	edit: boolean,
+	main: string[] | undefined,
+): RowShape | undefined {
+	const e = equipment.eqByIdx;
+	const refrigMaster = e(EQ.REFRIGERATION)?.remoteOff ?? REMOTE.AUTO;
+
+	switch (eq) {
+		case 'fan':
+			return buildRow(equipment, eq, tr('level2.failures1.fan'), 'fanBtn',
+				undefined, e(EQ.FAN), edit);
+		case 'climacell':
+			return buildRow(equipment, eq, tr('equipment.climacell'), 'climacellBtn',
+				equipment.ioNames[EQ.CLIMACELL], e(EQ.CLIMACELL), edit);
+		case 'heat':
+			return buildRow(equipment, eq, tr('equipment.heat'), 'heatBtn',
+				equipment.ioNames[EQ.HEAT], e(EQ.HEAT), edit);
+		case 'cavity':
+			return buildRow(equipment, eq, tr('equipment.cavity-heat'), 'cavHeatBtn',
+				equipment.ioNames[EQ.CAVITY_HEAT], e(EQ.CAVITY_HEAT), edit);
+		case 'pile':
+			return buildRow(equipment, eq, tr('equipment.cavity-heat'), 'cavHeatBtn',
+				undefined, e(EQ.CAVITY_HEAT), edit);
+		case 'burner':
+			return buildRow(equipment, eq, tr('equipment.burner'), 'burnerBtn',
+				equipment.ioNames[EQ.BURNER], e(EQ.BURNER), edit);
+
+		case 'aux1Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-1'), 'aux1Btn',
+				equipment.ioNames[EQ.AUX1], e(EQ.AUX1), edit);
+		case 'aux2Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-2'), 'aux2Btn',
+				equipment.ioNames[EQ.AUX2], e(EQ.AUX2), edit);
+		case 'aux3Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-3'), 'aux3Btn',
+				equipment.ioNames[EQ.AUX3], e(EQ.AUX3), edit);
+		case 'aux4Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-4'), 'aux4Btn',
+				equipment.ioNames[EQ.AUX4], e(EQ.AUX4), edit);
+		case 'aux5Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-5'), 'aux5Btn',
+				equipment.ioNames[EQ.AUX5], e(EQ.AUX5), edit);
+		case 'aux6Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-6'), 'aux6Btn',
+				equipment.ioNames[EQ.AUX6], e(EQ.AUX6), edit);
+		case 'aux7Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-7'), 'aux7Btn',
+				equipment.ioNames[EQ.AUX7], e(EQ.AUX7), edit);
+		case 'aux8Switch':
+			return buildRow(equipment, eq, tr('equipment.auxiliary-8'), 'aux8Btn',
+				equipment.ioNames[EQ.AUX8], e(EQ.AUX8), edit);
+
+		case 'refrig': {
+			// Aggregate refrigeration row. Output color tracks "any stage
+			// running"; diag tracks "any stage in critical alarm".
+			let anyOn = false;
+			let anyDiag = false;
+			for (let i = 0; i < 8; i++) {
+				const st = e(EQ.REFRIG_STAGE1 + i);
+				if (!st) continue;
+				if (st.outputOn) anyOn = true;
+				if (st.alarm === 2) anyDiag = true;
+			}
+			for (let i = 0; i < 2; i++) {
+				const st = e(EQ.REFRIG_DEFROST1 + i);
+				if (st?.alarm === 2) anyDiag = true;
+			}
+			const sw = interpretRemoteState(refrigMaster);
+			const status = anyDiag
+				? { statusKey: 'global.diag-on', color: 'text-blue-500' }
+				: anyOn
+					? { statusKey: 'global.on', color: 'text-green-700 font-bold' }
+					: { statusKey: 'global.off', color: 'text-red-500 font-bold' };
+			return {
+				exists: true,
+				name: eq,
+				equipmentName: tr('equipment.refrigeration'),
+				equipmentStatus: tr(status.statusKey),
+				panelSwitchStatus: tr(sw.statusKey),
+				equipOn: refrigMaster !== REMOTE.OFF,
+				diagOn: anyDiag,
+				remoteStatus: String(refrigMaster),
+				remSwitchName: 'refrigBtn',
+				outputColor: anyOn ? 'text-green-700 font-bold' : 'text-red-500 font-bold',
+				statusColor: status.color,
+				panelSwitchColor: sw.color,
+				edit,
+			};
+		}
+		case 'refrig1':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-1'), 'refr1Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE1], e(EQ.REFRIG_STAGE1), refrigMaster, edit);
+		case 'refrig2':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-2'), 'refr2Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE2], e(EQ.REFRIG_STAGE2), refrigMaster, edit);
+		case 'refrig3':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-3'), 'refr3Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE3], e(EQ.REFRIG_STAGE3), refrigMaster, edit);
+		case 'refrig4':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-4'), 'refr4Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE4], e(EQ.REFRIG_STAGE4), refrigMaster, edit);
+		case 'refrig5':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-5'), 'refr5Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE5], e(EQ.REFRIG_STAGE5), refrigMaster, edit);
+		case 'refrig6':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-6'), 'refr6Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE6], e(EQ.REFRIG_STAGE6), refrigMaster, edit);
+		case 'refrig7':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-7'), 'refr7Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE7], e(EQ.REFRIG_STAGE7), refrigMaster, edit);
+		case 'refrig8':
+			return buildRefrigRow(equipment, eq, tr('equipment.refrigeration-stage-8'), 'refr8Btn',
+				equipment.ioNames[EQ.REFRIG_STAGE8], e(EQ.REFRIG_STAGE8), refrigMaster, edit);
+		case 'defrost1':
+			return buildRefrigRow(equipment, eq, tr('equipment.defrost-1'), 'defrost1Btn',
+				equipment.ioNames[EQ.REFRIG_DEFROST1], e(EQ.REFRIG_DEFROST1), refrigMaster, edit);
+		case 'defrost2':
+			return buildRefrigRow(equipment, eq, tr('equipment.defrost-2'), 'defrost2Btn',
+				equipment.ioNames[EQ.REFRIG_DEFROST2], e(EQ.REFRIG_DEFROST2), refrigMaster, edit);
+
+		case 'humid1':
+			return buildRow(equipment, eq, tr('equipment.humidifier-1-head'), 'humid1PumpBtn',
+				equipment.ioNames[EQ.HUMID_HEAD1], e(EQ.HUMID_HEAD1), edit);
+		case 'pump1':
+			return buildRow(equipment, eq, tr('equipment.humidifier-1-pump'), 'humid1PumpBtn',
+				equipment.ioNames[EQ.HUMID_PUMP1], e(EQ.HUMID_PUMP1), edit);
+		case 'humid2':
+			return buildRow(equipment, eq, tr('equipment.humidifier-2-head'), 'humid2PumpBtn',
+				equipment.ioNames[EQ.HUMID_HEAD2], e(EQ.HUMID_HEAD2), edit);
+		case 'pump2':
+			return buildRow(equipment, eq, tr('equipment.humidifier-2-pump'), 'humid2PumpBtn',
+				equipment.ioNames[EQ.HUMID_PUMP2], e(EQ.HUMID_PUMP2), edit);
+		case 'humid3':
+			return buildRow(equipment, eq, tr('equipment.humidifier-3-head'), 'humid3PumpBtn',
+				equipment.ioNames[EQ.HUMID_HEAD3], e(EQ.HUMID_HEAD3), edit);
+		case 'pump3':
+			return buildRow(equipment, eq, tr('equipment.humidifier-3-pump'), 'humid3PumpBtn',
+				equipment.ioNames[EQ.HUMID_PUMP3], e(EQ.HUMID_PUMP3), edit);
+
+		case 'door':
+			// Force exists=true: the row's purpose is to drive the state
+			// machine (SW_FRESHAIR_AUTO gate) regardless of whether a
+			// physical DOORS output is wired. Replaces the legacy CPLD
+			// economizer auto-bypass removed in fw 0.A.46.
+			//
+			// Operator-friendly labels: doors are an actuator, so the
+			// MANUAL/OFF semantics map to OPEN/CLOSE on the wire (same
+			// remote_off values 2/1 — no protocol change). Firmware
+			// forces PWM_DOORS to MAX/MIN respectively in lp_engine_tick.
+			return {
+				...buildRow(equipment, eq, tr('level2.pid.fresh-air-doors'), 'doorBtn',
+					equipment.ioNames[EQ.DOORS], e(EQ.DOORS), edit),
+				exists: true,
+				offLabel: tr('global.close'),
+				manualLabel: tr('global.open'),
+			};
+		case 'doordiag':
+			return buildDoorDiagRow(equipment, eq, tr('level2.pid.fresh-air-doors'), 'doorDiag',
+				equipment.ioNames[EQ.DOORS], e(EQ.DOORS),
+				getDoorPercent(main), edit, '');
+
+		case 'cure': {
+			// Cure is operator-controlled via virtual remote_off slot
+			// EQ.CURE_VIRTUAL=63 (no real wired equipment, no input
+			// proving, AUTO/OFF only — MANUAL is meaningless because
+			// cure mode itself reshapes the device UI). LP firmware
+			// emits a synthetic EquipState{eq=63,remote_off} when
+			// SystemMode==Onion so the tile reflects persisted state
+			// after reload. Live activity proxy: fan running while cure
+			// is enabled (until a dedicated CureStatus proto exists).
+			const cure = e(EQ.CURE_VIRTUAL);
+			const remote = cure?.remoteOff ?? REMOTE.AUTO;
+			const sw = interpretRemoteState(remote);
+			const fanOn = e(EQ.FAN)?.outputOn ?? false;
+			const cureRunning = fanOn && remote !== REMOTE.OFF;
+			const status = cureRunning
+				? { statusKey: 'global.on', color: 'text-green-700 font-bold' }
+				: { statusKey: 'global.off', color: 'text-red-500 font-bold' };
+			return {
+				exists: true,
+				name: eq,
+				equipmentName: tr('global.cure'),
+				equipmentStatus: tr(status.statusKey),
+				panelSwitchStatus: tr(sw.statusKey),
+				equipOn: remote !== REMOTE.OFF,
+				remoteStatus: String(remote),
+				remSwitchName: 'cureBtn',
+				outputColor: getOutputColor(cureRunning),
+				statusColor: status.color,
+				panelSwitchColor: sw.color,
+				allowManual: false,
+				edit,
+			};
+		}
+
+		case 'lights1':
+			return buildRow(equipment, eq, tr('equipment.bay-lights-1'), 'lights1Btn',
+				equipment.ioNames[EQ.LIGHTS1], e(EQ.LIGHTS1), edit);
+		case 'lights2':
+			return buildRow(equipment, eq, tr('equipment.bay-lights-2'), 'lights2Btn',
+				equipment.ioNames[EQ.LIGHTS2], e(EQ.LIGHTS2), edit);
+	}
+	return undefined;
+}

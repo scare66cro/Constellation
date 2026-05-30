@@ -38,6 +38,9 @@
     "refrigeration-mode": "Refrigeration Mode",
     "password": "Password",
     "find": "Find",
+    "add": "Add",
+    "actions": "Actions",
+    "remove": "Remove",
     "on": "On",
     "off": "Off",
     "auto": "Auto",
@@ -74,6 +77,7 @@
     "no": "No",
     "yes": "Yes",
     "save": "Save",
+    "saved": "Saved",
     "saving": "Saving...",
     "loading": "Loading...",
     "uploading": "Uploading...",
@@ -178,7 +182,7 @@
     "current-fan-speed": "Current Fan Speed",
     "return-air-humidity": "Return Air Humidity",
     "outside-air-humidity": "Outside Air Humidity",
-    "stop": "Remote Off",
+    "stop": "Stop",
     "start": "Start",
     "air-cure-start-temperature": "Air Cure Start Temperature",
     "outside-air-blend": "Outside Air Blend",
@@ -222,6 +226,8 @@
     "moisture-loss": "Moisture Loss"
   },
   "equipment": {
+    "fan": "Fan",
+    "doors": "Doors",
     "fan-green-light": "Fan/Green Light",
     "climacell": "ClimaCell",
     "humidifier-1-head": "Humidifier 1 - Head",
@@ -256,7 +262,34 @@
     "bay-lights": "Bay Lights",
     "bay-lights-1": "Bay Lights 1",
     "bay-lights-2": "Bay Lights 2",
-    "cure": "Cure"
+    "cure": "Cure",
+    "power": "Power",
+    "remote-standby": "Remote Standby",
+    "refrigeration-standby": "Refrigeration Standby",
+    "air-flow": "Air Flow",
+    "red-light": "Red Light",
+    "yellow-light": "Yellow Light",
+    "pulse-door-power": "Pulse Door Power",
+    "pulse-door-open": "Pulse Door Open",
+    "pulse-door-close": "Pulse Door Close",
+    "start-stop": "Start/Stop Switch",
+    "fan-auto": "Fan Auto Switch",
+    "fan-manual": "Fan Manual Switch",
+    "fresh-air-auto": "Fresh Air Auto Switch",
+    "fresh-air-manual": "Fresh Air Manual Switch",
+    "climacell-auto": "ClimaCell Auto Switch",
+    "climacell-manual": "ClimaCell Manual Switch",
+    "humidifier-auto": "Humidifier Auto Switch",
+    "humidifier-manual": "Humidifier Manual Switch",
+    "refrigeration-auto": "Refrigeration Auto Switch",
+    "cure-auto": "Cure Auto Switch",
+    "burner-auto": "Burner Auto Switch",
+    "auxiliary-1-auto": "Auxiliary 1 Auto Switch",
+    "auxiliary-1-manual": "Auxiliary 1 Manual Switch",
+    "auxiliary-2-auto": "Auxiliary 2 Auto Switch",
+    "auxiliary-2-manual": "Auxiliary 2 Manual Switch",
+    "aux-low-limit": "Aux Low Limit",
+    "e-stop": "E-Stop"
   },
   "level1": {
     "alerts": {
@@ -358,7 +391,7 @@
       "view-as-graph": "View as Graph",
       "view-as-table": "View as Table",
       "download-to-file": "Download to File",
-      "sd-card-information": "SD Card Information",
+      "sd-card-information": "Storage Information",
       "view-on-screen": "View on Screen",
       "capacity-records": "Capacity (records)",
       "records-used": "Records Used",
@@ -478,7 +511,8 @@
       "until-plenum-setpoint-equals": "until plenum setpoint equals",
       "as-a-temperature-differential-of": "as a temperature differential of",
       "is-reached": "is reached",
-      "between-plenum-setpoint-and": "between plenum setpoint and"
+      "between-plenum-setpoint-and": "between plenum setpoint and",
+      "use-ramp-rate": "Use ramp rate"
     },
     "runclock": {
       "system-run-clock": "System Run Clock",
@@ -541,7 +575,22 @@
       "outside-temp": "Outside Temperature",
       "return-temp": "Return Temperature",
       "plenum-humidity": "Plenum Humidity",
-      "outside-humidity": "Outside Humidity"
+      "outside-humidity": "Outside Humidity",
+      "custom-4-20": "Custom 4-20 mA",
+      "define-custom-sensors": "Define Custom Sensors",
+      "display-unit": "Display Unit",
+      "eng-min": "Min (4 mA)",
+      "eng-max": "Max (20 mA)",
+      "unit-none": "\u2014",
+      "unit-percent": "%",
+      "unit-ppm": "ppm",
+      "unit-inh2o": "inH\u2082O",
+      "unit-volts": "V",
+      "unit-amps": "A",
+      "unit-cfm": "CFM",
+      "unit-fpm": "FPM",
+      "unit-temp420": "\u00b0F",
+      "unit-psi": "PSI"
     },
     "auxiliary": {
       "auxiliary-output-programming": "Auxiliary Output Programming",
@@ -678,7 +727,7 @@
       "history-log-settings": "History Log Settings",
       "a-record-will-be-taken-every": "A record will be taken every",
       "overwrite-old-records-if-necessary": "Overwrite old records if necessary",
-      "initialize-sd-card": "Initialize SD Card",
+      "initialize-sd-card": "Initialize Storage",
       "clear-history-log": "Clear History Log",
       "clear-activity-log": "Clear Activity Log"
     },
@@ -686,7 +735,16 @@
       "master-slave-local-mode-setup": "Master / Slave / Local Mode Setup",
       "local-default": "Local (Default)",
       "master": "Master",
-      "slave": "Slave"
+      "slave": "Slave",
+      "slave-list": "Slaves to push outside-air to",
+      "allowed-masters": "Allowed master IPs",
+      "active-master": "Active master",
+      "last-master-seen": "Last master push",
+      "last-temp": "Last received temp",
+      "last-humid": "Last received humidity",
+      "last-ok": "Last OK",
+      "not-yet-pushed": "Not yet pushed",
+      "discover": "Discover slaves"
     },
     "pid": {
       "pid-logs": "PID Logs",
@@ -733,7 +791,17 @@
       "no-groups": "No groups created yet",
       "assign-systems-to": "Assign systems to",
       "available-systems": "Available Systems",
-      "in-group": "In Group"
+      "in-group": "In Group",
+      "add-system": "Add Remote System",
+      "no-remote-systems": "No remote systems defined yet",
+      "status": "Status",
+      "last-seen": "Last Seen",
+      "online": "Online",
+      "offline": "Offline",
+      "healed-from": "healed from",
+      "searching": "Searching the local network…",
+      "no-candidates": "No new controllers found",
+      "just-now": "just now"
     },
     "service": {
       "sales-and-service-setup": "Sales and Service Setup"
@@ -745,8 +813,12 @@
       "save-current-system-settings-as-panel-default": "Save Current System Settings as Panel Default",
       "restore-to-panel-default-settings": "Restore to Panel Default Settings",
       "restore-to-factory-default-settings": "Restore to Factory Default Settings",
-      "available-saved-settings-files": "Available Saved Settings Files",
-      "save-restore-panel-settings": "Save/Restore Panel Settings"
+      "save-restore-panel-settings": "Save/Restore Panel Settings",
+      "choose-settings-file": "Choose a settings .json file to restore",
+      "restore-confirm": "This will overwrite current settings. Continue?",
+      "restore-success": "Restored {ok} of {total} settings groups.",
+      "restore-error": "Restore failed: {error}",
+      "download-error": "Download failed: {error}"
     },
     "table": {
       "error": "Error",

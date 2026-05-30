@@ -38,6 +38,9 @@
     "refrigeration-mode": "制冷模式转速",
     "password": "密码",
     "find": "查找",
+    "add": "添加",
+    "actions": "操作",
+    "remove": "移除",
     "on": "打开",
     "off": "关闭",
     "auto": "自动",
@@ -74,6 +77,7 @@
     "no": "否定",
     "yes": "确定",
     "save": "保存",
+    "saved": "已保存",
     "saving": "保存中...",
     "loading": "加载中...",
     "uploading": "上传中...",
@@ -177,7 +181,7 @@
     "current-fan-speed": "当前风扇转速",
     "return-air-humidity": "返回空气湿度",
     "outside-air-humidity": "室外空气湿度",
-    "stop": "远程关闭",
+    "stop": "停止",
     "start": "开始",
     "air-cure-start-temperature": "空气固化启动温度",
     "outside-air-blend": "仓库外空气混合",
@@ -221,6 +225,8 @@
     "moisture-loss": "水分流失"
   },
   "equipment": {
+    "fan": "风扇",
+    "doors": "门",
     "fan-green-light": "风扇/绿灯",
     "climacell": "ClimaCell",
     "humidifier-1-head": "加湿器1头",
@@ -255,7 +261,34 @@
     "bay-lights": "照明灯",
     "bay-lights-1": "照明灯 1",
     "bay-lights-2": "照明灯 2",
-    "cure": "固化"
+    "cure": "固化",
+    "power": "电源",
+    "remote-standby": "远程待机",
+    "refrigeration-standby": "制冷待机",
+    "air-flow": "气流",
+    "red-light": "红灯",
+    "yellow-light": "黄灯",
+    "pulse-door-power": "脉冲门电源",
+    "pulse-door-open": "脉冲门开",
+    "pulse-door-close": "脉冲门关",
+    "start-stop": "启停开关",
+    "fan-auto": "风扇自动开关",
+    "fan-manual": "风扇手动开关",
+    "fresh-air-auto": "新风自动开关",
+    "fresh-air-manual": "新风手动开关",
+    "climacell-auto": "ClimaCell 自动开关",
+    "climacell-manual": "ClimaCell 手动开关",
+    "humidifier-auto": "加湿器自动开关",
+    "humidifier-manual": "加湿器手动开关",
+    "refrigeration-auto": "制冷自动开关",
+    "cure-auto": "固化自动开关",
+    "burner-auto": "燃烧器自动开关",
+    "auxiliary-1-auto": "辅助1自动开关",
+    "auxiliary-1-manual": "辅助1手动开关",
+    "auxiliary-2-auto": "辅助2自动开关",
+    "auxiliary-2-manual": "辅助2手动开关",
+    "aux-low-limit": "辅助低温限位",
+    "e-stop": "紧急停止"
   },
   "level1": {
     "alerts": {
@@ -357,7 +390,7 @@
       "view-as-graph": "查看为图形",
       "view-as-table": "查看为表格",
       "download-to-file": "下载到文件",
-      "sd-card-information": "SD卡信息",
+      "sd-card-information": "存储信息",
       "view-on-screen": "在屏幕上查看",
       "capacity-records": "容量 (记录)",
       "records-used": "使用的记录",
@@ -475,7 +508,8 @@
       "until-plenum-setpoint-equals": "直到气室设值变成",
       "as-a-temperature-differential-of": "直到达到",
       "is-reached": "的当温度差分",
-      "between-plenum-setpoint-and": "在气室设定值和"
+      "between-plenum-setpoint-and": "在气室设定值和",
+      "use-ramp-rate": "使用斜坡变化率"
     },
     "runclock": {
       "system-run-clock": "系统运行时钟",
@@ -538,7 +572,22 @@
       "outside-temp": "室外温度",
       "return-temp": "返回温度",
       "plenum-humidity": "气室湿度",
-      "outside-humidity": "室外湿度"
+      "outside-humidity": "室外湿度",
+      "custom-4-20": "自定义 4-20 mA",
+      "define-custom-sensors": "定义自定义传感器",
+      "display-unit": "显示单位",
+      "eng-min": "最小值 (4 mA)",
+      "eng-max": "最大值 (20 mA)",
+      "unit-none": "—",
+      "unit-percent": "%",
+      "unit-ppm": "ppm",
+      "unit-inh2o": "inH₂O",
+      "unit-volts": "V",
+      "unit-amps": "A",
+      "unit-cfm": "CFM",
+      "unit-fpm": "FPM",
+      "unit-temp420": "°F",
+      "unit-psi": "PSI"
     },
     "auxiliary": {
       "auxiliary-output-programming": "辅助输出程序",
@@ -675,7 +724,7 @@
       "history-log-settings": "历史记录日志设置",
       "a-record-will-be-taken-every": "每",
       "overwrite-old-records-if-necessary": "如有必要，改写旧记录",
-      "initialize-sd-card": "初始化SD卡",
+      "initialize-sd-card": "初始化存储",
       "clear-history-log": "清除历史记录日志",
       "clear-activity-log": "清除活动日志"
     },
@@ -683,7 +732,16 @@
       "master-slave-local-mode-setup": "主机、从机和本地模式设置",
       "local-default": "本地 (默认)",
       "master": "主机",
-      "slave": "从机"
+      "slave": "从机",
+      "slave-list": "推送室外空气数据的从机列表",
+      "allowed-masters": "允许的主机 IP",
+      "active-master": "当前主机",
+      "last-master-seen": "最近一次主机推送",
+      "last-temp": "最近接收的温度",
+      "last-humid": "最近接收的湿度",
+      "last-ok": "最后成功",
+      "not-yet-pushed": "尚未推送",
+      "discover": "发现从机"
     },
     "pid": {
       "pid-logs": "PID控制器日志",
@@ -730,7 +788,17 @@
       "no-groups": "尚未创建分组",
       "assign-systems-to": "分配系统到",
       "available-systems": "可用系统",
-      "in-group": "组内系统"
+      "in-group": "组内系统",
+      "add-system": "添加远程系统",
+      "no-remote-systems": "尚未定义远程系统",
+      "status": "状态",
+      "last-seen": "上次可见",
+      "online": "在线",
+      "offline": "离线",
+      "healed-from": "从原地址转移",
+      "searching": "正在搜索本地网络…",
+      "no-candidates": "未发现新控制器",
+      "just-now": "刚刚"
     },
     "service": {
       "sales-and-service-setup": "销售和服务设置"
@@ -742,8 +810,12 @@
       "save-current-system-settings-as-panel-default": "将当前系统设置另存为面板默认值",
       "restore-to-panel-default-settings": "还原到面板默认设置",
       "restore-to-factory-default-settings": "还原到出厂默认设置",
-      "available-saved-settings-files": "可用的已保存设置文件",
-      "save-restore-panel-settings": "保存和还原面板设置"
+      "save-restore-panel-settings": "保存和还原面板设置",
+      "choose-settings-file": "选择要还原的设置 .json 文件",
+      "restore-confirm": "此操作将覆盖当前设置。是否继续？",
+      "restore-success": "已还原 {total} 个设置组中的 {ok} 个。",
+      "restore-error": "还原失败：{error}",
+      "download-error": "下载失败：{error}"
     },
     "table": {
       "error": "错误",

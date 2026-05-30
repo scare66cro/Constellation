@@ -17,14 +17,14 @@
   export let name: string; // navigation name
   export let wait = false;
   export let waitMessage: string | undefined = undefined;
-  export let action: ComponentType | undefined = undefined;
+  export let action: any = undefined;
   export let left = "";
   export let retryCallback: (() => void) | undefined = undefined;
   let errorState = false;
   let retryCount = 0;
   const MAX_RETRIES = 3;
   let containerElement: HTMLElement;
-  let timeoutHandle: NodeJS.Timeout | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   // Page indicator variables
   $: currentPage = 1;
   $: totalPages = 1;
@@ -239,6 +239,8 @@
     <div 
       class="flex flex-1 flex-col h-full swipe-container"
       bind:this={containerElement}
+      role="region"
+      aria-label="page content"
       use:swipe={{
         threshold: 50,
         restraint: 100,
@@ -307,6 +309,14 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    touch-action: pan-x; /* Allow horizontal panning but prevent vertical */
+    /* Allow page content to scroll vertically when it exceeds the
+       slot height (e.g. plenum L1 ramp-rate card sat behind the nav
+       footer on smaller touchscreens). `min-height: 0` lets the
+       flex child shrink so `overflow-y` activates instead of
+       pushing the footer out of bounds. `touch-action` keeps
+       horizontal swipe-nav while permitting vertical scroll. */
+    min-height: 0;
+    overflow-y: auto;
+    touch-action: pan-x pan-y;
   }
 </style>

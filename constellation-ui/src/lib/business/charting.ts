@@ -5,6 +5,18 @@ import { format } from 'date-fns';
 import { t } from "svelte-i18n";
 import { getAdornment, getHttpUrl, parseSensorFeeds, safeJsonParse, type SensorInfo } from './util';
 
+/* True when `sensors` is already a typed `SensorInfo[]` (e.g. from the
+ * `sensorList` proto store). Avoids re-running parseSensorFeeds on data
+ * that doesn't need parsing. */
+function isAlreadyTyped(sensors: unknown): sensors is SensorInfo[] {
+  return Array.isArray(sensors)
+      && sensors.length > 0
+      && typeof (sensors as any)[0] === 'object'
+      && (sensors as any)[0] !== null
+      && typeof (sensors as any)[0].id === 'number'
+      && typeof (sensors as any)[0].label === 'string';
+}
+
 export enum AxisType {
   Primary,
   Secondary,
@@ -47,12 +59,26 @@ function getSensorIdPrefix(type: string, humidCount: number, tempCount: number):
   }
 }
 
-export function buildSensorList(systemLog: boolean, frontmatter: string[], setpoints: string[], sensors: string[] | any) : Array<{text: string, value: string, label: string, units: string}>
+/**
+ * Build the sensor selection list for history log pages.
+ *
+ * `sensors` accepts:
+ *   - `SensorInfo[]` (preferred — comes from the typed `sensorList`
+ *     proto store via `get(sensorList)`)
+ *   - or any legacy unified/stride-6 payload accepted by `parseSensorFeeds`
+ *
+ * (Apr 2026: the legacy `/iot/sensors/all` GET still works but new code
+ * should prefer the proto store — `parseSensorFeeds` is a no-op when the
+ * input is already a typed array.)
+ */
+export function buildSensorList(systemLog: boolean, frontmatter: string[], setpoints: string[], sensors: SensorInfo[] | string[] | any) : Array<{text: string, value: string, label: string, units: string}>
 {
   const sensorList: Array<{text: string, value: string, label: string, units: string}> = [];
   const $t = get(t);
   try {
-    const parsedSensors: SensorInfo[] = parseSensorFeeds(sensors);
+    const parsedSensors: SensorInfo[] = isAlreadyTyped(sensors)
+      ? (sensors as SensorInfo[])
+      : parseSensorFeeds(sensors);
     const sensorMap = new Map<number, SensorInfo>(parsedSensors.map((s) => [s.id, s]));
     if (frontmatter && frontmatter.length > 0) {
       if (systemLog) {

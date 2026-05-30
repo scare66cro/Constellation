@@ -1,6 +1,11 @@
 <script lang="ts">
   import Climacell from '../lib/components/Climacell.svelte';
 	import { keysStore, frontMatterStore, headersStore, navigationStore, keyboardStore, modeToColorStore, homePageStore, alarmsStore } from '$lib/store';
+	// Phase 3 proto-direct redesign: `frontMatterStore` is now fed by
+	// `frontMatterComposite` from `+layout.svelte` (with VFD-alarm merging
+	// preserved), so this page reads the typed-proto values automatically
+	// without any per-page change. The legacy `frontmatter-data` WS path
+	// remains as a fallback until Phase 5 cleanup.
 	import Humidifier from '$lib/components/Humidifier.svelte';
 	import Baylight from '$lib/components/Baylight.svelte';
 	import GellertPage from '$lib/components/GellertPage.svelte';
@@ -14,12 +19,16 @@
 	import { goto } from '$app/navigation';
 	import { get } from 'svelte/store';
 	import { KeyboardTypes } from '$lib/ui/Keyboard.svelte';
-	import { checkPassword, checkKeys, safeJsonParse, getHttpUrl, type ArrayResponse } from '$lib/business/util';
-	import { isValidSensor, SensorTypes } from '$lib/business/analog';
+	import { checkPassword, checkKeys, getHttpUrl } from '$lib/business/util';
+	import { isValidSensor, SensorTypes, type SensorInfo } from '$lib/business/analog';
 	import { t } from 'svelte-i18n';
 	import { getDropDownPage, getHomePage } from '$lib/business/paging';
+	import { sensorList, burnerSettings, basicSetup } from '$lib/business/protoStores';
 
-	export let data: ArrayResponse;
+	// Phase 5.1: sensor lookup migrated from /iot/sensors/all (legacy +page.ts
+	// removed) to the derived $sensorList store (aggregated AnalogBoard pushes).
+	// S9k cleanup: burnerMode (was P2BurnerData[6] via /iot/burner GET) now
+	// reads $burnerSettings.mode from the typed-proto store.
 
 	// Initialize runtime selection
 	let runtime = '0';
@@ -42,7 +51,6 @@
 	$: animations = $frontMatterStore.animations as string;
 	$: wait = false;
 	$: error = false;
-	$: P2BurnerData = undefined as string[] | undefined;
 	$: currentMode = $modeToColorStore[$headersStore?.CurrentMode];
 	$: boardType = ($frontMatterStore as any)?.boardType ?? ($frontMatterStore?.misc as string[])?.[0];
 	$: startStop = true;
@@ -54,7 +62,7 @@
 	$: returnHumidColor = returnHumidGetColor();
 	$: onionMode = ($frontMatterStore?.panel as string[])?.[8] === '1';
 	$: cureOn = onionMode && (($frontMatterStore?.main as string[]))?.[24] === '1' && (($frontMatterStore?.main as string[]))?.[25] === '0';
-	$: burnerMode = P2BurnerData?.[6];
+	$: burnerMode = $burnerSettings ? String($burnerSettings.mode ?? 0) : undefined;
 	
 	async function remoteOff() {
 		startStop = false;
@@ -159,20 +167,27 @@
 				}
 				}
 			
-			// Use safeJsonParse with wait state handling for burner data
-			const response = await fetch(getHttpUrl('/iot/burner'));
-			P2BurnerData = await safeJsonParse(response, (isWaiting) => wait = isWaiting);
+			// S9k: removed /iot/burner GET — burnerMode now derives reactively
+			// from $burnerSettings (TAG.BurnerSettings, field 7 = mode).
 			
 			if (!$homePageStore.initialized) {
-				const basicResponse = await fetch(getHttpUrl('/iot/basic/home'));
-				if (!basicResponse.ok) {
-					throw new Error('Failed to fetch basic home data');
-					}
-				
-				// Use safeJsonParse for home page data
-				const homeData = await safeJsonParse(basicResponse, (isWaiting) => wait = isWaiting);
+				/* Apr 2026: home-page routing pulled from the typed `basicSetup`
+				 * proto store (TAG.BasicSetup, field 4 = home_page) instead of
+				 * the legacy `/iot/basic/home` GET. The store may not have its
+				 * first frame yet on a cold start — wait briefly for it. */
+				let bs = get(basicSetup) as { homePage?: string } | undefined;
+				if (!bs) {
+					await new Promise<void>((resolve) => {
+						const t = setTimeout(() => { unsub(); resolve(); }, 1500);
+						const unsub = basicSetup.subscribe((v) => {
+							if (v) { clearTimeout(t); unsub(); resolve(); }
+						});
+					});
+					bs = get(basicSetup) as { homePage?: string } | undefined;
+				}
+				const home = bs?.homePage ?? 'mnMainData.htm';
 				$homePageStore.initialized = true;
-				$homePageStore.page = getHomePage(homeData.data);
+				$homePageStore.page = getHomePage(home);
 				if ($homePageStore.page !== '/') {
 					await goto($homePageStore.page);
 					$navigationStore.dropDownPage = getDropDownPage($homePageStore.page);
@@ -312,27 +327,16 @@
 	}
 
 	function findSensorLabelByID(id: number): string {
-		const values = Object.values(data.array ?? [])
-		// Stride is 6 (Label, SID, Type, Value, Offset, Disabled)
-		const index = id * 6;
-		if (index > values.length) {
-			return '';
-		}
-		const label = values[index];
-		// Return empty string if label is blank (factory default may leave labels blank)
-		return (label && label.trim() !== '') ? label : '';
+		const s = ($sensorList as SensorInfo[]).find((x) => x.id === id);
+		const label = s?.label?.trim();
+		return label ? label : '';
 	}
 
 	function findSensorLabelByType(type: string): string {
-		const values = Object.values(data?.array ?? [])
-		// Stride is 6 (Label, SID, Type, Value, Offset, Disabled)
-		for (let i = 0; i < values.length; i += 6) {
-			if (values[i + 2] === type) {
-				// Only return the label if it's non-empty (factory default may leave labels blank)
-				const label = values[i];
-				if (label && label.trim() !== '') {
-					return label;
-				}
+		for (const s of ($sensorList as SensorInfo[])) {
+			if (s.type === type) {
+				const label = s.label?.trim();
+				if (label) return label;
 				break; // Found matching type but label is empty, fall through to defaults
 			}
 		}
