@@ -3,12 +3,11 @@
 **Goal:** get at the Claude Code CLI session running on the **Windows**
 office PC, from a phone, over the existing Tailscale tailnet.
 
-**Key fact about this stack:** Claude Code and the Constellation dev stack
-run on **native Windows**. The *only* thing that runs in WSL is Nova QEMU
-(`Start-Constellation.ps1` → `wsl -d Ubuntu-24.04 … qemu-system-arm`). So
-the clean Linux "`tmux` detach/reattach" trick is **not** directly
-available — native Windows has no first-class terminal multiplexer. The two
-realistic paths below reflect that.
+**Key fact about this stack:** Claude Code and the Constellation work all
+run on **native Windows** — nothing runs in WSL (the old Nova QEMU step is
+obsolete). So the clean Linux "`tmux` detach/reattach" trick is **not**
+directly available — native Windows has no first-class terminal
+multiplexer. The two realistic paths below reflect that.
 
 Either way the connection is **phone → Tailscale → office PC directly**
 (Tailscale is already installed on the PC). A cloud/web Claude session
@@ -101,5 +100,5 @@ read/write panel — your existing Level 0/1/2 auth is the guard.
 
 ## Keep the PC awake
 
-WSL/QEMU and the Windows console session survive disconnects, but not the
-machine **sleeping**. Set "never sleep on AC" if you want all-day access.
+The Windows console session survives disconnects, but not the machine
+**sleeping**. Set "never sleep on AC" if you want all-day access.
