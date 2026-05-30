@@ -66,3 +66,65 @@ export function createLogger(component: string) {
 
 /** Default logger (component = 'Bridge') */
 export const logger = createLogger('Bridge');
+
+/**
+ * Reroute Node's global `console.*` methods through the structured
+ * logger. Existing `console.log/warn/error/info/debug` call sites
+ * (~250 across the bridge) automatically emit JSON lines on stdout/
+ * stderr with `level`, `ts`, `component`, `msg` — so production logs
+ * become `journalctl -o json | jq` filterable without per-file edits.
+ *
+ * Component tagging is kept simple: every console-routed line gets
+ * `component: "Console"`. New code that wants a proper component tag
+ * should call `createLogger('MyArea')` instead.
+ *
+ * The original methods are preserved on `console._raw.{log,warn,…}`
+ * for the rare case that plain text output is required (e.g. piping
+ * to a downstream tool that expects unstructured stdout).
+ *
+ * Idempotent. Must be called before any module-level `console.*` runs;
+ * `index.ts` invokes it immediately after importing the logger.
+ */
+import { format } from 'node:util';
+
+let consoleInstalled = false;
+export function installConsoleBridge(): void {
+  if (consoleInstalled) return;
+  consoleInstalled = true;
+
+  const consoleLog = createLogger('Console');
+
+  // Preserve originals for opt-out callers.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (console as any)._raw = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+  };
+
+  console.log   = (...a: unknown[]) => consoleLog.info(format(...a));
+  console.info  = (...a: unknown[]) => consoleLog.info(format(...a));
+  console.warn  = (...a: unknown[]) => consoleLog.warn(format(...a));
+  console.error = (...a: unknown[]) => consoleLog.error(format(...a));
+  console.debug = (...a: unknown[]) => consoleLog.debug(format(...a));
+}
+
+/**
+ * Restore native `console.*` methods. Test-only; production never
+ * needs to undo the bridge. No-op if the bridge isn't installed.
+ */
+export function uninstallConsoleBridge(): void {
+  if (!consoleInstalled) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = (console as any)._raw;
+  if (raw) {
+    console.log = raw.log;
+    console.info = raw.info;
+    console.warn = raw.warn;
+    console.error = raw.error;
+    console.debug = raw.debug;
+  }
+  consoleInstalled = false;
+}

@@ -1,44 +1,60 @@
 /**
- * equipmentIds.ts — Authoritative RemoteOff equipment indices.
+ * equipmentIds.ts — Authoritative equipment indices for EquipmentCmd.
  *
- * Mirrors the legacy AS2 firmware enum `EQ_REMOTE_OFF` in
- * `Mini_IO/Application/SettingsTypes.h`.  These ordinal values are the
- * wire-protocol contract between the bridge and Nova firmware: the
- * `MSG_EQUIPMENT_CMD` payload addresses `Settings.RemoteOff[eq_index]`
- * directly, and `UI_EquipPosts[]` in the legacy code binds each button
- * tag to the matching slot.  Do NOT renumber.
+ * Mirrors the legacy AS2 firmware enum `EQUIPMENT_IO` in
+ * `docs/legacy_AS2_reference/Application/SerialShift.h:51-113`.
+ * These ordinal values are the wire-protocol contract between the
+ * bridge and Nova firmware: the `MSG_EQUIPMENT_CMD` payload (proto
+ * field literally named `eq_index`) addresses the LP firmware's
+ * `s_data.remote_off.state[eq_index]` directly.  Do NOT renumber.
  *
- * State values for `RemoteOff[i]` (matches `StoreRemoteOff` in legacy):
+ * State values for `state[i]` (matches `RemoteOffState` proto enum):
  *   0 = Auto       (controller decides — default)
  *   1 = Off        (forced off)
  *   2 = On/Manual  (forced on, replaces panel switch)
  *   3 = SysStop    (latching emergency stop, set by CMD_SYSTEM_STOP only)
+ *
+ * NOTE: pre-2026-05-03 this file used the legacy AS2 EQ_REMOTE_OFF
+ * 20-entry table (RO_*).  That worked accidentally for FAN (RO_FAN=0
+ * == EQ_FAN=0) and broke silently for everything else (e.g. RO_REFRIG=1
+ * collided with EQ_DOORS=1).  The Constellation firmware stores remote-
+ * off state by EQ index so 1:1 with the EquipState.eq_index it emits.
  */
 
-export const RO = {
-  FAN:           0,
-  REFRIGERATION: 1,
-  CLIMACELL:     2,
-  HEAT:          3,
-  CAVITY_HEAT:   4,
-  BURNER:        5,
-  CURE:          6,
-  HUMIDIFIER1:   7,
-  HUMIDIFIER2:   8,
-  HUMIDIFIER3:   9,
-  LIGHTS1:      10,
-  LIGHTS2:      11,
-  AUX1:         12,
-  AUX2:         13,
-  AUX3:         14,
-  AUX4:         15,
-  AUX5:         16,
-  AUX6:         17,
-  AUX7:         18,
-  AUX8:         19,
+export const EQ = {
+  FAN:             0,   /* EQ_FAN              */
+  /* DOORS:        1     EQ_DOORS — managed by GDC, no operator switch */
+  REFRIGERATION:   2,   /* EQ_REFRIGERATION    */
+  CLIMACELL:       3,   /* EQ_CLIMACELL        */
+  HEAT:            4,   /* EQ_HEAT             */
+  CAVITY_HEAT:     5,   /* EQ_CAVITY_HEAT      */
+  BURNER:          6,   /* EQ_BURNER           */
+  HUMIDIFIER1:     7,   /* EQ_HUMID_HEAD1 — head & pump share switch */
+  HUMIDIFIER2:     9,   /* EQ_HUMID_HEAD2      */
+  HUMIDIFIER3:    11,   /* EQ_HUMID_HEAD3      */
+  /* REFRIG_STAGE1..8 = 13..20 — controlled via RefrigDiagCmd, not here */
+  /* REFRIG_DEFROST1..2 = 21..22 — same */
+  LIGHTS1:        23,   /* EQ_LIGHTS1          */
+  LIGHTS2:        24,   /* EQ_LIGHTS2          */
+  AUX1:           25,   /* EQ_AUX1             */
+  AUX2:           26,
+  AUX3:           27,
+  AUX4:           28,
+  AUX5:           29,
+  AUX6:           30,
+  AUX7:           31,
+  AUX8:           32,
 } as const;
 
-export const NUM_REMOTE_OFF = 20;
+/** Backwards-compat alias.  Some bridge code still imports `RO`; keep
+ * the export so we can rip it out in a follow-up commit without a
+ * thundering-herd compile break.  The values are identical to `EQ`. */
+export const RO = EQ;
+
+/** Storage capacity on the firmware side — `s_data.remote_off.state[]`
+ * is sized LP_IO_ENTRIES_MAX (64).  Any eq_index ≥ 64 is rejected by
+ * `LpSettings_SetRemoteOff` and silently dropped. */
+export const NUM_REMOTE_OFF = 64;
 
 export const REMOTE_AUTO    = 0;
 export const REMOTE_OFF     = 1;
@@ -46,34 +62,41 @@ export const REMOTE_MANUAL  = 2;   /* aka "On" — forced output */
 export const REMOTE_SYSSTOP = 3;   /* set only by CMD_SYSTEM_STOP */
 
 /**
- * Map UI button tags → RemoteOff slot.  Mirrors the `UI_EquipPosts[]`
- * table in `StorePostData.c`.  Tags ending in "Btn" that map to
- * `StoreRemoteOff` go here.  Refrig per-stage diag buttons
- * (refr1Btn..refr8Btn, defrost1Btn, defrost2Btn) use `MSG_REFRIG_DIAG_CMD`
- * instead and are NOT in this map.  Light buttons use a toggle action
- * (see `lightsButtonNextState`) but resolve to the same RO slot.
+ * Map UI button tags → EQ slot.  Mirrors the `UI_EquipPosts[]`
+ * table in `StorePostData.c` but expressed in the modern eq_index
+ * domain (not the legacy RO_* table).  Tags ending in "Btn" that
+ * map to a manual-override slot go here.  Refrig per-stage diag
+ * buttons (refr1Btn..refr8Btn, defrost1Btn, defrost2Btn) use
+ * `MSG_REFRIG_DIAG_CMD` instead and are NOT in this map.  Lights
+ * buttons use a toggle action (see `lightsButtonNextState`) but
+ * resolve to the same slot.
  */
 export const BUTTON_TO_RO: Record<string, number> = {
-  fanBtn:          RO.FAN,
-  refrigBtn:       RO.REFRIGERATION,
-  climacellBtn:    RO.CLIMACELL,
-  heatBtn:         RO.HEAT,
-  cavHeatBtn:      RO.CAVITY_HEAT,
-  burnerBtn:       RO.BURNER,
-  cureBtn:         RO.CURE,
-  humid1PumpBtn:   RO.HUMIDIFIER1,
-  humid2PumpBtn:   RO.HUMIDIFIER2,
-  humid3PumpBtn:   RO.HUMIDIFIER3,
-  lights1Btn:      RO.LIGHTS1,
-  lights2Btn:      RO.LIGHTS2,
-  aux1Btn:         RO.AUX1,
-  aux2Btn:         RO.AUX2,
-  aux3Btn:         RO.AUX3,
-  aux4Btn:         RO.AUX4,
-  aux5Btn:         RO.AUX5,
-  aux6Btn:         RO.AUX6,
-  aux7Btn:         RO.AUX7,
-  aux8Btn:         RO.AUX8,
+  fanBtn:          EQ.FAN,
+  refrigBtn:       EQ.REFRIGERATION,
+  climacellBtn:    EQ.CLIMACELL,
+  heatBtn:         EQ.HEAT,
+  cavHeatBtn:      EQ.CAVITY_HEAT,
+  burnerBtn:       EQ.BURNER,
+  /* cureBtn — Cure has no real EQ slot in the legacy enum.  Use
+   * virtual slot 63 in the 64-wide remote_off table; LP firmware
+   * mirrors that slot to Settings.RemoteOff[RO_CURE] and gates
+   * SW_CURE_AUTO on it.  AUTO/OFF only (no MANUAL — cure mode
+   * changes the device UI, manual is meaningless). */
+  cureBtn:         63,
+  humid1PumpBtn:   EQ.HUMIDIFIER1,
+  humid2PumpBtn:   EQ.HUMIDIFIER2,
+  humid3PumpBtn:   EQ.HUMIDIFIER3,
+  lights1Btn:      EQ.LIGHTS1,
+  lights2Btn:      EQ.LIGHTS2,
+  aux1Btn:         EQ.AUX1,
+  aux2Btn:         EQ.AUX2,
+  aux3Btn:         EQ.AUX3,
+  aux4Btn:         EQ.AUX4,
+  aux5Btn:         EQ.AUX5,
+  aux6Btn:         EQ.AUX6,
+  aux7Btn:         EQ.AUX7,
+  aux8Btn:         EQ.AUX8,
 };
 
 /** Lights buttons are toggles in the legacy firmware.  Cycles 0→1→0

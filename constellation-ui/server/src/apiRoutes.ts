@@ -23,24 +23,67 @@ import type { DataCache } from './dataCache.js';
 import type { UpgradeManager } from './upgradeManager.js';
 import type { NovaLogDataStore } from './novaLogDataStore.js';
 import type { VFDClient } from './vfdClient.js';
-import type { OrbitClient } from './orbitClient.js';
 import type { NovaFwUpdateManager } from './novaFwUpdateManager.js';
+import type { NovaDataStore } from './novaDataStore.js';
+import type { MasterSlaveSync, SlavePushBody } from './masterSlaveSync.js';
+import type { RemoteSystemsSync } from './remoteSystemsSync.js';
+import nodemailer from 'nodemailer';
 
 /**
  * Minimal command surface the API layer needs from whatever speaks to the
- * controller.  In Constellation this is always the Nova `legacyShim` defined
- * in `index.ts`, which translates these legacy ASCII-style calls into
- * COBS+protobuf frames.  Kept as a structural interface so tests/mocks can
- * supply a stub without depending on the bridge implementation.
+ * controller. In Constellation this is the Nova `commandDispatcher`
+ * defined in `index.ts`, which routes imperative button/system/log-clear
+ * actions through the COBS+protobuf bridge. Settings updates do NOT go
+ * through here — the UI POSTs encoded protobuf to `/proto/write/<field>`
+ * directly. Kept as a structural interface so tests/mocks can supply a
+ * stub without depending on the bridge implementation.
  */
 export interface CommandBridge {
   sendPost(body: string): Promise<string> | string;
-  sendCommand(tag: string, value: string): void;
+  /** Optional: assign an Orbit slot's zone role and persist to firmware OSPI.
+   *  Provided by the Nova shim; not present on test stubs. */
+  assignOrbitRole?: (slot: number, role: number, opts?: { zoneId?: number; legacySlot?: number; refrigStage?: number }) => Promise<void>;
+  /** Optional: assign which equipment a given orbit AO drives. Persists
+   *  to firmware OSPI Settings.AoEquip[slot][channel]. */
+  assignAoEquip?: (slot: number, channel: number, equip: number) => Promise<void>;
+  /** Optional: forward a single Modbus HR write to a Triton orbit via
+   *  the LP firmware's Modbus TCP client (envelope tag 125). */
+  tritonRegWrite?: (slot: number, addr: number, value: number) => Promise<void>;
+  /** Optional: trigger a controller-SoC warm reset via DMSC
+   *  (CMD_REBOOT_SOC = 50). Used by the OTA Activate primitive and
+   *  the operator "Reboot Controller" action. Resolves once the
+   *  firmware Acks the request — the actual reset happens ~50 ms
+   *  later (UART drain). */
+  rebootSoc?: () => Promise<void>;
+  /** Optional: replay a settings export back into firmware. See
+   *  `importSettings` in index.ts protoForwards for the per-entry
+   *  semantics; called by POST /iot/settings/import. */
+  importSettings?: (entries: { settingsField: number; b64: string }[]) => Promise<{ ok: number; total: number; failed: { settingsField: number; error: string }[] }>;
 }
 import { getProfile } from './vfdRegisterMaps.js';
-import { WARNING_KEYS, DEFAULT_WARNING_TEXT } from './warningTranslator.js';
+// (Apr 27 2026) WARNING_KEYS / DEFAULT_WARNING_TEXT import removed —
+// the alerts page derives those tables client-side now
+// (constellation-ui/src/lib/business/warningKeys.ts +
+// warningText.ts). Bridge `warningTranslator.ts` was deleted in the
+// same commit — it had no remaining consumers.
 import { saveConfig, loadConfig } from './simConfig.js';
 import { getNovaId } from './dataCache.js';
+import {
+  readHoldingRegs,
+  readCoils,
+  readDiscreteInputs,
+  writeHoldingReg,
+  writeHoldingRegs,
+  resolveOrbitHost,
+  asS16,
+} from './orbitMbtcp.js';
+import { fetchBankInfo } from './orbitOtaClient.js';
+import {
+  installBundle, getCurrentInstall, isInstalling, InstallError,
+} from './firmwareInstaller.js';
+import { BundleError, CFU_EXTENSION } from './firmwareBundle.js';
+import * as fsp from 'fs/promises';
+import * as fssync from 'fs';
 import {
   loadAccountMeta,
   saveAccountMeta,
@@ -61,7 +104,6 @@ import {
   type SlotRole,
   type CloudLink,
 } from './accountStore.js';
-import { computeDiff } from './auditDiff.js';
 
 // â”€â”€â”€ Auth helpers (ECDH + CryptoJS-compatible AES) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -111,6 +153,13 @@ function decryptCryptoJS(encryptedBase64: string, passphrase: string): string {
  */
 const FACTORY_PASSWORD = '4GR1*';                // factory/installer password for level 2
 
+/** RFC-4180-ish CSV escape: quote only when the cell contains a separator,
+ *  quote, or newline; doubles internal quotes. */
+function csvCell(v: unknown): string {
+  const s = String(v ?? '');
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 function authenticateLocal(typeField: string, passwordField: string): number {
   if (passwordField === 'clear') return 0;
   if (passwordField === 'leveldown') return 1;
@@ -135,9 +184,25 @@ let currentLevel = 0;
 let currentActor = 'anonymous';
 let currentSlot: number | null = null;
 
-// ─── Orbit I/O config sync ────────────────────────────────────────────────
+/**
+ * Read-only accessors for the current authenticated session, exposed so
+ * other bridge modules (e.g. /proto/write/:field in index.ts) can attach
+ * actor/slot/level to audit entries.
+ */
+export function getCurrentAuth(): { actor: string; slot: number | null; level: number } {
+  return { actor: currentActor, slot: currentSlot, level: currentLevel };
+}
 
-const ORBIT_API_PORT = parseInt(process.env.ORBIT_API_PORT ?? '9010', 10);
+// ─── Orbit topology constants ─────────────────────────────────────────
+//
+// The bridge no longer talks to the orbit-simulator REST API. All
+// orbit-side data flows over Modbus TCP via `orbitMbtcp.ts` (see
+// /memories/repo/bridge-mbtcp-migration.md). `ORBIT_API_PORT`,
+// `ORBIT_HTTP_HOST`, `orbitUrl()`, and `syncIoConfigToOrbit()` were
+// retired in this migration:
+//   • IO label sync: LP firmware owns labels via Settings.IoConfig.
+//   • All read/write ops: Modbus TCP FC03/06/16 to the orbit's HR map.
+//   • Per-slot host: `resolveOrbitHost(slot)` in orbitMbtcp.ts.
 
 /**
  * Maximum number of Orbit boards the bridge supports.
@@ -145,80 +210,25 @@ const ORBIT_API_PORT = parseInt(process.env.ORBIT_API_PORT ?? '9010', 10);
  */
 const NOVA_MAX_ORBITS = 16;
 
-/**
- * After an ioconfig save, resolve equipment names for each orbit board
- * and push them via POST /api/ioconfig so the orbit panel shows labels
- * like "Fan 1" instead of raw "DO1".
- *
- * Data model:
- *   outputConfig[pid] = equipmentId   (pid = board*12 + pin, pin 0-based)
- *   inputConfig[pid]  = equipmentId
- *   ioNames[equipmentId] = "Name:Mode:IO:Renamable:EquipID"
- *
- * Orbit boards are mapped by discovery slot:
- *   Slot 0 (MAIN)   â†’ orbit ID 2 â†’ localhost:ORBIT_API_PORT
- *   Slot 1 (EXP_1)  â†’ orbit ID 3 â†’ localhost:ORBIT_API_PORT+1
- *   ...
- *   Slot N           â†’ orbit ID N+2 â†’ localhost:ORBIT_API_PORT+N
- *
- * The board_count parameter (from IoConfig.board_count or fallback 3)
- * determines how many boards to push labels to.
- */
-export async function syncIoConfigToOrbit(body: any, dataCache: DataCache): Promise<void> {
-  const outputConfig: string[] = Array.isArray(body?.outputConfig) ? body.outputConfig : [];
-  const inputConfig: string[] = Array.isArray(body?.inputConfig) ? body.inputConfig : [];
-
-  // Resolve ioNames from cache (equipment ID â†’ name)
-  const ioNamesRaw = dataCache.getByVarName('IoNamesData')?.value ?? '';
-  const ioNames = ioNamesRaw ? ioNamesRaw.split(',') : [];
-
-  // Determine board count: prefer explicit value from body or IoConfig,
-  // fall back to legacy 3-board default.
-  const boardCount = Math.min(
-    parseInt(body?.boardCount, 10) || 3,
-    NOVA_MAX_ORBITS
-  );
-
-  function getEquipName(equipId: string): string {
-    const id = parseInt(equipId, 10);
-    if (id < 0 || id >= ioNames.length) return '';
-    const parts = ioNames[id]?.split(':');
-    return parts?.[0] ?? '';
-  }
-
-  // Push labels for each board (10 outputs/inputs per orbit)
-  for (let board = 0; board < boardCount; board++) {
-    const outputLabels: string[] = [];
-    const inputLabels: string[] = [];
-
-    // PID range for this board: board*12+1 .. board*12+10 (10 I/O points)
-    // Firmware PID is 1-based per board (PID 0 is unused), so DO1=PID 1, DO2=PID 2, etc.
-    for (let pin = 0; pin < 10; pin++) {
-      const pid = board * 12 + pin + 1;
-      const outEqId = outputConfig[pid] ?? '-1';
-      const inEqId = inputConfig[pid] ?? '-1';
-      outputLabels.push(outEqId !== '-1' ? getEquipName(outEqId) : '');
-      inputLabels.push(inEqId !== '-1' ? getEquipName(inEqId) : '');
-    }
-
-    const port = ORBIT_API_PORT + board;
-    try {
-      const resp = await fetch(`http://localhost:${port}/api/ioconfig`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ outputLabels, inputLabels }),
-      });
-      if (resp.ok) {
-        const assigned = outputLabels.filter(Boolean).length + inputLabels.filter(Boolean).length;
-        console.log(`[API] Orbit board ${board} (port ${port}): pushed ${assigned} I/O labels`);
-      }
-    } catch {
-      // Orbit simulator may not be running for this board â€” that's fine
-    }
-  }
+// ─── Late-bound hooks ───────────────────────────────────────────────────
+// Modules constructed AFTER createApiRoutes() (e.g. ProtoStream, which
+// needs httpServer + novaStore + vfdClient assembled first) register
+// callbacks here so route handlers can notify them without circular
+// imports or constructor reordering.
+let onTcpipSavedHook: (() => void) | null = null;
+export function setTcpipSavedHook(cb: () => void): void {
+  onTcpipSavedHook = cb;
 }
 
-export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridge, upgradeManager?: UpgradeManager, logDataStore?: NovaLogDataStore, vfdClient?: VFDClient, fwUpdateManager?: NovaFwUpdateManager, orbitClient?: OrbitClient): Router {
+// firmware-progress WS broadcast — set by index.ts after WsManager is
+// constructed (createApiRoutes runs first; see ordering in index.ts).
+// firmwareInstaller.ts calls this on every progress tick.
+let firmwareProgressBroadcast: ((data: unknown) => void) | null = null;
+export function setFirmwareProgressBroadcast(cb: (data: unknown) => void): void {
+  firmwareProgressBroadcast = cb;
+}
+
+export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridge, upgradeManager?: UpgradeManager, logDataStore?: NovaLogDataStore, vfdClient?: VFDClient, fwUpdateManager?: NovaFwUpdateManager, _orbitClientLegacy?: unknown, novaStore?: NovaDataStore, masterSlaveSync?: MasterSlaveSync, remoteSystemsSync?: RemoteSystemsSync): Router {
   const router = Router();
   const RS485_API = `http://localhost:${process.env.RS485_PANEL_PORT ?? '9001'}`;
 
@@ -232,40 +242,25 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   }
 
-  // Temperature conversion helper â€” firmware sends sensor values in Â°C via serial.
-  // Convert to display unit for all REST responses.
-  // Use board type (from AnalogAllData) to determine if a sensor is a temperature.
-  // Board type 3 = Temperature board, Board type 1 = Humidity board.
-  const getUseFahrenheit = (): boolean => {
-    const entry = dataCache.getByVarName('P2BasicSetupData');
-    if (!entry?.value) return true;
-    return entry.value.split(',')[1] !== '1';
-  };
-  /** Given a sensor SID, determine if it's on a temperature board. */
-  const isTempSensorBySid = (sid: number): boolean => {
-    const analogRaw = dataCache.getByVarName('AnalogAllData')?.value;
-    if (!analogRaw) return false;
-    const parts = analogRaw.split(',');
-    const boardIdx = Math.floor(sid / 4);
-    // AnalogAllData stride 5: Addr, BoardType, Label, Version, Disabled
-    for (let i = 0; i + 4 < parts.length; i += 5) {
-      const addr0 = parseInt(parts[i], 10) - 1;
-      if (addr0 === boardIdx) {
-        const boardType = parseInt(parts[i + 1], 10);
-        return boardType === 3; // boardType 3 = Temperature
-      }
-    }
-    return false;
-  };
-  const convertSensorTemp = (val: string, sid: number): string => {
-    if (!isTempSensorBySid(sid)) return val;
-    if (!val || val === '--' || val === 'dis') return val;
-    const n = parseFloat(val);
-    if (isNaN(n)) return val;
-    return getUseFahrenheit() ? (n * 9 / 5 + 32).toFixed(1) : val;
-  };
+  // Bridge is a TRANSPARENT PASSTHROUGH (see CLAUDE.md invariant 6 +
+  // memories/repo/data-path-rules.md): no temperature unit conversion, no scaling.
+  // Conversion to user units happens exactly once, in firmware
+  // Nova_Firmware/Platform/nova_thread_overrides.c::ReadAnalogBoards()
+  // (uses Settings.TempType to deliver °F or °C). Doing it again here
+  // produced 118 °F readings on the analog page (~47.8 °C × 1.8 + 32).
+  // (Apr 2026: convertSensorTemp helper removed alongside the
+  // /iot/sensors/unified + /iot/analog/all routes — last consumer.)
 
-  const WARN_NEWBOARD = WARNING_KEYS.indexOf('WARN_NEWBOARD');
+
+  // (Apr 27 2026) AS2_EXCLUDES / AGRISTAR_EXCLUDES / NON_ALERT_KEYS /
+  // getBoardType / getIncludedAlertIndices / getFilteredAlertLabels and
+  // their /alert/{labels,indices} routes were deleted: the alerts page
+  // now derives both arrays client-side from `warningKeys.ts` +
+  // `warningText.ts` + a hardcoded AGRISTAR exclude set
+  // (see constellation-ui/src/lib/business/alertMetadata.ts).
+  // Constellation hardware is always Agri-Star; the legacy AS2 branch
+  // disappears with this cleanup. WARN_NEWBOARD is no longer referenced
+  // by anything in this file.
 
   type Rs485Board = {
     address: number;
@@ -284,59 +279,11 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
 
   const TEMP_LIKE_TYPES = new Set([0, 3, 4, 5, 9, 11]);
 
-  function buildLegacyAnalogBoardPayload(boardAddress1 = 1): string[] {
-    const analogRaw = dataCache.getByVarName('AnalogAllData')?.value ?? '';
-    const sensorRaw = dataCache.getByVarName('SensorListData')?.value ?? '';
-    if (!analogRaw || !sensorRaw) return ['0'];
-
-    const boards = analogRaw.split(',');
-    const boardStride = 5;
-    let boardBase = -1;
-
-    for (let i = 0; i + 4 < boards.length; i += boardStride) {
-      if (Number(boards[i]) === boardAddress1) {
-        boardBase = i;
-        break;
-      }
-    }
-
-    if (boardBase < 0) return ['0'];
-
-    const payload = boards.slice(boardBase, boardBase + boardStride);
-    const boardIdx0 = boardAddress1 - 1;
-
-    const sensorParts = sensorRaw.split(',');
-    for (let sensorIndex = 0; sensorIndex < 4; sensorIndex++) {
-      const sid = boardIdx0 * 4 + sensorIndex;
-      let type = '255';
-      let label = '';
-      let offset = '0.0';
-      let disabled = '0';
-      let value = '--';
-
-      for (let i = 0; i + 5 < sensorParts.length; i += 6) {
-        if (Number(sensorParts[i + 1]) === sid) {
-          label = sensorParts[i] ?? '';
-          type = sensorParts[i + 2] ?? '255';
-          value = sensorParts[i + 3] ?? '--';
-          offset = sensorParts[i + 4] ?? '0.0';
-          disabled = sensorParts[i + 5] === '1' ? '1' : '0';
-          break;
-        }
-      }
-
-      if (disabled === '1') value = 'dis';
-      payload.push(type, label, offset, disabled, value);
-    }
-
-    return payload;
-  }
-
   // RS485 control-plane sync helper.
-  // Keep this for simulator control flows (e.g. analog save/find-boards),
-  // but do NOT call it from analog GET endpoints so runtime display data
-  // remains ARM-sourced like production.
+  // DEV-only: production firmware owns the RS485 link directly and there
+  // is no rs485Panel listener on RS485_PANEL_PORT. Skip silently in prod.
   async function syncAnalogCacheFromRs485(): Promise<boolean> {
+    if (process.env.DEV_ORBIT_PROBE === '0') return false;
     try {
       const response = await fetch(`${RS485_API}/api/boards`);
       if (!response.ok) return false;
@@ -400,6 +347,8 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   }
 
   async function persistAnalogSaveToRs485(body: unknown): Promise<void> {
+    // DEV-only: see syncAnalogCacheFromRs485 above.
+    if (process.env.DEV_ORBIT_PROBE === '0') return;
     if (!Array.isArray(body) || body.length < 25) return;
 
     const address = Number(body[0]) - 1;
@@ -429,92 +378,7 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
   }
 
-  const AS2_EXCLUDES = new Set([
-    'WARN_REFRIG_AS1',
-    'WARN_HUMID1_AS1',
-    'WARN_HUMID2_AS1',
-    'WARN_AUX_AS1',
-    'WARN_AUX1_AS1',
-    'WARN_AUX2_AS1',
-    'WARN_LIGHTS1_AS1',
-    'WARN_LIGHTS2_AS1',
-  ]);
-
-  const AGRISTAR_EXCLUDES = new Set([
-    'WARN_REFRIG_DEFROST',
-    'WARN_REFRIG_PWM',
-    'WARN_REFRIG_STAGE',
-    'WARN_HUMIDIFIER',
-    'WARN_AUX',
-    'WARN_SYSCONFIG_EQ',
-    'WARN_NO_OUTPUT',
-    'WARN_EXPANSIONBOARD',
-    'WARN_LIGHTS',
-  ]);
-
-  const NON_ALERT_KEYS = new Set(['WARN_ALARMS_FILE', 'WARN_EQUIPDESC_FILE']);
-
-  const getBoardType = (): 'AS2' | 'AGRISTAR' => {
-    const raw = (dataCache.getByVarName('BoardType')?.value ?? 'AS2').toUpperCase();
-    return raw.includes('AS2') ? 'AS2' : 'AGRISTAR';
-  };
-
-  const getIncludedAlertIndices = (): number[] => {
-    const board = getBoardType();
-    const excludes = board === 'AS2' ? AS2_EXCLUDES : AGRISTAR_EXCLUDES;
-    const indices: number[] = [];
-
-    for (let i = 0; i < WARNING_KEYS.length; i++) {
-      const key = WARNING_KEYS[i];
-      if (NON_ALERT_KEYS.has(key)) continue;
-      if (excludes.has(key)) continue;
-      indices.push(i);
-    }
-    return indices;
-  };
-
-  const getFullAlertBits = (): string[] => {
-    const raw = dataCache.getByVarName('AlertSetupData')?.value ?? '';
-    const bitChars = raw.replace(/[^01]/g, '').split('');
-    const minLen = WARNING_KEYS.length;
-    while (bitChars.length < minLen) bitChars.push('0');
-    return bitChars;
-  };
-
-  const getFilteredAlertBits = (): string[] => {
-    const full = getFullAlertBits();
-    const included = getIncludedAlertIndices();
-    return included.map(i => full[i] ?? '0');
-  };
-
-  const getFilteredAlertLabels = (): string[] => {
-    const labels: string[] = [];
-    const included = getIncludedAlertIndices();
-    for (const idx of included) {
-      if (idx === WARN_NEWBOARD) labels.push('group2');
-      const key = WARNING_KEYS[idx] ?? `WARN_UNKNOWN_${idx}`;
-      labels.push(DEFAULT_WARNING_TEXT[key] ?? key);
-    }
-    return labels;
-  };
-
-  // â”€â”€â”€ Polling endpoints (kept for backward compatibility) â”€â”€â”€
-  // These endpoints are hit by the PollingClient every 3s.
-  // Once the WebSocket client is deployed, these become fallback-only.
-
-  router.get('/ws/frontmatter-data', (_req: Request, res: Response) => {
-    res.json(dataCache.buildFrontmatterData());
-  });
-
-  router.get('/ws/header-data', (_req: Request, res: Response) => {
-    res.json(dataCache.buildHeaderData());
-  });
-
-  router.get('/ws/tcpip-data', (_req: Request, res: Response) => {
-    res.json(dataCache.buildTcpIpData());
-  });
-
-  // â”€â”€ Identity endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Identity endpoint ───────────────────────────────────────────────
   // Returns this Nova's persistent UUID and panel name.
   // Other Novas query this during discovery so groups survive DHCP IP changes.
   router.get('/identity', (_req: Request, res: Response) => {
@@ -522,107 +386,333 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.json({ novaId: getNovaId(), panelName });
   });
 
-  router.get('/ws/upgrade-data', (_req: Request, res: Response) => {
-    if (upgradeManager) {
-      res.json(upgradeManager.getStatus());
-    } else {
-      res.json({ UpgradeStatus: '', UpgradingSoftware: false, isEmpty: true });
+  // ── Master/Slave outside-air sync (replaces legacy AS2 UDP broadcast) ──
+  // POST /iot/master-slave/push   — peer master pushes its current
+  //   outside_temp / outside_humid (tenths of °C / %RH) to this
+  //   panel. Validated against MasterSlaveSettings.allowedMasters +
+  //   masterIp before being forwarded to the controller LP via
+  //   SettingsUpdate.remoteOutside (settings.proto field 41).
+  // GET  /iot/master-slave/status — operator-facing snapshot of the
+  //   sync state for the Level-2 master/slave page.
+  // Detailed protocol notes live in masterSlaveSync.ts.
+  router.post('/master-slave/push', async (req: Request, res: Response) => {
+    if (!masterSlaveSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    const body = req.body as SlavePushBody;
+    /* req.ip can be ::ffff:10.x.y.z behind dual-stack; strip the
+     * IPv4-mapped prefix so the allowlist (which stores plain v4
+     * strings) compares cleanly. */
+    const sourceIp = (req.ip ?? '').replace(/^::ffff:/, '');
+    const err = await masterSlaveSync.receivePush(sourceIp, body);
+    if (err) { res.status(403).json({ error: err }); return; }
+    res.json({ ok: true });
+  });
+  router.get('/master-slave/status', (_req: Request, res: Response) => {
+    if (!masterSlaveSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    res.json(masterSlaveSync.getStatus());
+  });
+  router.get('/master-slave/discover', async (_req: Request, res: Response) => {
+    if (!masterSlaveSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    try {
+      const peers = await masterSlaveSync.discoverSlaves();
+      res.json({ peers });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message ?? String(err) });
     }
   });
 
-  router.get('/ws/network-data', (_req: Request, res: Response) => {
-    res.json(dataCache.buildPageData('network') ?? {});
+  // ── Remote Systems list (UUID-keyed, DHCP-resilient) ───────────────
+  // The bridge keeps a persistent list of peer panels the operator
+  // wants to monitor, polled every 30 s via /iot/identity, with the
+  // same auto-heal pattern as master/slave (matches by novaId so
+  // panel renames AND DHCP changes both heal cleanly). Detailed
+  // notes in remoteSystemsSync.ts.
+  router.get('/remote-systems', (_req: Request, res: Response) => {
+    if (!remoteSystemsSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    res.json({ systems: remoteSystemsSync.list() });
+  });
+  router.post('/remote-systems', async (req: Request, res: Response) => {
+    if (!remoteSystemsSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    const body = req.body as { name?: string; host?: string; port?: number };
+    if (!body || typeof body.host !== 'string' || !body.host.trim()) {
+      res.status(400).json({ error: 'host required' });
+      return;
+    }
+    try {
+      const entry = await remoteSystemsSync.add({
+        name: body.name,
+        host: body.host,
+        port: typeof body.port === 'number' ? body.port : undefined,
+      });
+      res.json({ ok: true, system: entry });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? String(err) });
+    }
+  });
+  router.delete('/remote-systems/:id', (req: Request, res: Response) => {
+    if (!remoteSystemsSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    const ok = remoteSystemsSync.remove(req.params.id);
+    res.status(ok ? 200 : 404).json({ ok });
+  });
+  router.patch('/remote-systems/:id', (req: Request, res: Response) => {
+    if (!remoteSystemsSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    const body = req.body as { name?: string };
+    if (typeof body?.name !== 'string') {
+      res.status(400).json({ error: 'name required' });
+      return;
+    }
+    const ok = remoteSystemsSync.rename(req.params.id, body.name);
+    res.status(ok ? 200 : 404).json({ ok });
+  });
+  router.get('/remote-systems/discover', async (_req: Request, res: Response) => {
+    if (!remoteSystemsSync) { res.status(503).json({ error: 'sync_not_wired' }); return; }
+    try {
+      const candidates = await remoteSystemsSync.discover();
+      res.json({ candidates });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message ?? String(err) });
+    }
   });
 
-  router.get('/ws/download-data', (_req: Request, res: Response) => {
-    res.json({ current: undefined, total: undefined });
+  // ─── Orbit OTA — Phase 1A version reporting ───────────────────────────
+  // GET /iot/orbit/ota/version?slot=N
+  //   Probes the LP at resolveOrbitHost(slot) on TCP :5503, waits for
+  //   the auto-pushed FwBankInfo frame from `lp_ota_task`, returns
+  //   { reachable: true, host, slot, bankInfo } on success or
+  //   { reachable: false, host, slot, error } on failure.  Honest
+  //   passthrough — no caching, no fabricated values.  See
+  //   docs/LP-AM2434-OTA-Update-Plan.md for the larger plan; Phase 1B
+  //   adds POST /iot/orbit/ota/push for the actual flash write path.
+  router.get('/orbit/ota/version', async (req: Request, res: Response) => {
+    const slotRaw = req.query.slot;
+    const slot = Number(slotRaw);
+    if (!Number.isFinite(slot) || slot < 0 || slot > 7) {
+      res.status(400).json({ error: 'slot must be an integer 0..7' });
+      return;
+    }
+    const host = resolveOrbitHost(slot);
+    const out = await fetchBankInfo(host);
+    if (out.reachable) {
+      res.json({ slot, host, reachable: true, bankInfo: out.bankInfo });
+    } else {
+      res.status(503).json({ slot, host, reachable: false, error: out.error });
+    }
   });
 
-  router.get('/ws/equipment-data', (_req: Request, res: Response) => {
-    const eqStatus = dataCache.getEquipStatus();
-    const pwmRaw = dataCache.getByVarName('PWMData')?.value ?? '';
-    const ioNamesRaw = dataCache.getByVarName('IoNamesData')?.value ?? '';
-    const auxRaw = dataCache.getByVarName('EquipAuxData')?.value ?? '';
-    const miscRaw = dataCache.getByVarName('MiscData')?.value ?? '';
-    const basicRaw = dataCache.getByVarName('P2BasicSetupData')?.value ?? '';
-    const basicArr = basicRaw ? basicRaw.split(',') : [];
-    res.json({
-      eqStatus,
-      pwmConfig: pwmRaw ? pwmRaw.split(',') : ['0'],
-      outputConfig: dataCache.getEqIndexedOutputConfig(),
-      ioNames: ioNamesRaw ? ioNamesRaw.split(',') : [],
-      auxSwitches: auxRaw ? auxRaw.split(',') : [],
-      miscData: miscRaw ? miscRaw.split(',') : ['0'],
-      systemMode: basicArr[4] ?? '0',
+  // ─── Constellation Firmware Update (.cfu) — Phase 1B + 3 ─────────────
+  //
+  // Replacement for the legacy AS2 `.rpi` upgrade flow.  Two endpoints:
+  //   POST /iot/firmware/upload    multipart upload of a `.cfu` bundle
+  //   POST /iot/firmware/install   trigger install of a previously-uploaded staging file
+  //   GET  /iot/firmware/status    snapshot of current install state (or null if idle)
+  //
+  // Progress is broadcast on the `firmware-progress` WS channel — a
+  // full `InstallProgress` snapshot per tick.  See
+  // `firmwareInstaller.ts` for the state machine and
+  // `firmwareBundle.ts` for the bundle format.
+
+  /** Staging directory for uploaded `.cfu` files.  Per-Pi5 production
+   *  override via env var FIRMWARE_STAGING_DIR.  Created on demand. */
+  const FIRMWARE_STAGING_DIR =
+    process.env.FIRMWARE_STAGING_DIR
+    ?? path.join(os.tmpdir(), 'constellation-firmware-staging');
+
+  function ensureStagingDir(): void {
+    try { fssync.mkdirSync(FIRMWARE_STAGING_DIR, { recursive: true }); } catch {}
+  }
+
+  /** POST /iot/firmware/upload — multipart-form upload of a `.cfu` bundle.
+   *
+   *  On success returns `{ stagingId, filename, sizeBytes }`.  The
+   *  `stagingId` is opaque and must be passed to /iot/firmware/install
+   *  to trigger the install.
+   *
+   *  Validates that the uploaded filename ends with `.cfu` — same
+   *  filename-extension discipline AS2 used with `.rpi`.  The actual
+   *  manifest validation happens at install time inside `loadBundle()`.
+   */
+  router.post('/firmware/upload', (req: Request, res: Response) => {
+    ensureStagingDir();
+    const stagingId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let savedPath: string | null = null;
+    let savedFilename = '';
+    let savedSize = 0;
+    let uploadError = '';
+
+    try {
+      const busboy = Busboy({
+        headers: req.headers,
+        limits: { fileSize: 200 * 1024 * 1024 },  // 200 MB cap — same as AS2 path
+      });
+
+      busboy.on('file', (_fieldname, file, info) => {
+        const filename = info.filename || '';
+        if (path.extname(filename).toLowerCase() !== CFU_EXTENSION) {
+          uploadError = `File must have ${CFU_EXTENSION} extension; got "${filename}"`;
+          (file as any).resume();
+          return;
+        }
+        savedFilename = path.basename(filename);
+        const stagedName = `${stagingId}_${savedFilename}`;
+        savedPath = path.join(FIRMWARE_STAGING_DIR, stagedName);
+        const ws = fssync.createWriteStream(savedPath);
+        file.on('data', (chunk: Buffer) => { savedSize += chunk.length; });
+        file.pipe(ws);
+        ws.on('error', (err) => { uploadError = `Write failed: ${err.message}`; });
+      });
+
+      busboy.on('finish', () => {
+        if (uploadError) {
+          if (savedPath) { try { fssync.unlinkSync(savedPath); } catch {} }
+          if (!res.headersSent) res.status(400).json({ error: uploadError });
+          return;
+        }
+        if (!savedPath) {
+          if (!res.headersSent) res.status(400).json({ error: 'No file provided' });
+          return;
+        }
+        console.log(`[API] /firmware/upload OK stagingId=${stagingId} file=${savedFilename} bytes=${savedSize}`);
+        if (!res.headersSent) {
+          res.json({ stagingId, filename: savedFilename, sizeBytes: savedSize });
+        }
+      });
+
+      busboy.on('error', (err) => {
+        console.error('[API] /firmware/upload busboy err:', err);
+        if (!res.headersSent) res.status(500).json({ error: 'Upload processing failed' });
+      });
+
+      req.pipe(busboy);
+    } catch (err: any) {
+      console.error('[API] /firmware/upload setup err:', err);
+      res.status(500).json({ error: err?.message ?? 'Upload failed' });
+    }
+  });
+
+  /** POST /iot/firmware/install — kick off the install of a previously
+   *  uploaded staging file.
+   *
+   *  Body: `{ stagingId: string, skipReboot?: boolean, allowDowngrade?: boolean }`.
+   *  Returns 202 immediately with the initial progress snapshot; the
+   *  long-running install runs asynchronously and progress is
+   *  broadcast via the `firmware-progress` WS channel.
+   *
+   *  Returns 409 if an install is already in progress.
+   */
+  router.post('/firmware/install', async (req: Request, res: Response) => {
+    if (isInstalling()) {
+      res.status(409).json({ error: 'Firmware install already in progress' });
+      return;
+    }
+
+    const { stagingId, skipReboot, allowDowngrade } = req.body ?? {};
+    if (!stagingId || typeof stagingId !== 'string') {
+      res.status(400).json({ error: 'stagingId is required' });
+      return;
+    }
+
+    // Resolve staging file (prefix match — the staged filename has
+    // `<stagingId>_<originalName>` so we look up by directory listing).
+    let stagedPath: string | null = null;
+    try {
+      const entries = await fsp.readdir(FIRMWARE_STAGING_DIR);
+      const match = entries.find(n => n.startsWith(`${stagingId}_`));
+      if (match) stagedPath = path.join(FIRMWARE_STAGING_DIR, match);
+    } catch {}
+
+    if (!stagedPath) {
+      res.status(404).json({ error: `Staging file for ${stagingId} not found` });
+      return;
+    }
+
+    // Kick off the install async, respond immediately.
+    console.log(`[API] /firmware/install starting from ${stagedPath} skipReboot=${!!skipReboot} allowDowngrade=${!!allowDowngrade}`);
+    installBundle(
+      stagedPath,
+      firmwareProgressBroadcast,
+      { skipReboot: !!skipReboot, allowDowngrade: !!allowDowngrade },
+    )
+      .then(() => { console.log('[API] /firmware/install completed'); })
+      .catch((err) => {
+        if (err instanceof InstallError || err instanceof BundleError) {
+          console.error(`[API] /firmware/install failed: [${err.code}] ${err.message}`);
+        } else {
+          console.error('[API] /firmware/install failed:', err);
+        }
+      })
+      .finally(() => {
+        // Best-effort: remove the staged .cfu after the install (success
+        // or failure).  Keeping it would just clutter /tmp and the
+        // extracted bundle in extractDir is already cleaned up inside
+        // installBundle's finally block.
+        if (stagedPath) {
+          fsp.unlink(stagedPath).catch(() => {});
+        }
+      });
+
+    res.status(202).json({
+      ok: true,
+      stagingId,
+      message: 'Install started; subscribe to firmware-progress WS for updates',
+      progress: getCurrentInstall(),
     });
   });
+
+  /** GET /iot/firmware/status — snapshot of current install state, or
+   *  `{ progress: null, isInstalling: false }` if idle. */
+  router.get('/firmware/status', (_req: Request, res: Response) => {
+    res.json({
+      progress: getCurrentInstall(),
+      isInstalling: isInstalling(),
+    });
+  });
+
+  // (S9g: GET /ws/network-data and POST /network removed — network page
+  // hydrates from $networkComposite reactively; refresh button is now a
+  // pure UX flash since the composite already updates on every push.)
+  // (S9k cleanup 2026-04-21: GET /ws/upgrade-data and /ws/download-data
+  // removed — both were HTTP polling fallbacks for the retired
+  // PollingClient.  The upgrade and download pages subscribe to the
+  // 'upgrade-data' / 'download-data' WS push channels instead.)
 
   // â”€â”€â”€ Specific page endpoints (must come BEFORE the generic loop) â”€â”€â”€
 
-  // Burner data â€” used by home page to check burner mode (returns array directly)
-  router.get('/burner', (_req: Request, res: Response) => {
-    const burnerRaw = dataCache.getByVarName('P2BurnerData')?.value
-                   || dataCache.getByVarName('BurnerData')?.value
-                   || '0,0,0,0,0,0,0';
-    res.json(burnerRaw.split(','));
+  // (S9k cleanup: /burner GET removed â€” home & level2 burner pages now read $burnerSettings proto store directly.)
+
+  /* (Apr 2026 proto-direct migration: removed `/iot/basic/home` GET. The
+   * root home page now reads `basicSetup.homePage` from the typed
+   * `basicSetup` proto store (TAG.BasicSetup, field 4) directly. */
+
+  // (Apr 27 2026) /alert/labels and /alert/indices removed — the level1
+  // alerts page derives both arrays client-side via
+  // src/lib/business/alertMetadata.ts. See the helper-deletion comment
+  // higher in this file for context.
+
+  // (Apr 29 2026 mbtcp migration) /sync/ioconfig REMOVED. The legacy
+  // route POSTed equipment labels to each orbit-simulator's REST
+  // /api/ioconfig endpoint so the sim panel could show "Fan 1" instead
+  // of "DO1". The orbit-simulator REST API is gone; LP firmware owns
+  // labels via Settings.IoConfig (proto field 36) which the UI already
+  // writes to firmware via /proto/write/36 immediately before this
+  // call. UI side: the post-save fetch will 404 — a real work item to
+  // remove from the IO Config page.
+
+  // Analog RS485 sync â€” side-effect endpoint paired with /proto/write/42.
+  // The Level 2 Analog Board page writes the AnalogBoard settings
+  // (label/offset/disabled per sensor) direct to firmware, then POSTs the
+  // same 25-element body here so the simulator's RS485 board cache
+  // (boards/sensor-list/sensor-labels) stays in sync. Production firmware
+  // owns the RS485 link directly â€” this endpoint exists only for the
+  // sim path. Best-effort.
+  router.post('/sync/analog', async (req: Request, res: Response) => {
+    try {
+      await persistAnalogSaveToRs485(req.body);
+      await syncAnalogCacheFromRs485();
+      res.json({ ok: true });
+    } catch (err) {
+      console.warn('[API] /sync/analog failed:', err);
+      res.json({ ok: false, error: String(err) });
+    }
   });
-
-  // Basic home data â€” used on first load to determine home page routing
-  router.get('/basic/home', (_req: Request, res: Response) => {
-    const basicRaw = dataCache.getByVarName('P2BasicSetupData')?.value ?? '';
-    const parts = basicRaw.split(',');
-    // parts[3] is the home page setting (e.g. 'mnMainData.htm')
-    res.json({ data: parts[3] || 'mnMainData.htm' });
-  });
-
-  // Alert labels â€” used by alerts page alongside alerts data
-  router.get('/alert/labels', (_req: Request, res: Response) => {
-    res.json(getFilteredAlertLabels());
-  });
-
-  // Alerts data â€” normalize AlertSetup bitstring to one flag per visible alert
-  router.get('/alerts', (_req: Request, res: Response) => {
-    res.json(getFilteredAlertBits());
-  });
-
-  // â”€â”€â”€ Page data endpoints (GET /iot/<pageName>) â”€â”€â”€
-  // Used by loadIotData() in +page.ts files during navigation
-
-  // Legacy analog endpoint compatibility: return a full 25-field board payload
-  // (Addr,Type,Label,Version,Disabled + 4x [Type,Label,Offset,Disabled,Value]).
-  // Some runtime paths still request /iot/analog and expect this shape.
-  router.get('/analog', async (_req: Request, res: Response) => {
-    const analogAllRaw = dataCache.getByVarName('AnalogAllData')?.value ?? '';
-    const firstBoardAddr = analogAllRaw ? Number(analogAllRaw.split(',')[0]) || 1 : 1;
-    const payload = buildLegacyAnalogBoardPayload(firstBoardAddr);
-    console.log(`[API] GET /iot/analog â†’ board ${firstBoardAddr}, payload length=${payload.length}`);
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(payload);
-  });
-
-  const pageNames = [
-    'basic', 'pid', 'pwm', 'fanspeed', 'fanboost',
-    'outside', 'humidifier', 'co2', 'ramp', 'misc', 'door', 'plensetup',
-    'climacell', 'climacelltimes', 'lights', 'alerts', 'refrigeration',
-    'master', 'ioconfig', 'service', 'failures1', 'failures2', 'log',
-    'version', 'email', 'accounts', 'sensors', 'runtimes', 'date', 'network',
-  ];
-
-  for (const page of pageNames) {
-    router.get(`/${page}`, (_req: Request, res: Response) => {
-      const data = dataCache.buildPageData(page);
-      if (data) {
-        res.json(data);
-
-        // When ioconfig is fetched, sync labels to orbit simulators
-        if (page === 'ioconfig' && data.config) {
-          syncIoConfigToOrbit(data.config, dataCache).catch(() => {});
-        }
-      } else {
-        res.status(404).json({ error: `Unknown page: ${page}` });
-      }
-    });
-  }
 
   // â”€â”€â”€ PID / sensor data endpoints â”€â”€â”€
 
@@ -635,158 +725,30 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
   });
 
-  router.get('/sensors/all', (_req: Request, res: Response) => {
-    const sensorData = dataCache.getByVarName('SensorListData');
-    // Split sensor list into key-value pairs for the UI (stride 6: Label, SID, Type, Value, Offset, Disabled)
-    const raw = sensorData?.value ?? '';
-    const parts = raw.split(',');
-    const result: Record<string, string> = {};
-    for (let i = 0; i < parts.length; i++) {
-      result[String(i)] = parts[i] ?? '';
-    }
-    res.json(result);
-  });
+  /* (Apr 2026 proto-direct migration: removed `/iot/sensors/all` GET.
+   * The history/activitylog and history/userlog pages now read
+   * `sensorList` from protoStores.ts, which derives from the
+   * `analogBoards` aggregator (typed AnalogBoard frames). The
+   * `buildSensorList()` helper accepts `SensorInfo[]` directly so no
+   * CSV-parse step is needed.) */
 
-  router.get('/sensors/unified', async (_req: Request, res: Response) => {
-    // Parse SensorListData (stride 6: Label,SID,Type,Value,Offset,Disabled) into
-    // the structured format the analog page's mergeSensorData() expects:
-    //   SensorLabels:   stride 2 â†’ [SID, Label, ...]
-    //   SensorValues:   stride 2 â†’ [SID, Value, ...]
-    //   SensorSettings: stride 4 â†’ [SID, Type, Offset, Disabled, ...]
-    const sensorData = dataCache.getByVarName('SensorListData');
-    const raw = sensorData?.value ?? '';
-    const parts = raw ? raw.split(',') : [];
 
-    const SensorLabels: string[] = [];
-    const SensorValues: string[] = [];
-    const SensorSettings: string[] = [];
+  /* (Apr 2026 proto-direct migration: removed `/iot/sensors/unified` and
+   * `/iot/analog/all` GET routes. The level2/analog page now subscribes
+   * to `analogBoardArrays` (derived from the AnalogBoard proto stream) in
+   * protoStores.ts and assembles the 25-element row layout client-side.
+   * The `AnalogAllData` / `SensorListData` cache entries and
+   * `rebuildAnalogAggregates()` are still populated for other legacy
+   * routes — `/pids`, `/sensors/all`, `/iot/sensors/...` — until those
+   * pages are migrated as well.) */
 
-    for (let i = 0; i + 5 < parts.length; i += 6) {
-      const label    = parts[i];
-      const sid      = parts[i + 1];
-      const type     = parts[i + 2];
-      const value    = convertSensorTemp(parts[i + 3], parseInt(sid, 10));
-      const offset   = parts[i + 4];
-      const disabled = parts[i + 5];
-      SensorLabels.push(sid, label);
-      SensorValues.push(sid, value);
-      SensorSettings.push(sid, type, offset, disabled);
-    }
 
-    const sensorCount = SensorLabels.length / 2;
-    console.log(`[API] GET /iot/sensors/unified â†’ ${sensorCount} sensors`);
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json({ SensorLabels, SensorValues, SensorSettings });
-  });
-
-  router.get('/analog/all', async (_req: Request, res: Response) => {
-    // Return full 25-element arrays per board:
-    //   [Addr, Type, Label, Version, Disabled,
-    //    SenType1, SenLabel1, SenOffset1, SenDisabled1, SenValue1,
-    //    ... Ã—4 sensors]
-    // The deployed SvelteKit UI (uisvelte.service) expects this merged format
-    // directly â€” it does NOT call /iot/sensors/unified separately.
-    const analogData = dataCache.getByVarName('AnalogAllData');
-    const analogRaw = analogData?.value ?? '';
-    if (!analogRaw) {
-      console.log('[API] GET /iot/analog/all â†’ empty (no AnalogAllData)');
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-      res.json([]);
-      return;
-    }
-
-    const sensorRaw = dataCache.getByVarName('SensorListData')?.value ?? '';
-    const sensorParts = sensorRaw ? sensorRaw.split(',') : [];
-    const analogParts = analogRaw.split(',');
-    const boards: string[][] = [];
-
-    for (let i = 0; i + 4 < analogParts.length; i += 5) {
-      const boardAddr = Number(analogParts[i]) || 0;
-      const boardIdx0 = boardAddr - 1;
-      const board = analogParts.slice(i, i + 5);
-
-      // Merge sensor data for this board's 4 sensors
-      for (let s = 0; s < 4; s++) {
-        const sid = boardIdx0 * 4 + s;
-        let type = '255', label = '', offset = '0.0', disabled = '0', value = '--';
-
-        // SensorListData stride 6: Label, SID, Type, Value, Offset, Disabled
-        for (let j = 0; j + 5 < sensorParts.length; j += 6) {
-          if (Number(sensorParts[j + 1]) === sid) {
-            label    = sensorParts[j]     ?? '';
-            type     = sensorParts[j + 2] ?? '255';
-            value    = sensorParts[j + 3] ?? '--';
-            offset   = sensorParts[j + 4] ?? '0.0';
-            disabled = sensorParts[j + 5] === '1' ? '1' : '0';
-            break;
-          }
-        }
-        if (disabled === '1') value = 'dis';
-        board.push(type, label, offset, disabled, convertSensorTemp(value, sid));
-      }
-
-      boards.push(board);
-    }
-
-    console.log(`[API] GET /iot/analog/all â†’ ${boards.length} boards (25-element merged)`);
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json(boards);
-  });
-
-  router.get('/aux/all', (_req: Request, res: Response) => {
-    // â”€â”€ Build the Auxiliary page response â”€â”€
-    // The Svelte UI expects: { InputConfig, OutputConfig, IoNames, systemMode, allAux }
-    // where allAux[] contains { auxProg: string[], rules: Rule[] } for each defined aux output.
-    const getArr = (vn: string): string[] => {
-      const v = dataCache.getByVarName(vn)?.value;
-      return v ? v.split(',') : [];
-    };
-    const p2Basic = getArr('P2BasicSetupData');
-    const systemMode = p2Basic[4] ?? '0';
-    const InputConfig = dataCache.getEqIndexedInputConfig();
-    const OutputConfig = dataCache.getEqIndexedOutputConfig();
-    const IoNames = getArr('IoNamesData');
-
-    // Collect all accumulated aux program entries
-    const auxPrograms = dataCache.getAllAuxPrograms();
-    const allAux: Array<{ auxProg: string[]; rules: any[] }> = [];
-    let missingCount = 0;
-
-    // EQ_AUX1=25 .. EQ_AUX8=32 â€” include entries for defined aux outputs
-    for (let auxIdx = 0; auxIdx < 8; auxIdx++) {
-      const eqId = 25 + auxIdx;
-      const eqStr = String(eqId);
-      // Only include if this aux output is assigned in OutputConfig
-      if (eqId < OutputConfig.length && OutputConfig[eqId] !== '-1') {
-        const raw = auxPrograms.get(eqStr);
-        if (raw && !raw.includes('undefined')) {
-          allAux.push(parseAuxProgram(raw));
-        } else {
-          // Defined in IO config but no program data cached â€” provide defaults
-          allAux.push({ auxProg: [eqStr, '100', '1', '1'], rules: buildDefaultAuxRules() });
-          missingCount++;
-        }
-      }
-    }
-
-    // If we have cached data for some but not all defined aux, trigger async
-    // discovery by sending NextAux commands to the ARM to collect the rest.
-    // The Svelte UI retries after 3.5s if allAux is empty, so on the second
-    // call the accumulated data will be available.
-    if (missingCount > 0 && auxPrograms.size > 0) {
-      const lastKnownEq = [...auxPrograms.keys()].pop() ?? '24';
-      discoverAuxPrograms(serialBridge, lastKnownEq, missingCount);
-    }
-
-    console.log(`[API] GET /iot/aux/all â†’ ${allAux.length} aux programs (${missingCount} uncached)`);
-    res.json({ InputConfig, OutputConfig, IoNames, systemMode, allAux });
-  });
-
-  // â”€â”€â”€ Frontmatter (single GET) â”€â”€â”€
-
-  router.get('/frontmatter', (_req: Request, res: Response) => {
-    res.json(dataCache.buildFrontmatterData());
-  });
+  // (Apr 2026 proto-direct migration: removed `/iot/aux/all` GET. The
+  // auxiliary page now reads `auxiliaryComposite` in protoStores.ts,
+  // which subscribes to AuxProgramBundle (tag 72) directly. The
+  // companion helpers parseAuxProgram, buildDefaultAuxRules,
+  // discoverAuxPrograms, and the dataCache.getAllAuxPrograms accumulator
+  // were retired in the same change.)
 
   // ─── Display / config endpoints ───
 
@@ -808,10 +770,9 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
   });
 
-  // Public-facing port for the UI. GellertHeader + getPort() consume { data }.
-  router.get('/port', (_req: Request, res: Response) => {
-    res.json({ data: process.env.BRIDGE_PUBLIC_PORT ?? '81' });
-  });
+  // (S9k cleanup 2026-04-21: GET /port removed — `getPort()` in
+  // src/lib/business/network.ts now reads NetworkConfig.httpPort from
+  // the typed proto store directly.)
 
   // ─── Background pictures (custom login/home backgrounds) ───
   // Stored on disk under server/data/backgrounds/{id}_{safeName}. A small
@@ -986,10 +947,8 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   // All log endpoints accept an optional `source` query param to filter by device
   // (e.g. ?source=nova-1, ?source=orbit-2). Defaults to "nova-1".
 
-  router.get('/log/sources', (_req: Request, res: Response) => {
-    if (!logDataStore) { res.json([]); return; }
-    res.json(logDataStore.getLogSources());
-  });
+  // (S9k cleanup 2026-04-21: GET /log/sources removed — no UI consumer.
+  // The history page derives its source list from the typed proto stream.)
 
   router.get('/user/dates', async (req: Request, res: Response) => {
     if (!logDataStore) { res.json([]); return; }
@@ -1005,10 +964,52 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   });
 
-  router.get('/user/download', async (_req: Request, res: Response) => {
-    // Download user log data to file â€” requires GellertFileSystem (runs in RPi5 QEMU)
-    // The bridge doesn't own file I/O; acknowledge receipt and let GFS handle it.
-    res.status(200).send('OK');
+  router.get('/user/download', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.status(503).type('text/csv').send(''); return; }
+    const db = logDataStore.db;
+    const start = String(req.query.start ?? '01/01/2000');
+    const end = String(req.query.end ?? '12/31/2099');
+    const fileName = String(req.query.fileName ?? 'userlog.csv').replace(/[^A-Za-z0-9_.-]/g, '_');
+    try {
+      // db.* methods are async (Postgres-backed); must await before
+      // touching .map / for-of, or TS flags Promise iteration errors
+      // and the runtime gets a Promise stringified into the CSV.
+      const rows = await db.getUserLogByDateRange(start, end);
+      // Pivot the sensor_log children: build columns for every distinct
+      // (type, sensor_id) pair seen in this slice so spreadsheets get a
+      // wide row per snapshot instead of having to JOIN across two files.
+      const sensorRows = await db.getSensorLogByLogIds(rows.map(r => r.id));
+      const sensorCols = new Map<string, Map<number, number>>(); // colKey → (logId → value)
+      for (const sr of sensorRows) {
+        const key = `${sr.sensor_type}_${sr.sensor_id}`;
+        if (!sensorCols.has(key)) sensorCols.set(key, new Map());
+        sensorCols.get(key)!.set(sr.log_id, sr.value);
+      }
+      const sensorKeys = Array.from(sensorCols.keys()).sort();
+      const header = [
+        'Date', 'Time', 'PlenumTempSp', 'PlenumTemp', 'CoolAvlTemp',
+        'PlenumHumidSp', 'Mode', 'FanSpeed', 'CoolOutput', 'RefrigOutput',
+        'BurnerOutput', 'CalcHumid', 'FanRuntimeMin', 'Co2Level',
+        ...sensorKeys,
+      ];
+      const lines: string[] = [header.join(',')];
+      for (const r of rows) {
+        const cols: (string | number)[] = [
+          csvCell(r.date), csvCell(r.time),
+          r.plenum_temp_sp, r.plenum_temp, r.cool_avl_temp, r.plenum_humid_sp,
+          r.mode, r.fan_speed, r.cool_output, r.refrig_output,
+          r.burner_output, r.calc_humid, r.fan_runtime_min, r.co2_level,
+        ];
+        for (const k of sensorKeys) cols.push(sensorCols.get(k)!.get(r.id) ?? '');
+        lines.push(cols.join(','));
+      }
+      res.type('text/csv')
+         .header('Content-Disposition', `attachment; filename="${fileName}"`)
+         .send(lines.join('\n') + '\n');
+    } catch (err: any) {
+      console.error('[API] /user/download error:', err.message);
+      res.status(500).type('text/csv').send('');
+    }
   });
 
   router.get('/user/:sensorId', async (req: Request, res: Response) => {
@@ -1044,9 +1045,39 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   });
 
-  router.get('/activity/download', async (_req: Request, res: Response) => {
-    // Download activity log data â€” same approach as user download
-    res.status(200).send('OK');
+  router.get('/activity/download', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.status(503).type('text/csv').send(''); return; }
+    const db = logDataStore.db;
+    // Activity log uses RECORD-NUMBER range (newest=1) to match the
+    // existing /activity/dates + /activity/:sensorId contract.  If a
+    // caller passes a date range instead (MM/DD/YYYY), fall back to the
+    // date-range query.
+    const startRaw = String(req.query.start ?? '1');
+    const endRaw = String(req.query.end ?? '1000');
+    const fileName = String(req.query.fileName ?? 'activitylog.csv').replace(/[^A-Za-z0-9_.-]/g, '_');
+    try {
+      // db.* methods are async; awaiting before for-of avoids
+      // TS2488 "Promise must have [Symbol.iterator]".
+      const rows = await (startRaw.includes('/')
+        ? db.getActivityLogByDateRange(startRaw, endRaw)
+        : db.getActivityLogByRange(parseInt(startRaw, 10) || 1, parseInt(endRaw, 10) || 1000));
+      const lines: string[] = [
+        'Date,Time,EventType,EqIndex,Description,NewState,Mode',
+      ];
+      for (const r of rows) {
+        lines.push([
+          csvCell(r.date), csvCell(r.time),
+          r.event_type, r.eq_index, csvCell(r.description),
+          r.new_state, r.mode,
+        ].join(','));
+      }
+      res.type('text/csv')
+         .header('Content-Disposition', `attachment; filename="${fileName}"`)
+         .send(lines.join('\n') + '\n');
+    } catch (err: any) {
+      console.error('[API] /activity/download error:', err.message);
+      res.status(500).type('text/csv').send('');
+    }
   });
 
   router.get('/activity/:sensorId', async (req: Request, res: Response) => {
@@ -1091,42 +1122,130 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   });
 
   // Available remote equipment labels (for activity log column mapping)
+  /* (Apr 2026 proto-direct migration: removed `/iot/avail/remote` GET.
+   * The route was a stub returning hardcoded `['Remote']`. The history/
+   * activitylog page now seeds the same default in `remoteListStore` at
+   * store-creation time. Re-introduce a typed proto store if/when real
+   * per-source remote-equipment lists become available.) */
 
-  router.get('/avail/remote', async (_req: Request, res: Response) => {
-    if (!logDataStore) {
-      res.json({ availLabels: ['Remote'], availEquip: [1] });
-      return;
-    }
+  // PID log history — backed by SQLite pid_log table (replaces legacy SD card).
+  // Distinct from GET /pids which returns live PidData/SensorListData.
+  router.get('/pidlog', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.json({ records: [], count: 0 }); return; }
+    const start = String(req.query.start ?? '01/01/2000');
+    const end = String(req.query.end ?? '12/31/2099');
+    const loopParam = req.query.loop;
+    const loopIndex = loopParam !== undefined ? parseInt(String(loopParam), 10) : undefined;
     try {
-      // Fetch a small sample of activity data to get column structure
-      const labels = await logDataStore.getActivityRemoteLabels('1', '20');
-      res.json(labels);
+      const records = await logDataStore.getPidLogRecords(start, end,
+        Number.isFinite(loopIndex as number) ? loopIndex : undefined);
+      res.json({
+        records,
+        count: records.length,
+        total: await logDataStore.getPidLogCount(
+          Number.isFinite(loopIndex as number) ? loopIndex : undefined),
+      });
     } catch (err: any) {
-      console.error('[API] /avail/remote error:', err.message);
-      res.json({ availLabels: ['Remote'], availEquip: [1] });
+      console.error('[API] /pidlog error:', err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 
-  // PID log data
+  // LoadLog history — per-bay commodity loading temperatures (replaces SD card).
+  // Records emitted ~every 5 min by firmware while a bay is LL_ACQUIRING.
+  router.get('/loadlog', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.json({ records: [], count: 0 }); return; }
+    const start = String(req.query.start ?? '01/01/2000');
+    const end = String(req.query.end ?? '12/31/2099');
+    try {
+      const records = await logDataStore.getLoadLogRecords(start, end);
+      res.json({
+        records,
+        count: records.length,
+        total: await logDataStore.getLoadLogCount(),
+      });
+    } catch (err: any) {
+      console.error('[API] /loadlog error:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
-  router.get('/pids', async (req: Request, res: Response) => {
-    if (!logDataStore) { res.json({}); return; }
-    // PID log retrieval would send PIDLogViewStart to ARM
-    // Placeholder â€” PID logging is a level-2 diagnostic feature
-    res.json({});
+  // CSV exports for PIDLog / LoadLog.  Distinct from /user/download +
+  // /activity/download which are GellertFileSystem stubs — these stream
+  // CSV directly from the bridge SQLite store since the new log paths
+  // don't go through GFS at all.
+  router.get('/pidlog/download', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.status(503).type('text/csv').send(''); return; }
+    const start = String(req.query.start ?? '01/01/2000');
+    const end = String(req.query.end ?? '12/31/2099');
+    const loopParam = req.query.loop;
+    const loopIndex = loopParam !== undefined ? parseInt(String(loopParam), 10) : undefined;
+    try {
+      const records = await logDataStore.getPidLogRecords(start, end,
+        Number.isFinite(loopIndex as number) ? loopIndex : undefined);
+      // CSV columns mirror the legacy AS2 PIDLog SD-card schema for
+      // operator familiarity.  P/I/D/Error are floats; Output is signed
+      // int32 (-100..100); Sequence is monotonic per loop_index.
+      const lines: string[] = [
+        'Date,Time,LoopIndex,P,I,D,Error,Output,Sequence',
+      ];
+      for (const r of records) {
+        lines.push([
+          csvCell(r.date), csvCell(r.time), r.loop_index,
+          r.p_term, r.i_term, r.d_term, r.error, r.output, r.sequence,
+        ].join(','));
+      }
+      res.type('text/csv')
+         .header('Content-Disposition', 'attachment; filename="pidlog.csv"')
+         .send(lines.join('\n') + '\n');
+    } catch (err: any) {
+      console.error('[API] /pidlog/download error:', err.message);
+      res.status(500).type('text/csv').send('');
+    }
+  });
+
+  router.get('/loadlog/download', async (req: Request, res: Response) => {
+    if (!logDataStore) { res.status(503).type('text/csv').send(''); return; }
+    const start = String(req.query.start ?? '01/01/2000');
+    const end = String(req.query.end ?? '12/31/2099');
+    try {
+      const records = await logDataStore.getLoadLogRecords(start, end);
+      // Flatten parent + bays into one row per bay so the file is
+      // spreadsheet-friendly.  SensorTempF is sensor_x10/10 (legacy AS2
+      // wire convention).  SENSOR_VAL_UNDEFINED (32767) is preserved
+      // verbatim — operators expect the sentinel.
+      const lines: string[] = [
+        'Date,Time,RecordNum,Sequence,BayIndex,Pipe,SensorTempX10,Status',
+      ];
+      for (const r of records) {
+        for (let i = 0; i < r.bays.length; i++) {
+          const b = r.bays[i];
+          lines.push([
+            csvCell(r.date), csvCell(r.time),
+            r.record_num, r.sequence,
+            i, b.pipe, b.sensor_x10, b.status,
+          ].join(','));
+        }
+      }
+      res.type('text/csv')
+         .header('Content-Disposition', 'attachment; filename="loadlog.csv"')
+         .send(lines.join('\n') + '\n');
+    } catch (err: any) {
+      console.error('[API] /loadlog/download error:', err.message);
+      res.status(500).type('text/csv').send('');
+    }
   });
 
   router.get('/logs', (_req: Request, res: Response) => {
     res.type('text').send('No logs available');
   });
 
-  router.get('/settings/files', (_req: Request, res: Response) => {
-    res.json({ files: [] });
-  });
+  // (May 2026 cleanup: GET /settings/files removed — the multi-display
+  // file selector UI was replaced by direct browser file pickers. Use
+  // GET /iot/settings/export for download and POST /iot/settings/import
+  // for restore.)
 
-  router.get('/nodesetup', (_req: Request, res: Response) => {
-    res.json({ nodes: [] });
-  });
+  // (S9k cleanup 2026-04-21: GET /nodesetup removed — no UI consumer.)
 
   router.get('/upgrade', (_req: Request, res: Response) => {
     if (upgradeManager) {
@@ -1168,31 +1287,20 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   });
 
-  router.get('/datainfo', (_req: Request, res: Response) => {
+  router.get('/datainfo', async (_req: Request, res: Response) => {
     if (!logDataStore) {
       res.json({
         database: { activityCount: 0, historyCount: 0, percentUsed: 0, startDate: new Date().toISOString() },
-        sdcard: ['0','0','0','0','0','0','0','0','0','0'],
+        storage:  { mount: '', totalBytes: 0, usedBytes: 0, freeBytes: 0, percentUsed: 0 },
       });
       return;
     }
-    res.json(logDataStore.getDataInfo());
+    res.json(await logDataStore.getDataInfo());
   });
 
-  router.get('/avail/equipment', async (_req: Request, res: Response) => {
-    if (!logDataStore) {
-      res.json({ availLabels: ['Equipment'], availEquip: [0] });
-      return;
-    }
-    try {
-      // Fetch a small sample of activity data to get column structure
-      const labels = await logDataStore.getActivityEquipmentLabels('1', '20');
-      res.json(labels);
-    } catch (err: any) {
-      console.error('[API] /avail/equipment error:', err.message);
-      res.json({ availLabels: ['Equipment'], availEquip: [0] });
-    }
-  });
+  /* (Apr 2026 proto-direct migration: removed `/iot/avail/equipment`
+   * GET — see `/iot/avail/remote` comment above. Equipment defaults
+   * baked into `equipListStore`.) */
 
   // â”€â”€â”€ Alarm history â”€â”€â”€
 
@@ -1209,518 +1317,16 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   });
 
-  // â”€â”€â”€ Page-save POST endpoints â”€â”€â”€
-  // The SaveButton component POSTs JSON to /iot/<route>.
-  // We translate the JSON body to the ARM firmware's expected POST format:
-  //   Named-field tags:  ^tag=val&field2=val2&field3=val3$CRC!
-  //   Positional tags:   ^tag=val0&_1=val1&_2=val2$CRC!
-  // The firmware's ParsePost() splits on '&' to build PostTag[]/PostValue[] arrays,
-  // then the registered StoreXxx() handler reads fields by name or by index.
+  // ─── Page-save POST endpoints ────────────────────────────────────────
+  // (S9k cleanup, Phase 5.1 finale: every page in `pageSaveMap` was
+  // migrated to client-side `writeProto(...)` over /proto/write/<tag>.
+  // The map ended up entirely empty, the iterator registered zero
+  // routes, and the `arr` / `pos` body-decode helpers became dead. The
+  // whole block has been removed. New page saves should write protobuf
+  // directly from the Svelte page — see e.g. `level2/burner/+page.svelte
+  // ::saveBurner` for the canonical pattern.)
 
-  /** Extract array from body (handles flat array or object.key) */
-  const arr = (b: any, key?: string): string[] => {
-    if (key && b?.[key] && Array.isArray(b[key])) return b[key];
-    if (Array.isArray(b)) return b;
-    return [];
-  };
-
-  /** Build positional POST value: val0&_1=val1&_2=val2... */
-  const pos = (...vals: (string | number | undefined)[]): string => {
-    const filtered = vals.filter(v => v !== undefined) as (string | number)[];
-    if (filtered.length === 0) return '';
-    return filtered.map((v, i) => i === 0 ? String(v) : `_${i}=${v}`).join('&');
-  };
-
-  const pageSaveMap: Record<string, { tags: Array<{ armTag: string; extract: (body: any) => string }> }> = {
-
-    // â”€â”€ Plenum setup: 3 ARM tags from 1 UI save â”€â”€
-    // UI sends string[11]: [0]=tempSP, [1]=humidSP, [2]=humidRef, [3]=burnerTempSP,
-    //   [4]=burnerThreshold, [5]=alarmTempLow, [6]=alarmMinLow, [7]=alarmTempHigh,
-    //   [8]=alarmMinHigh, [9]=cureTempLow, [10]=cureTempHigh
-    plensetup: { tags: [
-      { armTag: 'p1Plenum', extract: b => {
-        const a = arr(b);
-        if (a.length === 0) return '';
-        return [
-          'AS2',
-          `PlenumTempSet=${a[0]}`,
-          `PlenumHumidSet=${a[1]}`,
-          `selHumSetpointRef=${a[2] ?? '0'}`,
-          `BurnerTempSet=${a[3] ?? '0'}`,
-          `BurnerThreshold=${a[4] ?? '0'}`,
-        ].join('&');
-      }},
-      { armTag: 'AlarmTempLow', extract: b => {
-        const a = arr(b);
-        return a.length > 8 ? pos(a[5], a[6], a[7], a[8]) : '';
-      }},
-      { armTag: 'CureTempLowLimit', extract: b => {
-        const a = arr(b);
-        // Only send if cure fields are present (onion mode)
-        if (a.length <= 10 || !a[9] || !a[10]) return '';
-        return pos(a[9], a[6], a[10], a[8]);
-      }},
-    ]},
-
-    // â”€â”€ Outside air: ctrlMode + CureStartTemp (onion) â”€â”€
-    // UI sends { outside: string[5], cure: string[4], dev: string }
-    outside: { tags: [
-      { armTag: 'ctrlMode', extract: b => {
-        const o = arr(b, 'outside');
-        if (o.length === 0) return '';
-        return [
-          o[4] ?? '0',
-          `OutsideAirSet=${o[0]}`,
-          `selAboveBelow=${o[1]}`,
-          `selTempRef=${o[2]}`,
-          `calcHumid=${o[3] ?? '0'}`,
-        ].join('&');
-      }},
-      { armTag: 'CureStartTemp', extract: b => {
-        const c = arr(b, 'cure');
-        if (c.length < 4) return '';
-        return pos(c[0], c[1], c[2], c[3]);
-      }},
-    ]},
-
-    // â”€â”€ Failures 1: FanMode named fields â”€â”€
-    // UI sends string[22] mapping 1:1 to firmware field order
-    failures1: { tags: [{ armTag: 'FanMode', extract: b => {
-      const a = arr(b);
-      if (a.length < 20) return '';
-      return [
-        a[0],
-        `FanTimer=${a[1]}`,
-        `ClimacellMode=${a[2]}`,
-        `ClimacellTimer=${a[3]}`,
-        `RefridgeMode=${a[4]}`,
-        `RefridgeTimer=${a[5]}`,
-        `RefridgeRun=${a[6]}`,
-        `RefrStagesMode=${a[7]}`,
-        `RefrStagesTimer=${a[8]}`,
-        `HumidifiersMode=${a[9]}`,
-        `HumidifiersTimer=${a[10]}`,
-        `AuxMode=${a[11]}`,
-        `AuxTimer=${a[12]}`,
-        `HeatMode=${a[13]}`,
-        `HeatTimer=${a[14]}`,
-        `CavityHeatMode=${a[15]}`,
-        `CavityHeatTimer=${a[16]}`,
-        `BurnerMode=${a[17]}`,
-        `BurnerTimer=${a[18]}`,
-        `LightsMode=${a[19]}`,
-        `LightsTimer=${a[20]}`,
-        `LightsUnits=${a[21] ?? '0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Failures 2: OutAirMode named fields â”€â”€
-    // UI sends string[13]
-    failures2: { tags: [{ armTag: 'OutAirMode', extract: b => {
-      const a = arr(b);
-      if (a.length < 12) return '';
-      return [
-        a[0],
-        `OutAirTimer=${a[1]}`,
-        `OutHumidMode=${a[2]}`,
-        `OutHumidTimer=${a[3]}`,
-        `HighCo2Mode=${a[4]}`,
-        `HighCo2Timer=${a[5]}`,
-        `Co2Setpt=${a[6]}`,
-        `LowHumidMode=${a[7]}`,
-        `LowHumidTimer=${a[8]}`,
-        `LowHumidSet=${a[9]}`,
-        `PlenSenMode=${a[10]}`,
-        `PlenSenTimer=${a[11]}`,
-        `PlenSenDiff=${a[12] ?? '5.0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Misc: p1Misc named fields with AS2 prefix â”€â”€
-    // UI sends string[] (miscData): [0]=refrMode, [1]=defrostInterval, [2]=defrostTime,
-    //   [3]=tempThresh, [4]=cavityCtrl, [5]=legacy, [6]=cavityDiff, [7]=dutyCycle/sensor,
-    //   [8]=kbPref, [9]=locale, [10]=cavityTarget, [11]=reserved, [12]=enthalpyOff
-    misc: { tags: [{ armTag: 'p1Misc', extract: b => {
-      const a = arr(b, 'miscData');
-      if (a.length === 0) return '';
-      return [
-        'AS2',
-        `selRefrMode=${a[0]}`,
-        `defrostInterval=${a[1]}`,
-        `defrostTime=${a[2]}`,
-        `tempThresh=${a[3]}`,
-        `selCtrlMode=${a[10] ?? '0'}`,
-        `selCavityCtrl=${a[4]}`,
-        `cavityDiff=${a[6] ?? '0'}`,
-        `cavityDutyCycle=${a[7] ?? '0'}`,
-        `selCavityCtrlSensor=${a[7] ?? '0'}`,
-        `kbPref=${a[8] ?? '0'}`,
-        `cavStandbyOn=${a[13] ?? '0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Basic setup: StorageName named fields â”€â”€
-    // UI sends string[11]: [0]=name, [1]=tempType, [3]=homePage, [4]=mode,
-    //   [7]=multiView, [8]=password(encrypted), [9]=loginSecure, [10]=animations
-    basic: { tags: [{ armTag: 'StorageName', extract: b => {
-      const a = arr(b);
-      if (a.length === 0) return '';
-      return [
-        a[0],
-        `TempType=${a[1] ?? '0'}`,
-        `HomePage=${a[3] ?? ''}`,
-        `SystemMode=${a[4] ?? '0'}`,
-        `MultiView=${a[7] ?? '0'}`,
-        `dlr0=${a[8] ?? ''}`,
-        `loginSecure=${a[9] ?? '0'}`,
-        `Animations=${a[10] ?? '0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Refrigeration: p2Refrigeration named fields with AS2 prefix â”€â”€
-    // UI sends string[23]: stage pairs + PIDU + purge mode/threshold + stages 7-8
-    refrigeration: { tags: [{ armTag: 'p2Refrigeration', extract: b => {
-      const a = arr(b);
-      if (a.length === 0) return '';
-      const parts = [
-        'AS2',
-        `Stage1On=${a[0]}`, `Stage1Off=${a[1]}`,
-        `Stage2On=${a[2]}`, `Stage2Off=${a[3]}`,
-        `Stage3On=${a[4]}`, `Stage3Off=${a[5]}`,
-        `Stage4On=${a[6]}`, `Stage4Off=${a[7]}`,
-        `Stage5On=${a[8]}`, `Stage5Off=${a[9]}`,
-        `Stage6On=${a[10]}`, `Stage6Off=${a[11]}`,
-        `PRefrValue=${a[12]}`, `IRefrValue=${a[13]}`,
-        `DRefrValue=${a[14]}`, `URefrValue=${a[15]}`,
-        `RefrigerationPurge=${a[16] ?? '0'}`,
-        `PurgeThreshold=${a[17] ?? '0'}`,
-      ];
-      if (a[19] !== undefined) { parts.push(`Stage7On=${a[19]}`, `Stage7Off=${a[20]}`); }
-      if (a[21] !== undefined) { parts.push(`Stage8On=${a[21]}`, `Stage8Off=${a[22]}`); }
-      return parts.join('&');
-    }}]},
-
-    // â”€â”€ Ramp rate: updTemp named fields â”€â”€
-    // UI sends string[] (rate): [0]=rate, [1]=updateHours, [2]=tempDiff, [3]=tempRef, [4]=targetTemp
-    ramp: { tags: [{ armTag: 'updTemp', extract: b => {
-      const a = arr(b, 'rate');
-      if (a.length === 0) return '';
-      return [
-        a[0],
-        `rampUpdateHours=${a[1]}`,
-        `rampTempDiff=${a[2] ?? '0'}`,
-        `selTemp=${a[3] ?? '0'}`,
-        `targetTemp=${a[4] ?? '0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Door: PAirValue positional â”€â”€
-    // UI sends string[6]: P, I, D, U, actuatorTime, coolAirCycle
-    door: { tags: [{ armTag: 'PAirValue', extract: b => {
-      const a = arr(b);
-      return a.length >= 6 ? pos(a[0], a[1], a[2], a[3], a[4], a[5]) : '';
-    }}]},
-
-    // â”€â”€ Service: dealerName positional â”€â”€
-    // UI sends string[4]: dealerName, dealerPhone, techName, techPhone
-    service: { tags: [{ armTag: 'dealerName', extract: b => {
-      const a = arr(b);
-      return a.length >= 4 ? pos(a[0], a[1], a[2], a[3]) : '';
-    }}]},
-
-    // â”€â”€ Burner: selBurnerMode positional, mode-dependent â”€â”€
-    // UI sends string[10]: [0]=on%, [1]=low%, [2]=P, [3]=I, [4]=D, [5]=U,
-    //   [6]=mode, [7]=manualOut, [8]=altitude, [9]=altUnit
-    burner: { tags: [{ armTag: 'selBurnerMode', extract: b => {
-      const a = arr(b);
-      if (a.length < 10) return '';
-      const mode = parseInt(a[6]) || 0;
-      if (mode === 0) return pos(a[6], a[8], a[9]);
-      if (mode === 1) return pos(a[6], a[7], a[8], a[9]);
-      // Economy (2) or Max cure (3): mode, on, low, P, I, D, U, altitude, altUnit
-      return pos(a[6], a[0], a[1], a[2], a[3], a[4], a[5], a[8], a[9]);
-    }}]},
-
-    // â”€â”€ Fan boost: selBoostMode positional, mode-dependent â”€â”€
-    // UI sends string[5]: [0]=mode, [1]=speed, [2]=hours, [3]=duration, [4]=outsideTemp
-    fanboost: { tags: [{ armTag: 'selBoostMode', extract: b => {
-      const a = arr(b);
-      if (a.length === 0) return '';
-      const mode = parseInt(a[0]) || 0;
-      if (mode === 0) return pos(a[0]);
-      if (mode === 1) return pos(a[0], a[1], a[4], a[2], a[3]); // temp: mode,speed,temp,interval,duration
-      return pos(a[0], a[1], a[2], a[3]); // runtime: mode,speed,interval,duration
-    }}]},
-
-    // â”€â”€ Fan speed: maxFanSpeed positional â”€â”€
-    // UI sends string[] (speed): [0]=max, [1]=min, [2]=refrig, [3]=recirc,
-    //   [4]=updatePeriod, [5]=tempDiff, [6]=tempRef1, [7]=tempRef2
-    fanspeed: { tags: [{ armTag: 'maxFanSpeed', extract: b => {
-      const a = arr(b, 'speed');
-      if (a.length < 5) return '';
-      return pos(a[0], a[1], a[2], a[3], a[4], a[5] ?? '0', a[6] ?? '0', a[7] ?? '255');
-    }}]},
-
-    // â”€â”€ CO2 purge: selPurgeMode positional, mode-dependent â”€â”€
-    // UI sends string[8]: [0]=mode, [1]=minTemp, [2]=maxTemp, [3]=duration,
-    //   [4]=hoursSince, [5]=fanOut, [6]=doorOut, [7]=co2Setpoint
-    co2: { tags: [{ armTag: 'selPurgeMode', extract: b => {
-      const a = arr(b);
-      if (a.length === 0) return '';
-      const mode = parseInt(a[0]) || 0;
-      if (mode === 0) return pos(a[0]);
-      if (mode === 1) {
-        // Manual: mode, cycleTime(hoursSince), minTemp, maxTemp, duration, fanOut, doorOut
-        return pos(a[0], a[4], a[1], a[2], a[3], a[5], a[6]);
-      }
-      // Auto: mode, co2Set, minTemp, maxTemp, duration, fanOut, doorOut
-      return pos(a[0], a[7], a[1], a[2], a[3], a[5], a[6]);
-    }}]},
-
-    // â”€â”€ Humidifier: selHumidType positional â”€â”€
-    // UI sends string[8]: [0]=index, [1]=mode, [2-7]=duty cycles
-    humidifier: { tags: [{ armTag: 'selHumidType', extract: b => {
-      const a = arr(b, 'control');
-      if (a.length === 0) return '';
-      return pos(...a);
-    }}]},
-
-    // â”€â”€ Climacell: ClimacellEff positional â”€â”€
-    // UI sends string[7]: efficiency, altitude, altUnit, P, I, D, U
-    climacell: { tags: [{ armTag: 'ClimacellEff', extract: b => {
-      const a = arr(b);
-      return a.length >= 7 ? pos(a[0], a[1], a[2], a[3], a[4], a[5], a[6]) : '';
-    }}]},
-
-    // â”€â”€ ClimaCell times: comma-delimited, sendPost converts to '+' for transport â”€â”€
-    climacelltimes: { tags: [{ armTag: 'climacellTimes', extract: b => {
-      if (typeof b === 'object' && !Array.isArray(b)) {
-        return Array.from({ length: 48 }, (_, i) => b[String(i)] ?? '1').join(',');
-      }
-      return Array.isArray(b) ? b.slice(0, 48).join(',') : '';
-    }}]},
-
-    // â”€â”€ Runtimes: comma-delimited, sendPost converts to '+' for transport â”€â”€
-    runtimes: { tags: [{ armTag: 'runTimes', extract: b => {
-      if (typeof b === 'object' && !Array.isArray(b)) {
-        return Array.from({ length: 48 }, (_, i) => b[String(i)] ?? '1').join(',');
-      }
-      return Array.isArray(b) ? b.slice(0, 48).join(',') : '';
-    }}]},
-
-    // â”€â”€ Email: selEmailAlert mixed named/positional â”€â”€
-    // UI sends string[9]: [0]=enable, [1]=server, [2]=authType, [3]=port,
-    //   [4]=account, [5]=password, [6]=displayIP, [7]=toAddr, [8]=fromAddr
-    // Firmware field order: selEmailAlert, to, from, server, selEmailAuthType, emailPort, acct, pw, display
-    email: { tags: [{ armTag: 'selEmailAlert', extract: b => {
-      const a = arr(b);
-      if (a.length < 9) return '';
-      return [
-        a[0],
-        `_1=${a[7]}`,
-        `_2=${a[8]}`,
-        `_3=${a[1]}`,
-        `selEmailAuthType=${a[2]}`,
-        `emailPort=${a[3]}`,
-        `_6=${a[4]}`,
-        `_7=${a[5]}`,
-        `_8=${a[6]}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Date: Date positional â”€â”€
-    // UI sends { Date: string, Time: string, TimeType: string }
-    date: { tags: [{ armTag: 'Date', extract: b => {
-      if (b?.Date && b?.Time) return pos(b.Date, b.Time, b.TimeType ?? '0');
-      const a = arr(b);
-      return a.length >= 3 ? pos(a[0], a[1], a[2]) : '';
-    }}]},
-
-    // â”€â”€ Master/Slave: selMasterSlaveMode positional â”€â”€
-    // UI sends string[2]: [0]=mode, [1]=masterIP
-    master: { tags: [{ armTag: 'selMasterSlaveMode', extract: b => {
-      const a = arr(b);
-      return a.length >= 2 ? pos(a[0], a[1]) : (a.length === 1 ? pos(a[0]) : '');
-    }}]},
-
-    // â”€â”€ Alerts: AlertSetup â€” single string of 0/1 flags â”€â”€
-    // UI sends boolean[]
-    alerts: { tags: [{ armTag: 'AlertSetup', extract: b => {
-      if (!Array.isArray(b)) return '';
-
-      const incomingBits = b.map((v: any) => (v ? '1' : '0'));
-      const included = getIncludedAlertIndices();
-      const full = getFullAlertBits();
-
-      // Legacy behavior: excluded warnings are forced OFF.
-      for (let i = 0; i < WARNING_KEYS.length; i++) {
-        full[i] = '0';
-      }
-
-      // Expand filtered UI bits back into full warning bitmap.
-      for (let i = 0; i < included.length; i++) {
-        const fullIdx = included[i];
-        full[fullIdx] = incomingBits[i] ?? '0';
-      }
-
-      return full.join('');
-    }}]},
-
-    // â”€â”€ IO Config: p2IoConfig with AS2 prefix + dynamic o/i keys â”€â”€
-    // UI sends { outputConfig: string[], inputConfig: string[] }
-    // NOTE: Skip '-1' (unassigned) ports to keep body under the ARM's
-    // 600-byte MSG_RX_BUFFER_SIZE.  StoreIoConfig() clears all IO
-    // assignments first, so omitted ports default to IO_UNDEFINED.
-    ioconfig: { tags: [{ armTag: 'p2IoConfig', extract: b => {
-      const outputs = arr(b, 'outputConfig');
-      const inputs = arr(b, 'inputConfig');
-      if (outputs.length === 0 && inputs.length === 0) return '';
-      const parts = ['AS2'];
-      outputs.forEach((val, i) => { if (val !== undefined && val !== '' && val !== '-1') parts.push(`o${i}=${val}`); });
-      inputs.forEach((val, i) => { if (val !== undefined && val !== '' && val !== '-1') parts.push(`i${i}=${val}`); });
-      return parts.join('&');
-    }}]},
-
-    // â”€â”€ Log: recInterval positional â”€â”€
-    // UI sends string[2]: [0]=interval, [1]=wrap
-    log: { tags: [{ armTag: 'recInterval', extract: b => {
-      const a = arr(b);
-      return a.length >= 2 ? pos(a[0], a[1]) : '';
-    }}]},
-
-    // â”€â”€ Accounts: AcctId0 positional (encrypted, forward as-is) â”€â”€
-    // UI sends { users: string, passwords: string } â€” AES encrypted
-    // NOTE: Cannot decrypt without DH shared secret. Forward raw data.
-    accounts: { tags: [{ armTag: 'AcctId0', extract: b => {
-      if (b?.users !== undefined) {
-        return `${b.users}&_1=${b.passwords ?? ''}`;
-      }
-      const a = arr(b);
-      return a.length > 0 ? pos(...a) : '';
-    }}]},
-
-    // â”€â”€ PID: pidWrap positional (single value) â”€â”€
-    // UI sends { pidWrap: string, logDoors: string, logRefrig: string }
-    pid: { tags: [{ armTag: 'pidWrap', extract: b => {
-      if (b?.pidWrap !== undefined) return String(b.pidWrap);
-      const a = arr(b);
-      return a.length > 0 ? a[0] : '';
-    }}]},
-
-    // â”€â”€ PWM: p2PwmOutputs with AS2 prefix + dynamic channel keys â”€â”€
-    // UI sends string[]: each index is a PWM channel, value is equipment PID
-    pwm: { tags: [{ armTag: 'p2PwmOutputs', extract: b => {
-      const a = arr(b);
-      if (a.length === 0) return '';
-      const parts = ['AS2'];
-      a.forEach((val, i) => { if (val !== undefined && val !== '-1') parts.push(`${i}=${val}`); });
-      return parts.join('&');
-    }}]},
-
-    // â”€â”€ Analog board: BAdd named fields â”€â”€
-    // UI sends string[25]: [0]=addr, [2]=label, [4]=disabled, then per-sensor groups of 5
-    analog: { tags: [{ armTag: 'BAdd', extract: b => {
-      const a = arr(b);
-      if (a.length < 25) return '';
-      return [
-        a[0],
-        `BdLbl=${a[2] ?? ''}`,
-        `BDis=${a[4] ?? '0'}`,
-        `Sen1Lbl=${a[6] ?? ''}`,
-        `Sen1Off=${a[7] ?? '0'}`,
-        `Sen1Dis=${a[8] ?? '0'}`,
-        `Sen2Lbl=${a[11] ?? ''}`,
-        `Sen2Off=${a[12] ?? '0'}`,
-        `Sen2Dis=${a[13] ?? '0'}`,
-        `Sen3Lbl=${a[16] ?? ''}`,
-        `Sen3Off=${a[17] ?? '0'}`,
-        `Sen3Dis=${a[18] ?? '0'}`,
-        `Sen4Lbl=${a[21] ?? ''}`,
-        `Sen4Off=${a[22] ?? '0'}`,
-        `Sen4Dis=${a[23] ?? '0'}`,
-      ].join('&');
-    }}]},
-
-    // â”€â”€ Lights: no firmware POST tag â€” labels are read-only in firmware â”€â”€
-    lights: { tags: [] },
-
-    // â”€â”€ Aux program: AuxProgram named fields with dynamic rules â”€â”€
-    // UI sends { auxProg: string[], rules: Rule[], ... }
-    aux: { tags: [{ armTag: 'AuxProgram', extract: b => {
-      if (!b?.auxProg) return '';
-      const ap = b.auxProg as string[];
-      const rules = (b.rules ?? []) as Array<Record<string, any>>;
-      const parts = [ap[0]]; // AuxProgram = equipment index
-      for (let i = 0; i < rules.length; i++) {
-        const r = rules[i];
-        const n = i + 1;
-        if (i > 0 && r.andOr !== '256') parts.push(`andOr${n}=${r.andOr}`);
-        parts.push(`type${n}=${r.type}`);
-        parts.push(`io${n}=${r.io}`);
-        parts.push(`st${n}=${r.st}`);
-        parts.push(`op${n}=${r.op}`);
-        parts.push(`ref${n}=${r.ref}`);
-        parts.push(`sen${n}=${r.sen}`);
-        parts.push(`diff${n}=${r.diff ?? '0'}`);
-      }
-      parts.push(`dutyCycle=${ap[1] ?? '0'}`);
-      parts.push(`period=${ap[2] ?? '0'}`);
-      parts.push(`units=${ap[3] ?? '0'}`);
-      return parts.join('&');
-    }}]},
-  };
-
-  for (const [route, mapping] of Object.entries(pageSaveMap)) {
-    router.post(`/${route}`, async (req: Request, res: Response) => {
-      const body = req.body;
-      console.log(`[API] Save ${route}:`, JSON.stringify(body).slice(0, 200));
-
-      // Snapshot BEFORE state for audit diff. Safe & cheap â€” reads cache.
-      let beforeSnapshot: any = undefined;
-      try { beforeSnapshot = dataCache.buildPageData(route); }
-      catch { /* snapshot is best-effort; keep undefined on failure */ }
-
-      try {
-        for (const { armTag, extract } of mapping.tags) {
-          const value = extract(body);
-          if (value !== '') {
-            // Send to ARM via RTS/ACK handshake â€” ARM echoes back to update cache
-            await serialBridge.sendPost(`${armTag}=${value}`);
-          }
-        }
-
-        if (route === 'analog') {
-          await persistAnalogSaveToRs485(body);
-          await syncAnalogCacheFromRs485();
-        }
-
-        if (route === 'ioconfig') {
-          // Push equipment labels to orbit simulator(s) so the panel
-          // can display meaningful names instead of raw "DO1"/"DI1".
-          syncIoConfigToOrbit(body, dataCache).catch(err =>
-            console.warn('[API] Orbit ioconfig sync error:', err.message));
-        }
-
-        // Audit trail â€” record who saved what, with field-level before/after.
-        try {
-          const diff = beforeSnapshot !== undefined ? computeDiff(beforeSnapshot, body) : [];
-          const detail = diff.length > 0
-            ? `${diff.length} field${diff.length === 1 ? '' : 's'} changed`
-            : JSON.stringify(body).slice(0, 120);
-          recordSave(currentActor, currentSlot, currentLevel, route, detail, req.ip, diff);
-        } catch { /* audit must never break a save */ }
-
-        res.json({ ok: true });
-      } catch (err: any) {
-        console.error(`[API] Save ${route} error:`, err.message);
-        // Return ok:true anyway so the UI doesn't show error â€” cache is updated locally
-        // from the ARM echo in the normal data flow
-        res.status(503).json({ ok: false, error: err.message });
-      }
-    });
-  }
-
-  // â”€â”€â”€ Other POST endpoints â”€â”€â”€
+  // ─── Other POST endpoints ────────────────────────────────────────────
 
   /** Button press â€” sends a virtual button command to the ARM */
   router.post('/button', async (req: Request, res: Response) => {
@@ -1737,7 +1343,6 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
         console.log('[API] ClearAlarm â€” clearing cached warnings');
         dataCache.updateFromArm('AlarmData', '');
         dataCache.updateFromArm('WarningData', '');
-        dataCache.updateFromArm('VfdAlarmData', '');
         await serialBridge.sendPost('ClearAlarm=ClearAlarm');
 
         // Reset any faulted VFD drives â€” works for both RTU and simulated VFDs
@@ -1752,11 +1357,10 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
             }
           }
         }
-      } else if (body?.tag && body?.value !== undefined) {
-        await serialBridge.sendPost(`${body.tag}=${body.value}`);
-      } else if (body?.ButtonId !== undefined) {
-        await serialBridge.sendPost(`Button=${body.ButtonId}`);
       } else if (body?.tag) {
+        // (S9k cleanup 2026-04-21: removed `body.value !== undefined` and
+        // `body.ButtonId !== undefined` branches \u2014 no UI POST sends those
+        // shapes.  The legacy `Button=N` and `tag=value` paths are gone.)
         // Generic tag with extra fields (e.g. { tag: 'button2', SomeKey: 'val' })
         // Build URL-encoded body from non-tag fields
         const parts = Object.entries(body)
@@ -1774,163 +1378,266 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.json({ ok: true });
   });
 
-  /** Save settings â€” sends the complete POST body to the ARM via RTS/ACK handshake */
-  router.post('/PostSave.jsp', async (req: Request, res: Response) => {
-    const body = req.body;
-    console.log('[API] PostSave:', JSON.stringify(body));
+  // (S9k cleanup 2026-04-21: POST /PostSave.jsp removed — the legacy ARM2
+  // bulk-save endpoint is fully replaced by per-tag proto writes via
+  // /proto/write. NB: the original cleanup commit claimed "zero UI
+  // consumers", but missed the iotclient page — it was POSTing here
+  // and silently absorbing the 404 every save. Caller cleaned up
+  // 2026-05-09 in level2/iotclient/+page.svelte::update().)
 
-    try {
-      // Build URL-encoded body: "field1=val1&field2=val2&SessionID=0"
-      // The ARM expects the entire POST as a single framed message.
-      const parts: string[] = [];
-      if (body && typeof body === 'object') {
-        for (const [key, value] of Object.entries(body)) {
-          parts.push(`${key}=${value}`);
-        }
-      }
-      // Add SessionID if not present (ARM requires it for completion tracking)
-      if (!parts.some(p => p.startsWith('SessionID='))) {
-        parts.push('SessionID=0');
-      }
-      const postBody = parts.join('&');
-
-      const reply = await serialBridge.sendPost(postBody);
-      // Legacy ARM returns the literal strings "true"/"false".  The Nova
-      // shim resolves with `undefined` (no throw) when the command is
-      // handled successfully — treat that as success too.
-      const ok = reply === undefined || reply === 'true';
-      res.json({ ok, reply: reply ?? 'true' });
-    } catch (err: any) {
-      console.error('[API] PostSave error:', err.message);
-      res.status(503).json({ ok: false, error: err.message });
-    }
-  });
-
-  /** TCP/IP settings save */
+  /** TCP/IP settings save. Persists user intent to `tcpip.json` (consumed
+   * by `protoStream.encodeNetworkConfig` for the read side) and pushes a
+   * fresh NetworkConfig (envelope tag 19) to all proto-stream subscribers
+   * so the page can update without a reload. The firmware does not yet
+   * own this state in the simulator — see protoStream.ts for the
+   * production transition note. */
   router.post('/tcpip', (req: Request, res: Response) => {
-    console.log('[API] TCP/IP settings:', JSON.stringify(req.body));
+    const body = req.body ?? {};
+    // Page sends shape: { HttpPort:[port,publicIp], LocalIpAdd:[ip],
+    // LocalIpMask:[mask], LocalIpGateway:[gw], LocalIpMode:[mode],
+    // LocalDns:[dns1?, dns2?] }. We only persist user-config fields;
+    // ip_addr + mac come from the host NIC at read time.
+    const port      = parseInt(body?.HttpPort?.[0] ?? '', 10);
+    const publicIp  = String(body?.HttpPort?.[1] ?? '');
+    const ipMask    = String(body?.LocalIpMask?.[0] ?? '');
+    const ipGateway = String(body?.LocalIpGateway?.[0] ?? '');
+    const ipMode    = parseInt(body?.LocalIpMode?.[0] ?? '', 10);
+    const dnsArr    = Array.isArray(body?.LocalDns)
+      ? (body.LocalDns as unknown[]).map(String).filter((s) => s && s !== '...')
+      : [];
+
+    saveConfig('tcpip', {
+      httpPort:  Number.isFinite(port) ? port : undefined,
+      publicIp:  publicIp || undefined,
+      ipMask:    ipMask    || undefined,
+      ipGateway: ipGateway || undefined,
+      ipMode:    Number.isFinite(ipMode) ? ipMode : undefined,
+      dns:       dnsArr,
+    });
+
+    onTcpipSavedHook?.();
+    console.log(`[API] TCP/IP settings persisted (mode=${ipMode}, port=${port}, dns=${dnsArr.length})`);
     res.json({ ok: true });
   });
 
-  /** Network configuration save */
-  router.post('/network', (_req: Request, res: Response) => {
-    res.json({ ok: true });
+  // (S9g: POST /network removed — page no longer fires it; composite is
+  // reactive so no manual refresh round-trip is needed.)
+
+  /** UI locale persistence. Pure UI state — bridge has no business
+   * decoding it; we just persist so it survives restarts and is
+   * available to any future server-rendered surface. */
+  router.post('/locale', (req: Request, res: Response) => {
+    const loc = String(req.body?.locale ?? '').trim();
+    if (!loc) {
+      res.status(400).json({ ok: false, error: 'locale required' });
+      return;
+    }
+    saveConfig('locale', loc);
+    res.json({ ok: true, locale: loc });
+  });
+  router.get('/locale', (_req: Request, res: Response) => {
+    res.json({ locale: loadConfig<string>('locale') ?? 'en' });
   });
 
   /** Node configuration */
-  router.post('/node', (req: Request, res: Response) => {
-    console.log('[API] Node config:', JSON.stringify(req.body));
-    res.json({ ok: true });
-  });
+  /* (May 2026 cleanup: removed POST /iot/node and GET /iot/node/:ip.
+     Both were accept-and-discard stubs (POST logged the body and
+     returned ok; GET returned `{ip, status:'unknown'}`). No UI page
+     consumes them. The level2/master "Find Nodes" button currently
+     fires `tag:'findNodes'` at /iot/button which collapses to a no-op
+     in commandDispatcher.sendPost — multi-panel master/slave
+     discovery needs a real CMD_FIND_BOARD wire, see
+     /memories/repo/iot-button-audit.md. */
 
-  router.get('/node/:ip', (req: Request, res: Response) => {
-    res.json({ ip: req.params.ip, status: 'unknown' });
-  });
+  /* IO rename: removed POST /iot/ioconfig/:idx/:name.
+     The level2/ioconfig page now writes IoNameUpdate directly via
+     /proto/write/40 (TAG.IoNameUpdate). Nova firmware
+     LpSettings_ApplyIoName validates the slot's renamable flag,
+     persists the rename to OSPI, and re-broadcasts IoDefinition
+     (envelope tag 25). The legacy `serialBridge.sendPost('ioRename=…')`
+     ASCII RTS/ACK call was a dead drop on LP-AM2434 — see
+     /memories/repo/legacy-migration-plan.md. */
 
-  /**
-   * IO config rename â€” sends ioRename POST to ARM via RTS/ACK handshake.
-   * Firmware StoreIoName() stores the name for renamable equipment.
-   */
-  router.post('/ioconfig/:idx/:name', async (req: Request, res: Response) => {
-    const idx = req.params.idx;
-    const name = decodeURIComponent(req.params.name);
-    console.log(`[API] IO rename: idx=${idx} name=${name}`);
+  /* S9k cont 10: removed POST /iot/setfanspeed.
+     level1/fanspeed `Set` button now writes FanSpeedSettings.maxSpeed
+     directly via /proto/write/41. The serialBridge.sendCommand stub it
+     called was a no-op since S9k cont 9. */
 
-    try {
-      await serialBridge.sendPost(`ioRename=${idx}&name=${name}`);
-
-      console.log(`[API] IO rename complete: ioRename=${idx} â†’ "${name}"`);
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error('[API] IO rename error:', err.message);
-      res.status(503).json({ ok: false, error: err.message });
-    }
-  });
-
-  /** Fan speed set */
-  router.post('/setfanspeed', (req: Request, res: Response) => {
-    console.log('[API] Set fan speed:', JSON.stringify(req.body));
-    if (req.body?.setFanSpeed !== undefined) {
-      serialBridge.sendCommand('maxFanSpeed', String(req.body.setFanSpeed));
-    }
-    res.json({ ok: true });
-  });
-
-  /**
-   * Settings download â€” returns ALL cached settings as a text file.
-   * Replicates GellertServerD's settings-to-USB download.
-   * The Svelte UI collects these for backup/restore.
-   */
-  router.post('/settings/download', (req: Request, res: Response) => {
-    console.log('[API] Settings download requested');
-    try {
-      const allData = dataCache.getAll();
-      // Build a text representation: one key=value per line
-      const lines: string[] = [];
-      for (const [key, value] of Object.entries(allData)) {
-        lines.push(`${key}=${value}`);
-      }
-      const content = lines.join('\n');
-      console.log(`[API] Settings download: ${lines.length} entries`);
-      res.json({ ok: true, content, count: lines.length });
-    } catch (err: any) {
-      console.error('[API] Settings download error:', err.message);
-      res.status(503).json({ ok: false, error: err.message });
-    }
-  });
-
-  /**
-   * Settings restore â€” relay saved settings back to the ARM.
-   * Replicates GellertServerD CallBacks.c PostSettingsRestore handler:
-   *   1. Send FanRemoteOff=2 (REMOTE_OFF â€” prevents fan control conflicts)
-   *   2. For each settings line: send RestoreSettings=1&<line>
-   *   3. Send FanRemoteOff=0 (REMOTE_ON)
+  /* ─── Settings export / import (level2/settings page) ──────────────────
    *
-   * The ARM CGI tag for RestoreSettings is "RestoreSettings";
-   * VarString "1" tells the ARM a settings line follows after the '&'.
-   */
-  router.post('/settings/restore', async (req: Request, res: Response) => {
-    const body = req.body;
-    console.log('[API] Settings restore:', JSON.stringify(body).slice(0, 200));
+   * Round-tripped pairs of (envelope tag, SettingsUpdate field). Read
+   * side: the bridge already has the latest raw nanopb payload per
+   * envelope tag in NovaDataStore (the same cache /proto/stream replays
+   * on subscribe). Write side: each SettingsUpdate field maps to a
+   * firmware decoder (LpSettings_Apply* in lp_settings.c). The two
+   * field numbers are NOT the same: envelope tags 40–67 carry
+   * settings broadcast frames, while the SettingsUpdate oneof uses 1–40
+   * (mirrors `SETTINGS_FIELD` in src/lib/business/protoWrite.ts).
+   *
+   * Single source of truth in the UI is `SETTINGS_FIELD` — keep the two
+   * lists in sync when adding new settings. */
+  const SETTINGS_EXPORT_TABLE: { name: string; envelopeTag: number; settingsField: number }[] = [
+    { name: 'PlenumSettings',      envelopeTag: 40, settingsField: 1  },
+    { name: 'FanSpeedSettings',    envelopeTag: 41, settingsField: 2  },
+    { name: 'FanBoostSettings',    envelopeTag: 42, settingsField: 3  },
+    { name: 'RampRateSettings',    envelopeTag: 43, settingsField: 4  },
+    { name: 'RefrigSettings',      envelopeTag: 44, settingsField: 5  },
+    { name: 'BurnerSettings',      envelopeTag: 45, settingsField: 6  },
+    { name: 'Co2Settings',         envelopeTag: 46, settingsField: 7  },
+    { name: 'CureSettings',        envelopeTag: 47, settingsField: 8  },
+    { name: 'ClimacellSettings',   envelopeTag: 48, settingsField: 9  },
+    { name: 'ClimacellTimes',      envelopeTag: 49, settingsField: 10 },
+    { name: 'HumidCtrlSettings',   envelopeTag: 50, settingsField: 11 },
+    { name: 'OutsideAirSettings',  envelopeTag: 51, settingsField: 12 },
+    { name: 'MiscSettings',        envelopeTag: 52, settingsField: 13 },
+    { name: 'FailureSettings',     envelopeTag: 53, settingsField: 14 },
+    { name: 'FailureSettings2',    envelopeTag: 54, settingsField: 15 },
+    { name: 'TempAlarmSettings',   envelopeTag: 55, settingsField: 16 },
+    { name: 'DoorSettings',        envelopeTag: 56, settingsField: 19 },
+    { name: 'LoadMonitorSettings', envelopeTag: 57, settingsField: 20 },
+    { name: 'UserLogSettings',     envelopeTag: 59, settingsField: 22 },
+    { name: 'EmailSettings',       envelopeTag: 62, settingsField: 27 },
+    { name: 'AlertSettings',       envelopeTag: 63, settingsField: 28 },
+    { name: 'PwmChannelSettings',  envelopeTag: 64, settingsField: 30 },
+    { name: 'MasterSlaveSettings', envelopeTag: 66, settingsField: 25 },
+    { name: 'PidLogSettings',      envelopeTag: 67, settingsField: 37 },
+    { name: 'AnalogBoard',         envelopeTag: 26, settingsField: 29 },
+    { name: 'IoConfig',            envelopeTag: 24, settingsField: 39 },
+    { name: 'BasicSetup',          envelopeTag: 20, settingsField: 32 },
+    { name: 'AccountSettings',     envelopeTag: 29, settingsField: 38 },
+    { name: 'ServiceInfo',         envelopeTag: 23, settingsField: 31 },
+    /* DateTime / NetworkConfig intentionally NOT round-tripped:
+     *   - DateTime: importing a stale wall clock is a footgun.
+     *   - NetworkConfig: importing IP/mask/gw on a different panel
+     *     would knock the source panel off the LAN.
+     * Runtimes / AuxProgramSettings / IoNameUpdate are also excluded:
+     *   - Runtimes: hour counters are panel-history, not config.
+     *   - AuxProgramSettings: write-side is per-channel; export comes
+     *     from AuxProgramBundle (envelope tag 72) which doesn't
+     *     decode 1:1 into a single SettingsUpdate field.
+     *   - IoNameUpdate: write-only sentinel, no broadcast frame. */
+  ];
 
+  /** GET /iot/settings/export — returns the current settings as a
+   *  downloadable JSON blob the UI restore endpoint can replay. */
+  router.get('/settings/export', (_req: Request, res: Response) => {
+    if (!novaStore) {
+      res.status(503).json({ ok: false, error: 'nova_store_not_ready' });
+      return;
+    }
+    const fields: { name: string; settingsField: number; envelopeTag: number; b64: string }[] = [];
+    const missing: string[] = [];
+    for (const e of SETTINGS_EXPORT_TABLE) {
+      const buf = novaStore.getRawMessage(e.envelopeTag);
+      if (!buf || buf.length === 0) {
+        missing.push(e.name);
+        continue;
+      }
+      fields.push({
+        name: e.name,
+        settingsField: e.settingsField,
+        envelopeTag: e.envelopeTag,
+        b64: buf.toString('base64'),
+      });
+    }
+    const blob = {
+      version:   1,
+      generated: new Date().toISOString(),
+      panel:     dataCache.getByVarName('StorageName')?.value?.split(',')[0] ?? 'Constellation',
+      fields,
+      missing,
+    };
+    console.log(`[API] Settings export: ${fields.length}/${SETTINGS_EXPORT_TABLE.length} groups (${missing.length} not yet broadcast)`);
+    res.json(blob);
+  });
+
+  /** POST /iot/settings/import — replays a previously-exported blob.
+   *  Body must match the GET /export shape. */
+  router.post('/settings/import', async (req: Request, res: Response) => {
+    if (!serialBridge.importSettings) {
+      res.status(503).json({ ok: false, error: 'import_not_supported' });
+      return;
+    }
+    const body = req.body as { version?: number; fields?: { settingsField: number; b64: string }[] } | undefined;
+    if (!body || !Array.isArray(body.fields) || body.fields.length === 0) {
+      res.status(400).json({ ok: false, error: 'no_fields_in_body' });
+      return;
+    }
+    if (body.version !== 1) {
+      res.status(400).json({ ok: false, error: `unsupported_version: ${body.version}` });
+      return;
+    }
+    /* Whitelist: only allow settingsField values that appear in our
+     * round-trip table. Prevents a tampered file from poking a field
+     * we explicitly excluded (DateTime, NetworkConfig, ...). */
+    const allowed = new Set(SETTINGS_EXPORT_TABLE.map((e) => e.settingsField));
+    const accepted = body.fields.filter((f) => allowed.has(f.settingsField | 0));
+    const rejected = body.fields.length - accepted.length;
+    console.log(`[API] Settings import: ${accepted.length} groups accepted, ${rejected} rejected (not on round-trip whitelist)`);
     try {
-      const content: string = body?.content || '';
-      if (!content) {
-        res.json({ ok: false, error: 'No settings content provided' });
-        return;
-      }
-
-      const lines = content.split('\n').filter((l: string) => l.trim().length > 0);
-      console.log(`[API] Settings restore: ${lines.length} lines to relay`);
-
-      // Step 1: Disable fan remote control to avoid conflicts
-      await serialBridge.sendPost('FanRemoteOff=2');
-      await new Promise(r => setTimeout(r, 300));
-
-      // Step 2: Send each settings line (matches RelaySystemSettingsMessage)
-      let sent = 0;
-      for (const line of lines) {
-        await serialBridge.sendPost(`RestoreSettings=1&${line.trim()}`);
-        sent++;
-        // Small delay between lines (ARM clears VarString in ~300ms)
-        await new Promise(r => setTimeout(r, 100));
-      }
-
-      // Step 3: Re-enable fan remote control
-      await serialBridge.sendPost('FanRemoteOff=0');
-
-      console.log(`[API] Settings restore complete: ${sent}/${lines.length} lines sent`);
-      res.json({ ok: true, sent, total: lines.length });
+      const result = await serialBridge.importSettings(accepted);
+      res.json({ ok: true, applied: result.ok, total: result.total, failed: result.failed, rejected });
     } catch (err: any) {
-      console.error('[API] Settings restore error:', err.message);
+      console.error('[API] Settings import error:', err.message);
       res.status(503).json({ ok: false, error: err.message });
     }
   });
 
-  /** Email test */
-  router.post('/email/test', (req: Request, res: Response) => {
-    console.log('[API] Email test:', JSON.stringify(req.body));
-    res.json({ ok: true, message: 'Test email sent' });
+  /**
+   * Email test — actually sends a test email using the stored EmailSettings
+   * (server, port, username, password, fromAddr, toAddr, authType).
+   *
+   * authType maps from the UI Select:
+   *   0 = StartTLS  → secure:false, opportunistic STARTTLS upgrade (port 587 typical)
+   *   1 = TLS-SSL   → secure:true,  implicit TLS                   (port 465 typical)
+   *   2 = None      → secure:false, no STARTTLS                    (port 25 typical)
+   * The UI lets the operator pick port + authType independently;
+   * we honor whatever they saved.
+   */
+  router.post('/email/test', async (_req: Request, res: Response) => {
+    if (!novaStore?.emailSettings) {
+      res.status(503).json({ ok: false, error: 'Email settings not loaded yet' });
+      return;
+    }
+    const e = novaStore.emailSettings;
+    if (e.enabled !== 0) {
+      // enabled: 0 = enable (legacy inverted bool), 1 = disable
+      res.status(400).json({ ok: false, error: 'Email alerts are disabled' });
+      return;
+    }
+    if (!e.server || !e.port || !e.fromAddr || !e.toAddr) {
+      res.status(400).json({ ok: false, error: 'Email settings incomplete (need server, port, from, to)' });
+      return;
+    }
+    const secure = e.authType === 1; // TLS-SSL
+    const requireTLS = e.authType === 0; // StartTLS
+    const auth = e.username ? { user: e.username, pass: e.password } : undefined;
+    const transport = nodemailer.createTransport({
+      host: e.server,
+      port: e.port,
+      secure,
+      requireTLS,
+      auth,
+      // Modest timeouts so the UI button doesn't hang forever on a typo.
+      connectionTimeout: 15000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
+    });
+    try {
+      const info = await transport.sendMail({
+        from: e.fromAddr,
+        to: e.toAddr,
+        subject: 'Constellation test email',
+        text: 'This is a test email from the Constellation panel. If you received this, alerts are configured correctly.',
+      });
+      console.log(`[API] Email test sent: messageId=${info.messageId} to=${e.toAddr}`);
+      res.json({ ok: true, messageId: info.messageId });
+    } catch (err: any) {
+      console.error('[API] Email test error:', err.message);
+      res.status(502).json({ ok: false, error: err.message });
+    } finally {
+      transport.close();
+    }
   });
 
   /** Upgrade upload â€” handle multipart/form-data .rpi file upload */
@@ -2493,13 +2200,10 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.status(200).end();
   });
 
-  // â”€â”€â”€ User log download â”€â”€â”€
+  // (S9k cleanup 2026-04-21: duplicate GET /user/download handler removed
+  // — Express only ever invoked the first one at line ~1033.)
 
-  router.get('/user/download', (req: Request, res: Response) => {
-    res.json({ data: [] });
-  });
-
-  // â”€â”€â”€ Debug / health â”€â”€â”€
+  // ─── Debug / health ───
 
   router.get('/health', (_req: Request, res: Response) => {
     res.json({
@@ -2514,117 +2218,10 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.json(dataCache.getAll());
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  // AuxProgram parsing helpers
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // (Apr 2026 proto-direct migration: parseAuxProgram, buildDefaultAuxRules,
+  // and discoverAuxPrograms removed alongside /iot/aux/all. The auxiliary
+  // page now consumes auxiliaryComposite (protoStores.ts) directly.)
 
-  /**
-   * Parse an AuxProgram wire-format string into the UI's allAux entry format.
-   *
-   * Wire format: "eqIndex:dutyCycle:period:units,type:io:st:op:sen:andOr:ref,...Ã—6,,"
-   * UI format:   { auxProg: [eq,duty,period,units], rules: Rule[6] }
-   *
-   * Rule visibility: rules after an END marker (andOr=255) get andOr='256' (hidden).
-   */
-  function parseAuxProgram(raw: string): { auxProg: string[]; rules: any[] } {
-    const parts = raw.split(',').filter(p => p.trim() !== '');
-
-    // Header: eqIndex:dutyCycle:period:units
-    const hp = (parts[0] || '').split(':');
-    const auxProg = [hp[0] || '0', hp[1] || '100', hp[2] || '1', hp[3] || '1'];
-
-    // Parse 6 rules
-    const rules: any[] = [];
-    let showNext = true; // Rule 0 is always visible
-
-    for (let i = 0; i < 6; i++) {
-      const ruleStr = parts[i + 1] || '';
-      const rp = ruleStr ? ruleStr.split(':') : [];
-
-      const type       = rp[0] || '255';
-      const io         = rp[1] || '0';
-      const st         = rp[2] || '0';
-      const op         = rp[3] || '0';
-      const sensorVal  = rp[4] || '0';
-      const andOrWire  = rp[5] || '255';
-      const ref        = rp[6] || '0';
-
-      // For sensor rules (type=4), split sensorValue into sen/diff based on state.
-      // st='0' = absolute mode â†’ sen=sensorValue, diff='0'
-      // st='1' = reference mode â†’ diff=sensorValue, sen='255'
-      let sen  = sensorVal;
-      let diff = '0';
-      if (type === '4' && st === '1') {
-        diff = sensorVal;
-        sen  = '255';
-      }
-
-      const andOr: string = showNext ? andOrWire : '256';
-
-      rules.push({
-        type, io, st, op, sen, diff, andOr, ref,
-        first: i === 0,
-        sensorOption: '',
-      });
-
-      // Only show next rule if current one chains (AND=0 or OR=1)
-      showNext = (andOr === '0' || andOr === '1');
-    }
-
-    return { auxProg, rules };
-  }
-
-  /** Build default rules for a defined-but-uncached aux program (RT_MANUAL init). */
-  function buildDefaultAuxRules(): any[] {
-    const rules: any[] = [];
-    for (let i = 0; i < 6; i++) {
-      rules.push({
-        type: i === 0 ? '0' : '255',   // RT_MANUAL for first, RT_UNDEFINED for rest
-        io: '0',
-        st: '0',
-        op: '0',
-        sen: '0',
-        diff: '0',
-        andOr: i === 0 ? '255' : '256', // END for first, hidden for rest
-        ref: '0',
-        first: i === 0,
-        sensorOption: '',
-      });
-    }
-    return rules;
-  }
-
-  /**
-   * Trigger async NextAux commands to the ARM to collect missing aux programs.
-   * The ARM responds to each NextAux with the next defined AuxProgram, which
-   * the bridge accumulates in the dataCache. Subsequent /aux/all requests
-   * will include the newly discovered data.
-   */
-  let auxDiscoveryRunning = false;
-  function discoverAuxPrograms(bridge: CommandBridge, lastKnownEq: string, count: number): void {
-    if (auxDiscoveryRunning) return;
-    auxDiscoveryRunning = true;
-    console.log(`[API] Starting aux discovery: ${count} missing, sending NextAux from eq ${lastKnownEq}`);
-
-    (async () => {
-      try {
-        let currentEq = lastKnownEq;
-        // Send NextAux up to count+1 times to cycle through all defined programs
-        for (let i = 0; i < Math.min(count + 1, 8); i++) {
-          await bridge.sendPost(`NextAux=${currentEq}`);
-          // Small delay to let the ARM's AuxProgram response arrive and get cached
-          await new Promise(r => setTimeout(r, 500));
-          // Update currentEq from latest accumulated data
-          const latest = [...dataCache.getAllAuxPrograms().keys()].pop();
-          if (latest) currentEq = latest;
-        }
-      } catch (err: any) {
-        console.error('[API] Aux discovery error:', err.message);
-      } finally {
-        auxDiscoveryRunning = false;
-      }
-    })();
-  }
 
   // â”€â”€â”€ VFD / Fans page endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -2636,23 +2233,12 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.json({ drives: vfdClient.getDrives() });
   });
 
-  // VFD alarms â€” returns active fault alarms from all drives in KEY=Text format
-  router.get('/alarms', (_req: Request, res: Response) => {
-    if (!vfdClient) {
-      res.json({ alarms: [] });
-      return;
-    }
-    const alarms: string[] = [];
-    for (const drv of vfdClient.getDrives()) {
-      if (drv.faulted && drv.faultCode) {
-        const profile = getProfile(drv.manufacturer);
-        const faultName = profile.faultNames[drv.faultCode]
-          ?? `Code 0x${drv.faultCode.toString(16).padStart(4, '0')}`;
-        alarms.push(`WARN_VFD=${drv.label}: ${faultName}`);
-      }
-    }
-    res.json({ alarms });
-  });
+  // NOTE: GET /vfd/alarms (the WARN_VFD synthesizer) was removed when
+  // fan-failure detection moved into Nova firmware
+  // (nova_failures.c::FanFailChk + nova_vfd.c). Drive faults now flow
+  // through the standard WARN_FAN path with the faulted drive index in
+  // the eqIo slot, so the UI alarm modal renders them via the same
+  // AlarmData stream as every other firmware warning.
 
   router.post('/fans/control', async (req: Request, res: Response) => {
     if (!vfdClient) {
@@ -2704,19 +2290,17 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     const faultCode = faultCodes[Math.floor(Math.random() * faultCodes.length)];
     const faultName = profile.faultNames[faultCode];
 
-    // Proxy to orbit simulator which owns the VFDSimulator
-    const orbitPort = parseInt(process.env.ORBIT_API_PORT || '9010', 10);
-    try {
-      const resp = await fetch(`http://127.0.0.1:${orbitPort}/api/vfd/fault`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ unitId, faultCode }),
-      });
-      const data = await resp.json() as { ok: boolean };
-      res.json({ ok: data.ok, faultCode, faultName });
-    } catch (err) {
-      res.status(502).json({ ok: false, error: 'Orbit simulator unreachable' });
-    }
+    // (Apr 29 2026 mbtcp migration) The orbit-simulator was the only
+    // VFDSimulator host; with it retired, fault injection has no place
+    // to land. Real hardware doesn't take injected faults — they happen
+    // for real. Surface honestly so the UI fault-injection UX (sim-only
+    // affordance) can be retired or rewired to talk straight to a
+    // standalone VFD sim.
+    void unitId; void faultCode; void faultName;
+    res.status(503).json({
+      ok: false,
+      error: 'VFD fault injection retired with orbit-simulator REST API',
+    });
   });
 
   // Fan control mode configuration.
@@ -2951,105 +2535,185 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     }
   });
 
-  // â”€â”€â”€ GDC (Door Controller) API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Proxy to the GDC orbit board's REST API.  Only responds if a GDC board
-  // is discovered; returns { present: false } otherwise.
+  // ─── GDC (Door Controller) API ───────────────────────────────────────
+  // Reads/writes the GDC orbit board's HR map directly via Modbus TCP
+  // (orbitMbtcp.ts). Per-slot host comes from `resolveOrbitHost(slot)`.
+  // Errors are surfaced honestly: 503 with the underlying mbtcp error
+  // when the board is unreachable; only the "no GDC role assigned" case
+  // returns the soft `{ present: false }` reply the UI expects.
   //
-  // Port resolution: orbit manager assigns API ports as (9008 + orbit_id).
-  // Each orbit's DIP switch ID is (slot + 2), so API port = 9008 + (slot + 2) = ORBIT_API_PORT + slot.
-  // But if the sensor sim occupies the same port (9011), we scan multiple ports.
+  // HR map (orbit_gdc.h):
+  //   300       door_pct_x10            R/W   0..1000
+  //   301       default_travel_ms       R/W   ms
+  //   302       active_stage_count      R     uint
+  //   303       calibrating             R     0/1
+  //   304       cal_phase               R     0=idle 1=opening 2=closing
+  //   305       cal_request             W     1 = start calibration
+  //   310..314  actuator[i].pos_x10     R     0..1000
+  //   315..319  actuator[i].target_x10  R     0..1000
+  //   320..324  actuator[i].status_bits R     bit0 moving / bit1 open_sw
+  //                                            bit2 close_sw / bit3 calibrated
+  //   325..329  actuator[i].stage       R/W   0..5  (0 = unassigned)
+  //   330..334  actuator[i].open_ms     R/W   uint
+  //   335..339  actuator[i].close_ms    R/W   uint
 
-  async function findGDCPort(): Promise<number | null> {
+  function findGdcSlotHost(): { slot: number; host: string } | null {
+    // role 2 = GDC. dataCache is populated from firmware OrbitStatus.
     const gdc = dataCache.getOrbitBoards().find(b => b.role === 2 && b.connected);
     if (!gdc) return null;
-    const port = ORBIT_API_PORT + gdc.slot;
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/gdc`, {
-        signal: AbortSignal.timeout(500),
-      });
-      if (resp.ok) return port;
-    } catch {}
-    return null;
+    return { slot: gdc.slot, host: resolveOrbitHost(gdc.slot) };
   }
 
+  /** GET /iot/gdc — synthesised from HR 300..339. */
   router.get('/gdc', async (_req: Request, res: Response) => {
-    const port = await findGDCPort();
-    if (!port) {
-      res.json({ present: false });
-      return;
-    }
+    const target = findGdcSlotHost();
+    if (!target) { res.json({ present: false }); return; }
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/gdc`, {
-        signal: AbortSignal.timeout(1000),
-      });
-      if (resp.ok) {
-        const data = await resp.json() as Record<string, unknown>;
-        res.json({ present: true, ...data });
-      } else {
-        res.json({ present: false });
+      // Single block read covers the whole GDC range (40 regs).
+      const regs = await readHoldingRegs(target.host, 300, 40);
+      // Indexing helper relative to base 300.
+      const r = (a: number) => regs[a - 300];
+
+      const actuators: Array<{
+        index: number;
+        label: string;
+        pos: number;
+        target: number;
+        stageAssignment: number;
+        openTravelTime: number;
+        closeTravelTime: number;
+        moving: boolean;
+        openSwitch: boolean;
+        closeSwitch: boolean;
+        calibrated: boolean;
+      }> = [];
+      const ACT_COUNT = 5;
+      for (let i = 0; i < ACT_COUNT; i++) {
+        const status = r(320 + i);
+        actuators.push({
+          index:        i + 1,
+          // Default label "Door 1".."Door 5" since the LP HR map carries
+          // no per-actuator labels.
+          // LP-MISSING: actuator labels — needs HR string region in firmware
+          label:        `Door ${i + 1}`,
+          pos:          r(310 + i) / 10,           // 0..100.0%
+          target:       r(315 + i) / 10,
+          stageAssignment: r(325 + i),
+          openTravelTime:  r(330 + i),
+          closeTravelTime: r(335 + i),
+          moving:       (status & 0x0001) !== 0,
+          openSwitch:   (status & 0x0002) !== 0,
+          closeSwitch:  (status & 0x0004) !== 0,
+          calibrated:   (status & 0x0008) !== 0,
+        });
       }
-    } catch {
-      res.json({ present: false });
+
+      // Synthesise stages[] from actuator.stageAssignment. Stage labels
+      // default to "Stage N" — the LP HR map has no label region.
+      // LP-MISSING: stage labels — needs HR string region in firmware
+      const stageNums = Array.from(
+        new Set(actuators.map(a => a.stageAssignment).filter(s => s > 0)),
+      ).sort((a, b) => a - b);
+      const stages = stageNums.map(stageNum => ({
+        stageNum,
+        label: `Stage ${stageNum}`,
+        doors: actuators
+          .filter(a => a.stageAssignment === stageNum)
+          .map(a => ({ index: a.index, label: a.label })),
+      }));
+
+      // Total system capacity = sum of open_travel_ms over assigned
+      // actuators (uncalibrated → default_travel_ms fallback).
+      const defaultTravel = r(301);
+      let totalCapacity = 0;
+      for (const a of actuators) {
+        if (a.stageAssignment > 0) {
+          totalCapacity += (a.calibrated && a.openTravelTime > 0)
+            ? a.openTravelTime
+            : defaultTravel;
+        }
+      }
+
+      res.json({
+        present: true,
+        slot: target.slot,
+        freshAirDoorPct:    r(300) / 10,
+        actuatorTravelTime: defaultTravel,
+        activeStageCount:   r(302),
+        calibrating:        r(303) !== 0,
+        calibrationPhase:   r(304),
+        totalCapacity,
+        stages,
+        actuators,
+        // LP-MISSING: per-stage runtime totals — needs HR counters in firmware
+        // LP-MISSING: door labels — needs HR string region in firmware
+      });
+    } catch (err: any) {
+      res.status(503).json({ present: false, error: String(err?.message ?? err) });
     }
   });
 
+  /** POST /iot/gdc/stages — reassign actuators to stages.
+   *  Body: { stages: [{ stageNum, doors: [1,2,...] }] }
+   *  Writes HR_GDC_STAGE_BASE+i (325..329) per actuator. Doors not
+   *  named in any stage are cleared to stage 0 (unassigned). Stage
+   *  labels in the request body are ignored — LP has no label region.
+   */
   router.post('/gdc/stages', async (req: Request, res: Response) => {
-    const port = await findGDCPort();
-    if (!port) {
+    const target = findGdcSlotHost();
+    if (!target) {
       res.status(404).json({ ok: false, error: 'No GDC board found' });
       return;
     }
+    const stages = req.body?.stages;
+    if (!Array.isArray(stages)) {
+      res.status(400).json({ ok: false, error: 'stages must be an array' });
+      return;
+    }
+    const ACT_COUNT = 5;
+    const stageOf = new Array<number>(ACT_COUNT).fill(0);
+    for (const s of stages) {
+      if (typeof s?.stageNum !== 'number') {
+        res.status(400).json({ ok: false, error: 'each stage needs stageNum' });
+        return;
+      }
+      if (Array.isArray(s.doors)) {
+        for (const d of s.doors) {
+          const idx = (d | 0) - 1;
+          if (idx >= 0 && idx < ACT_COUNT) stageOf[idx] = s.stageNum & 0xFFFF;
+        }
+      }
+    }
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/gdc/stages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body),
-        signal: AbortSignal.timeout(2000),
-      });
-      const data = await resp.json();
-      res.status(resp.status).json(data);
+      // Block write 325..329 in one FC16.
+      await writeHoldingRegs(target.host, 325, stageOf);
+      res.json({ ok: true });
     } catch (err: any) {
-      res.status(502).json({ ok: false, error: err.message ?? 'GDC unreachable' });
+      res.status(503).json({ ok: false, error: String(err?.message ?? err) });
     }
   });
 
+  /** POST /iot/gdc/calibrate — kick HR_GDC_CAL_REQUEST=1. */
   router.post('/gdc/calibrate', async (_req: Request, res: Response) => {
-    const port = await findGDCPort();
-    if (!port) {
+    const target = findGdcSlotHost();
+    if (!target) {
       res.status(404).json({ ok: false, error: 'No GDC board found' });
       return;
     }
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/gdc/calibrate`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(2000),
-      });
-      const data = await resp.json();
-      res.status(resp.status).json(data);
+      await writeHoldingReg(target.host, 305, 1);
+      res.json({ ok: true });
     } catch (err: any) {
-      res.status(502).json({ ok: false, error: err.message ?? 'GDC unreachable' });
+      res.status(503).json({ ok: false, error: String(err?.message ?? err) });
     }
   });
 
-  // ─── Triton (Refrigeration) API ──────────────────────────────────────────
-  // Proxy to each Triton orbit board.  Routes are slot-scoped so the Level 2
-  // refrigeration page can paginate across multiple Tritons.
-
-  /** Resolve API port for a given Triton slot, returning null if unreachable. */
-  async function findTritonPort(slot: number): Promise<number | null> {
-    const triton = dataCache.getOrbitBoards().find(
-      b => b.slot === slot && b.role === 3 && b.connected,
-    );
-    if (!triton) return null;
-    const port = ORBIT_API_PORT + triton.slot;
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/triton`, {
-        signal: AbortSignal.timeout(500),
-      });
-      if (resp.ok) return port;
-    } catch {}
-    return null;
-  }
+  // ─── Triton (Refrigeration) API ──────────────────────────────────────
+  // Reads happen via direct Modbus TCP to the Triton orbit (mbtcp pool,
+  // see orbitMbtcp.ts). Writes still go through the LP firmware
+  // (`serialBridge.tritonRegWrite`, envelope tag 125) since the bridge
+  // doesn't own the Modbus master role on the orbit bus in production —
+  // that was a sim-mode artefact. Per-slot host: `resolveOrbitHost(slot)`.
 
   /**
    * GET /iot/triton/list — summary of all Triton boards (used to build the
@@ -3068,36 +2732,206 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
   });
 
-  /** GET /iot/triton/:slot — full state snapshot for one Triton unit. */
+  /**
+   * GET /iot/triton/:slot — full state snapshot synthesised from the
+   * Triton HR map (orbit_triton.h). Fields the LP doesn't currently
+   * expose are absent from the response — the UI must use optional
+   * chaining or accept visible breakage as a real follow-up item.
+   *
+   * Reads (4 separate FC03 transactions, executed serially through the
+   * mbtcp pool's per-host queue):
+   *   400..439  setpoints           (40 regs)
+   *   440..453  failure modes       (14 regs, 2-per-sensor)
+   *   460..473  live sensor values  (14 regs, value+valid pair)
+   *   480..493  live equipment      (14 regs)
+   *   530..542  alarm bitmaps + ack (13 regs)
+   *
+   * LP-MISSING vs the retired sim REST shape:
+   *   - manualMode / label / orbitId / role / enabled (orbitId+role from
+   *     dataCache; the rest absent — needs HR or proto string region)
+   *   - compressor.{amps, totalRuntimeHours, dailyRuntimeHours} —
+   *     needs HR runtime/amps regs in firmware
+   *   - condenserFans.* — needs HR cond-fan stage/pid/per-fan-runtime regs
+   *   - exvOpenPct / evapFanOn — needs HR live regs
+   *   - oilPumpOn — derivable from compressorOn for now (omitted)
+   *   - defrost.* — needs HR defrost stage/timer regs
+   *   - leakDetect — needs HR leak detector regs
+   *   - safeties.{lockoutMask, dismissed, ...} — needs HR safety regs
+   *   - logs.{pid,user,sys} — needs proto log channel
+   *   - physical.{digitalOutputs, analogOutputs, outputLabels, doRole, aoMode}
+   *     — DO/AO are HR-resident on the orbit but not yet in the LP map;
+   *     `ioConfig` block (aoMode/doRole) needs HR regs
+   *   - safePolicy — needs HR safe-mode policy regs
+   *   - failureStates / safeOffMask — `safeOffMask` is in HR 492..493,
+   *     `failureStates` per-channel timer state is not in HR
+   */
   router.get('/triton/:slot', async (req: Request, res: Response) => {
     const slot = parseInt(req.params.slot, 10);
     if (isNaN(slot)) { res.status(400).json({ ok: false, error: 'invalid slot' }); return; }
-    const port = await findTritonPort(slot);
-    if (!port) { res.json({ ok: true, present: false }); return; }
+    const board = dataCache.getOrbitBoards().find(
+      b => b.slot === slot && b.role === 3 && b.connected,
+    );
+    if (!board) { res.json({ ok: true, present: false }); return; }
+    const host = resolveOrbitHost(board.slot);
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/triton`, {
-        signal: AbortSignal.timeout(1000),
+      const [sp, fail, sens, equip, alarms] = await Promise.all([
+        readHoldingRegs(host, 400, 40),
+        readHoldingRegs(host, 440, 14),
+        readHoldingRegs(host, 460, 14),
+        readHoldingRegs(host, 480, 14),
+        readHoldingRegs(host, 530, 13),
+      ]);
+
+      // Setpoints decode (HR 400-base offsets, see orbit_triton.h).
+      const setpoints: Record<string, number> = {
+        enabled:                   sp[0],
+        refrigerantType:           sp[1],
+        cutInP:                    asS16(sp[2])  / 10,
+        cutOutP:                   asS16(sp[3])  / 10,
+        minOffTimeSec:             sp[4],
+        minRuntime:                sp[5],
+        warmUpSec:                 sp[6],
+        powerFailMinutes:          sp[7],
+        lowAmbientCutoutF:         asS16(sp[8])  / 10,
+        pumpDownMode:              sp[9],
+        discHighUnloadP:           asS16(sp[10]) / 10,
+        sucLowUnloadP:             asS16(sp[11]) / 10,
+        superheatTarget:           asS16(sp[12]) / 10,
+        superheatLowF:             asS16(sp[13]) / 10,
+        unloaderOnPct0:            sp[14],
+        unloaderOnPct1:            sp[15],
+        unloaderOffPct0:           sp[16],
+        unloaderOffPct1:           sp[17],
+        unloaderHpUnloadPsi0:      asS16(sp[18]) / 10,
+        unloaderHpUnloadPsi1:      asS16(sp[19]) / 10,
+        unloaderHpLoadPsi0:        asS16(sp[20]) / 10,
+        unloaderHpLoadPsi1:        asS16(sp[21]) / 10,
+        unloaderLpUnloadPsi0:      asS16(sp[22]) / 10,
+        unloaderLpUnloadPsi1:      asS16(sp[23]) / 10,
+        unloaderLpLoadPsi0:        asS16(sp[24]) / 10,
+        unloaderLpLoadPsi1:        asS16(sp[25]) / 10,
+        unloaderNormal:            sp[26],
+      };
+
+      // Failure modes — pair {mode, delaySec} per sensor. Order MUST
+      // match the sensor index in orbit_triton.h.
+      const sensorKeys = ['suctionP','dischargeP','oilP','suctionT','dischargeT','llsT','ambientT'] as const;
+      const failures: Record<string, { mode: number; delaySec: number }> = {};
+      for (let i = 0; i < sensorKeys.length; i++) {
+        failures[sensorKeys[i]] = {
+          mode:     fail[i * 2],
+          delaySec: fail[i * 2 + 1],
+        };
+      }
+
+      // Live sensor values — pair {value_x10 (signed), valid 0/1}.
+      // Pressure channels (suctionP..oilP) are PSI×10; temperature
+      // channels are °F×10 (Triton convention — do NOT convert to °C
+      // bridge-side; the UI consumes the raw °F).
+      const sensors: Record<string, { value: number; valid: boolean }> = {};
+      for (let i = 0; i < sensorKeys.length; i++) {
+        sensors[sensorKeys[i]] = {
+          value: asS16(sens[i * 2]) / 10,
+          valid: sens[i * 2 + 1] !== 0,
+        };
+      }
+
+      // Live equipment (HR 480..493 → indices 0..13 of `equip`).
+      const compressorRuntimeSec = (equip[7] << 16) | equip[6];   // _hi << 16 | _lo
+      const safeOffMask = (equip[13] << 16) | equip[12];          // hi<<16 | lo
+      const compressor = {
+        on:          equip[0] !== 0,
+        status:      equip[1],
+        runtimeSec:  compressorRuntimeSec,
+      };
+      const unloaders = {
+        on: [
+          (equip[3] & 0x01) !== 0,
+          (equip[3] & 0x02) !== 0,
+        ],
+        hpForced: [
+          (equip[4] & 0x01) !== 0,
+          (equip[4] & 0x02) !== 0,
+        ],
+        lpForced: [
+          (equip[5] & 0x01) !== 0,
+          (equip[5] & 0x02) !== 0,
+        ],
+        normal: setpoints.unloaderNormal,
+      };
+
+      // Alarms — 6 regs active + 6 regs acked + 1 ack-cmd.
+      const activeBits: number[] = alarms.slice(0, 6);
+      const ackedBits:  number[] = alarms.slice(6, 12);
+
+      res.json({
+        ok: true,
+        present: true,
+        orbitId: board.slot + 2,            // dipswitch id from slot
+        // LP-MISSING: orbit role string — synthesise from dataCache role
+        role: 'TRITON',
+        // LP-MISSING: enabled / label / manualMode — needs HR string + flag regs
+        enabled: setpoints.enabled !== 0,
+        compressor,
+        // LP-MISSING: condenserFans.{stage,count,targetP,leadIndex,vfdPct,pid,fans} — needs HR regs
+        capacity: {
+          stage: equip[2],
+          unloaderBits: equip[3],
+          hpForcedBits: equip[4],
+          lpForcedBits: equip[5],
+        },
+        // LP-MISSING: evapFanOn / oilPumpOn / exvOpenPct — needs HR live regs
+        unloaders,
+        // LP-MISSING: defrost.* — needs HR defrost SM regs
+        demand: equip[9],                   // 0..100
+        sensors,
+        derived: {
+          suctionSatTempF: asS16(equip[10]) / 10,
+          superheatF:      asS16(equip[11]) / 10,
+          // LP-MISSING: leakDetect — needs HR leak-detector regs
+        },
+        setpoints,
+        failures,
+        // LP-MISSING: ioConfig.{aoMode,doRole} — needs HR I/O config regs
+        // LP-MISSING: safeties.{lockoutMask,...} — needs HR safety regs
+        safeOffMask,
+        // LP-MISSING: failureStates per-channel timer — not in HR map
+        // LP-MISSING: safePolicy — needs HR safe-policy regs
+        alarms: {
+          // Raw bitmap (UI can decode bit positions per TRITON_ALARM_BITS).
+          activeBits,
+          ackedBits,
+        },
+        // LP-MISSING: logs.{pid,user,sys} — needs proto log channel
+        // LP-MISSING: physical.{digitalOutputs,analogOutputs,outputLabels} — needs HR I/O state regs
       });
-      const data = await resp.json();
-      res.status(resp.status).json(data);
     } catch (err: any) {
-      res.status(502).json({ ok: false, error: err.message ?? 'Triton unreachable' });
+      res.status(503).json({ ok: false, error: String(err?.message ?? err) });
     }
   });
 
   /**
-   * Helper: write a Modbus holding register to a Triton orbit.  Returns
-   * { ok: true } on success, or an HTTP-friendly error envelope.  All Triton
-   * control writes go through Modbus TCP — same path as the real Nova firmware.
+   * Helper: write a Modbus holding register to a Triton orbit.
+   *
+   * Forwards through the LP AM2434 firmware via the TritonRegWrite proto
+   * envelope (tag 125). The LP runs the actual Modbus TCP client; the
+   * bridge is a transparent transport gateway. Returns an HTTP-friendly
+   * envelope; the proto send is fire-and-(short)-forget — firmware does
+   * not currently echo a per-write ack, so success here means "frame
+   * queued onto the UART without protocol error".
    */
   async function writeTritonReg(slot: number, addr: number, value: number): Promise<{ ok: boolean; error?: string }> {
-    if (!orbitClient) return { ok: false, error: 'orbitClient not available' };
+    if (!serialBridge.tritonRegWrite) {
+      return { ok: false, error: 'tritonRegWrite_not_supported' };
+    }
     const triton = dataCache.getOrbitBoards().find(b => b.slot === slot && b.role === 3 && b.connected);
     if (!triton) return { ok: false, error: 'No Triton at slot' };
-    // slot → orbit-id (sim convention: orbit-id = slot + 2; see index.ts discovery).
-    const orbitId = slot + 2;
-    const ok = await orbitClient.writeHoldingRegister(orbitId, addr, value & 0xFFFF);
-    return ok ? { ok: true } : { ok: false, error: 'Modbus write failed' };
+    try {
+      await serialBridge.tritonRegWrite(slot, addr, value & 0xFFFF);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? 'send_failed' };
+    }
   }
 
   /** Convert a signed/clamped float to the unsigned 16-bit wire value (×10). */
@@ -3245,7 +3079,8 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     const { aoMode, doRole } = req.body ?? {};
     const writes: Array<[number, number]> = [];
     if (Array.isArray(aoMode)) {
-      for (let i = 0; i < Math.min(4, aoMode.length); i++) {
+      // Phase 8 \u2014 Triton hardware ships 2 AO channels; cap writes to 450..451.
+      for (let i = 0; i < Math.min(2, aoMode.length); i++) {
         const v = parseInt(aoMode[i], 10);
         if (Number.isFinite(v)) writes.push([450 + i, v & 0xFFFF]);
       }
@@ -3301,79 +3136,117 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     res.status(result.ok ? 200 : 502).json(result);
   });
 
-  /** POST /iot/triton/:slot/safety/di  body: { index: number, value: boolean }
-   *  Toggles DI 1-10 on the orbit (used by the safety section of the popup
-   *  to simulate phase-loss / pressure-switch / overload contacts opening). */
-  router.post('/triton/:slot/safety/di', async (req: Request, res: Response) => {
-    const slot = parseInt(req.params.slot, 10);
-    const port = await findTritonPort(slot);
-    if (!port) { res.status(404).json({ ok: false, error: 'Triton orbit not reachable' }); return; }
-    const { index, value } = req.body ?? {};
-    if (!Number.isInteger(index) || index < 0 || index > 9 || typeof value !== 'boolean') {
-      res.status(400).json({ ok: false, error: 'index (0-9) and boolean value required' });
-      return;
-    }
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/di`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ index, value }),
-        signal: AbortSignal.timeout(1000),
-      });
-      const data = await r.json();
-      res.status(r.ok ? 200 : 502).json(data);
-    } catch (e: any) {
-      res.status(502).json({ ok: false, error: e?.message ?? 'proxy failed' });
-    }
-  });
+  // (Apr 29 2026 mbtcp migration) /triton/:slot/safety/di REMOVED.
+  // The route forwarded a DI-toggle into the orbit-simulator's /api/di
+  // endpoint to fake phase-loss / pressure-switch / overload contacts.
+  // Real hardware doesn't take injected DI — those contacts wire to
+  // physical inputs. The TritonHotspotPopup's safety-section inject
+  // buttons should be retired or moved into the sensor-injector tool.
 
-  /** POST /iot/triton/:slot/safety/reset  body: { mask?: number }
-   *  Clears latched safety lockout bits on the orbit (HP / Comp OL / Run-Prove). */
+  /** POST /iot/triton/:slot/safety/reset — clear latched safety lockout
+   *  bits (HP / Comp OL / Run-Prove) by writing the TRITON ack_command
+   *  register (HR 542 = 1) per orbit_triton.h. The LP firmware clears
+   *  active alarms, the safe_off_mask, and per-sensor trip latches on
+   *  this pulse — re-fire requires a fresh trip condition. */
   router.post('/triton/:slot/safety/reset', async (req: Request, res: Response) => {
     const slot = parseInt(req.params.slot, 10);
-    const port = await findTritonPort(slot);
-    if (!port) { res.status(404).json({ ok: false, error: 'Triton orbit not reachable' }); return; }
+    if (!Number.isFinite(slot) || slot < 0) {
+      return res.status(400).json({ ok: false, error: 'bad slot' });
+    }
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/triton/safety/reset`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body ?? {}),
-        signal: AbortSignal.timeout(1000),
-      });
-      const data = await r.json();
-      res.status(r.ok ? 200 : 502).json(data);
-    } catch (e: any) {
-      res.status(502).json({ ok: false, error: e?.message ?? 'proxy failed' });
+      await writeHoldingReg(resolveOrbitHost(slot), 542, 1);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(503).json({ ok: false, error: (e as Error).message });
     }
   });
 
-  // â”€â”€â”€ Orbit module status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // GET /orbit/status â†’ fetch status from each orbit simulator instance.
-  // Returns an array of per-board status objects for the UI orbit page.
+  // ─── Orbit module status ─────────────────────────────────────────────
+  // Both endpoints below derive from `dataCache.getOrbitBoards()` which
+  // is populated by firmware OrbitStatus / OrbitDiscovery pushes
+  // (envelope tags 120 / 121 via novaAdapter). The bridge no longer
+  // probes orbit-simulator REST `/api/status`.
+
+  /** GET /iot/orbit/status — per-board status snapshot for the UI orbit
+   *  page. Schema mirrors firmware `OrbitBoardStatus` field-for-field
+   *  (proto3, ts-proto camelCase). Fields the firmware hasn't pushed
+   *  yet are simply omitted (no `null` placeholders) — the UI uses
+   *  optional-chaining and only renders rows it has data for.
+   *
+   *  Live I/O state (DI/DO/AO/DC24V/eStop) is NOT pushed by the
+   *  CONTROLLER LP yet — the proto fields exist but the encoder
+   *  source (`OrbitSample`) has no DI/DO polling. Until that lands,
+   *  this handler probes each connected board directly via Modbus TCP
+   *  (FC01/FC02/FC03) at request time. Per-board sub-probes run in
+   *  parallel with `Promise.allSettled`; a failed probe omits its
+   *  field set but the rest of the row still ships, and the whole
+   *  handler is bounded by orbitMbtcp's 1.5 s per-call timeout.
+   *  See `/memories/repo/bridge-mbtcp-migration.md`. */
   router.get('/orbit/status', async (_req: Request, res: Response) => {
-    const boards: any[] = [];
+    const cached = dataCache.getOrbitBoards();
+    const boards = await Promise.all(cached.map(async b => {
+      const row: Record<string, unknown> = {
+        slot: b.slot,
+        // dipswitch_id retained as snake_case for legacy UI consumers;
+        // prefer firmware-reported value, fall back to the historical
+        // `slot+2` synthesis used pre-mbtcp-migration.
+        dipswitch_id: b.dipswitchId ?? (b.slot + 2),
+        connected: b.connected,
+        role: b.role,
+        aoEquip: b.aoEquip ?? [0, 0],
+      };
+      if (b.commErrors  !== undefined) row.commErrors  = b.commErrors;
+      if (b.estopActive !== undefined) row.estopActive = b.estopActive;
+      if (b.safeMode    !== undefined) row.safeMode    = b.safeMode;
+      if (b.cpuTemp     !== undefined) row.cpuTemp     = b.cpuTemp;
+      if (b.uptimeSecs  !== undefined) row.uptimeSecs  = b.uptimeSecs;
+      if (b.firmwareVer !== undefined) row.firmwareVer = b.firmwareVer;
+      if (b.zoneId      !== undefined) row.zoneId      = b.zoneId;
+      if (b.legacySlot  !== undefined) row.legacySlot  = b.legacySlot;
+      if (b.refrigStage !== undefined) row.refrigStage = b.refrigStage;
+      if (b.ipAddress)                 row.ipAddress   = b.ipAddress;
 
-    for (let slot = 0; slot < NOVA_MAX_ORBITS; slot++) {
-      const port = ORBIT_API_PORT + slot;
-      try {
-        const resp = await fetch(`http://localhost:${port}/api/status`, {
-          signal: AbortSignal.timeout(500),
-        });
-        if (resp.ok) {
-          const data = await resp.json() as Record<string, unknown>;
-          boards.push({
-            slot,
-            port,
-            dipswitch_id: slot + 2,
-            connected: true,
-            ...data,
-          });
+      // Live mbtcp probe — only when firmware says the slot is up.
+      // Coil map (orbit_storage.h):
+      //   discrete inputs 0..9  → DI[0..9]
+      //                       10 → eStop
+      //                  11..14 → DC24V monitors[0..3]
+      //   coils           0..9  → DO[0..9]
+      //   HR              0..1  → AO percent×10 (int16)
+      if (b.connected) {
+        const host = resolveOrbitHost(b.slot);
+        const [diRes, doRes, aoRes] = await Promise.allSettled([
+          readDiscreteInputs(host, 0, 15),
+          readCoils(host, 0, 10),
+          readHoldingRegs(host, 0, 2),
+        ]);
+        if (diRes.status === 'fulfilled') {
+          const di = diRes.value;
+          row.digitalInputs = di.slice(0, 10);
+          row.eStop         = di[10];
+          row.dc24vInputs   = di.slice(11, 15);
         }
-      } catch {
-        // Board not reachable â€” skip
+        if (doRes.status === 'fulfilled') {
+          row.digitalOutputs = doRes.value;
+        }
+        if (aoRes.status === 'fulfilled') {
+          // Reported as int16 ×10, transparent passthrough — UI divides.
+          row.analogOutputs = aoRes.value.map(asS16);
+        }
       }
-    }
 
+      return row;
+    }));
+
+    // LP-MISSING (after mbtcp probe pass):
+    //   • dc24vOutputs       — open-collector outs without sense-back; LP
+    //     has no live coil region for these. Add a sense path or LP-side
+    //     readback register before re-exposing.
+    //   • vfdActivitySecs    — would need a polling proxy in the bridge;
+    //     LP doesn't expose a single HR address for it today.
+    //   • sensorActivitySecs — same; no LP HR field yet.
+    //   • outputLabels / inputLabels — no HR string region on the LP.
+    //     Will be sourced from UI IoDefinition metadata, not the LP.
     res.json({
       max_slots: NOVA_MAX_ORBITS,
       boards_found: boards.length,
@@ -3381,28 +3254,181 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
   });
 
-  // GET /orbit/boards â†’ lightweight list of which boards responded
-  router.get('/orbit/boards', async (_req: Request, res: Response) => {
-    const boards: { slot: number; dipswitch_id: number; connected: boolean; port: number }[] = [];
-
-    for (let slot = 0; slot < NOVA_MAX_ORBITS; slot++) {
-      const port = ORBIT_API_PORT + slot;
-      try {
-        const resp = await fetch(`http://localhost:${port}/api/status`, {
-          signal: AbortSignal.timeout(300),
-        });
-        boards.push({
-          slot,
-          dipswitch_id: slot + 2,
-          connected: resp.ok,
-          port,
-        });
-      } catch {
-        // Not reachable â€” don't include
-      }
-    }
-
+  /** GET /iot/orbit/boards — lightweight list. Includes `connected`
+   *  and (when known) firmware health hints (`commErrors`, `estopActive`,
+   *  `safeMode`) so the orbit topology page can flag degraded boards
+   *  without fetching the full /status payload. */
+  router.get('/orbit/boards', (_req: Request, res: Response) => {
+    const boards = dataCache.getOrbitBoards().map(b => {
+      const row: Record<string, unknown> = {
+        slot: b.slot,
+        dipswitch_id: b.dipswitchId ?? (b.slot + 2),
+        connected: b.connected,
+      };
+      if (b.commErrors  !== undefined) row.commErrors  = b.commErrors;
+      if (b.estopActive !== undefined) row.estopActive = b.estopActive;
+      if (b.safeMode    !== undefined) row.safeMode    = b.safeMode;
+      return row;
+    });
     res.json({ boards });
+  });
+
+  // ─── Orbit topology / role assignment ────────────────────────────────
+  // GET /iot/orbits → list of installed orbits with their assigned role.
+  //
+  // dataCache.orbitBoards is populated from firmware OrbitStatus pushes
+  // (envelope tag 120) via novaAdapter. The bridge no longer probes the
+  // orbit simulator REST API — the LP AM2434 firmware is the sole
+  // Modbus TCP client to the orbit boards. Role is sourced from
+  // firmware Settings.OrbitRole[] and overridden by POST /iot/orbits/role.
+  router.get('/orbits', (_req: Request, res: Response) => {
+    const boards = dataCache.getOrbitBoards();
+    res.json({
+      orbits: boards.map(b => ({
+        slot: b.slot,
+        dipswitchId: b.dipswitchId ?? (b.slot + 2),  // matches firmware ORBIT_IP scheme
+        connected: b.connected,
+        role: b.role,                       // 0=UNASSIGNED 1=STORAGE 2=DOOR 3=REFRIG
+        aoEquip: b.aoEquip ?? [0, 0],
+      })),
+    });
+  });
+
+  // GET /iot/orbits/sensor-banks → raw HR[hr_base..hr_base+N-1] per orbit.
+  // Mirrors firmware OrbitSensorBank pushes (envelope tag 123); no scaling
+  // or unit conversion. Bridge is a transparent gateway here — UI applies
+  // any sensor-channel decoding via IoDefinition metadata.
+  router.get('/orbits/sensor-banks', (_req: Request, res: Response) => {
+    const banks = novaStore?.orbitSensorBanks;
+    if (!banks || banks.size === 0) {
+      res.json({ banks: [] });
+      return;
+    }
+    const out: Array<{slot:number; hrBase:number; values:number[]; seq:number; ageMs:number}> = [];
+    const now = Date.now();
+    for (const [, b] of banks) {
+      out.push({
+        slot:   b.slot,
+        hrBase: b.hrBase,
+        values: b.values,
+        seq:    b.seq,
+        ageMs:  now - b.ts,
+      });
+    }
+    out.sort((a, b) => a.slot - b.slot);
+    res.json({ banks: out });
+  });
+
+  // POST /iot/orbits/role  body: { slot:number, role:number, zoneId?:number, refrigStage?:number }
+  // Forwards an OrbitRoleAssign message to firmware. Firmware persists the
+  // pick to OSPI Settings.OrbitRole[] and re-emits OrbitStatus with the
+  // updated role on the next poll.
+  router.post('/orbits/role', async (req: Request, res: Response) => {
+    const slot = Number(req.body?.slot);
+    const role = Number(req.body?.role);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= NOVA_MAX_ORBITS) {
+      return res.status(400).json({ error: 'slot must be 0..15' });
+    }
+    if (!Number.isInteger(role) || role < 0 || role > 3) {
+      return res.status(400).json({ error: 'role must be 0..3 (0=UNASSIGNED 1=STORAGE 2=DOOR 3=REFRIG)' });
+    }
+    if (!serialBridge.assignOrbitRole) {
+      return res.status(503).json({ error: 'firmware bridge does not support orbit role assignment' });
+    }
+    try {
+      await serialBridge.assignOrbitRole(slot, role, {
+        zoneId: req.body?.zoneId,
+        refrigStage: req.body?.refrigStage,
+      });
+      // No optimistic cache write — firmware OrbitStatus push (envelope
+      // tag 120, OrbitBoardStatus.role = field 10) is the only source of
+      // truth.  CONTROLLER LP persists to OSPI in `bridge_rx_callback`
+      // (Nova_Firmware/lp_am2434/main.c) via LpSettings_SetOrbitRole +
+      // LpSettings_Save, then re-emits OrbitStatus on the next ~5 s
+      // cadence.  If the role doesn't appear in /iot/orbits within ~10 s,
+      // the firmware save failed — chase it on UART, do not paper over
+      // here. (See agristar-principles.md: bridge never fills in values.)
+      res.json({ ok: true, slot, role });
+    } catch (e: any) {
+      res.status(502).json({ error: e?.message ?? 'role assign failed' });
+    }
+  });
+
+  // POST /iot/orbits/aoequip  body: { slot:number, channel:number, equip:number }
+  // Programs which equipment a single orbit AO drives. Persists to
+  // firmware OSPI Settings.AoEquip[slot][channel]. Used by the Level 2
+  // PWM 4-20 mA Output Setup page. equip values match ao_equip_t in
+  // Nova_Firmware/Platform/nova_fan_output.h:
+  //   0 = AO_EQUIP_UNUSED   (default — AO is left at 0 V)
+  //   1 = AO_EQUIP_FAN_SPEED (mirror PwmChannel[PWM_FAN].Output as 0..10000)
+  router.post('/orbits/aoequip', async (req: Request, res: Response) => {
+    const slot    = Number(req.body?.slot);
+    const channel = Number(req.body?.channel);
+    const equip   = Number(req.body?.equip);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= NOVA_MAX_ORBITS) {
+      return res.status(400).json({ error: `slot must be 0..${NOVA_MAX_ORBITS - 1}` });
+    }
+    if (!Number.isInteger(channel) || channel < 0 || channel > 1) {
+      return res.status(400).json({ error: 'channel must be 0..1' });
+    }
+    if (!Number.isInteger(equip) || equip < 0 || equip > 255) {
+      return res.status(400).json({ error: 'equip must be 0..255 (ao_equip_t)' });
+    }
+    if (!serialBridge.assignAoEquip) {
+      return res.status(503).json({ error: 'firmware bridge does not support AO equipment assignment' });
+    }
+    try {
+      await serialBridge.assignAoEquip(slot, channel, equip);
+      // No optimistic cache write — firmware re-emits OrbitStatus with
+      // the updated aoEquip[] within ~5 s.  Same rule as the role
+      // handler above: bridge never fills in values, firmware polling
+      // is the single source of truth.
+      res.json({ ok: true, slot, channel, equip });
+    } catch (e: any) {
+      res.status(502).json({ error: e?.message ?? 'AO equip assign failed' });
+    }
+  });
+
+  // ─── System lifecycle ────────────────────────────────────────────────
+  // POST /iot/system/reboot → SystemCmd { cmd_type=CMD_REBOOT_SOC=50 }.
+  //
+  // Firmware acks the request, then calls
+  // Sciclient_pmDeviceReset(SystemP_WAIT_FOREVER) after a brief UART
+  // FIFO drain. DMSC tears the SoC down, ROM re-runs, SBL loads OSPI
+  // 0x80000 — same path the JTAG auto-flasher uses (proven 2026-05-02).
+  // The bridge's NovaSerialBridge auto-reconnect picks the firmware
+  // back up once it re-handshakes (~30 s end-to-end).
+  //
+  // Used by:
+  //   - Operator "Reboot Controller" action (when wired into the UI).
+  //   - The OTA Activate primitive — orbitOtaPush.ts will call this
+  //     after writing a new image to OSPI Bank B so the new bytes
+  //     take effect without needing JTAG/operator presence. This is
+  //     the single primitive that unlocks unattended Azure-pushed
+  //     firmware updates.
+  router.post('/system/reboot', async (_req: Request, res: Response) => {
+    if (!serialBridge.rebootSoc) {
+      return res.status(503).json({ error: 'firmware bridge does not support remote reboot' });
+    }
+    try {
+      await serialBridge.rebootSoc();
+      res.json({ ok: true, note: 'firmware acked CMD_REBOOT_SOC; SoC will warm-reset within ~50 ms' });
+    } catch (e: any) {
+      // Expected outcome: firmware resets so quickly that the Ack
+      // either races the disconnect or is dropped — `sendCommand`
+      // surfaces this as `Command timeout (seq=N, msg=82)`. We treat
+      // that as success and let the bridge's reconnect logic confirm
+      // the firmware came back.  Genuine transport errors (e.g. UART
+      // not open, COBS encode failure) bubble through as 502.
+      const msg = String(e?.message ?? '');
+      if (msg.startsWith('Command timeout')) {
+        return res.json({
+          ok: true,
+          note: 'reboot triggered (firmware reset before Ack landed); reconnect in progress',
+        });
+      }
+      res.status(502).json({ error: msg || 'reboot request failed' });
+    }
   });
 
   return router;

@@ -239,6 +239,23 @@ export class NovaFwUpdateManager extends EventEmitter {
   /**
    * Activate the staged firmware and reboot.
    * Only valid after a successful startUpdate().
+   *
+   * Sequence:
+   *   1. `sendFwActivateBank()` — swap the active bank header in OSPI
+   *      (firmware-side handler in `nova_fw_update.c`, expected to be
+   *      linked into nova_lp builds in OTA Phase 1).
+   *   2. If `reboot=true`, `sendRebootSoc()` (CMD_REBOOT_SOC=50) →
+   *      `Sciclient_pmDeviceReset(SystemP_WAIT_FOREVER)` → DMSC warm
+   *      reset → SBL loads OSPI 0x80000 with the new bytes. This is
+   *      THE primitive that makes Activate take effect (verified
+   *      2026-05-03; see docs/firmware-bridge-protocol.md §13).
+   *
+   * If the firmware doesn't yet implement `FwActivateBank` (msg 113)
+   * — which is the case on LP today — `sendFwActivateBank` times out.
+   * We treat that as non-fatal IFF the bytes were already written to
+   * `0x80000` directly (Phase 2 staging-copy-hack semantics) and still
+   * trigger the reboot. The OTA Phase 3 stage-2 chooser will eliminate
+   * this branch.
    */
   async activate(reboot = true): Promise<void> {
     if (this.status.state !== FwUpdateState.VERIFIED) {
@@ -248,15 +265,58 @@ export class NovaFwUpdateManager extends EventEmitter {
     console.log(`[FwUpdate] Activating staged firmware (reboot=${reboot})`);
     this.updateLocalStatus(FwUpdateState.ACTIVATING, this.status.totalSize, this.status.totalSize);
 
+    // Step 1: ask firmware to swap the active bank header. If the
+    // handler isn't linked yet, this times out — log and continue;
+    // the bytes-at-0x80000 hack path still works.
     try {
-      await this.bridge.sendFwActivateBank(reboot);
-      console.log('[FwUpdate] Activate ACK — firmware will reboot');
-      this.emit('activated');
+      // We always pass `reboot=false` here because the actual reboot is
+      // owned by sendRebootSoc() below — that's the verified primitive.
+      // Letting the firmware's own MSG_FW_ACTIVATE_BANK handler reboot
+      // would race the Ack the same way CMD_REBOOT_SOC does, and there
+      // is no point doing it twice.
+      await this.bridge.sendFwActivateBank(false);
+      console.log('[FwUpdate] Activate ACK — bank swap committed');
     } catch (err) {
-      console.error(`[FwUpdate] Activate failed: ${(err as Error).message}`);
-      this.status.state = FwUpdateState.ERROR;
-      this.status.errorMessage = (err as Error).message;
-      throw err;
+      const msg = (err as Error).message;
+      if (msg.startsWith('Command timeout')) {
+        console.warn('[FwUpdate] FwActivateBank timed out — firmware likely lacks handler; continuing with rebootSoc');
+      } else {
+        console.error(`[FwUpdate] Activate failed: ${msg}`);
+        this.status.state = FwUpdateState.ERROR;
+        this.status.errorMessage = msg;
+        throw err;
+      }
+    }
+
+    // Step 2: reboot the SoC so the SBL re-loads the (now-swapped)
+    // image at OSPI 0x80000. Without this, the running firmware
+    // continues executing the OLD image regardless of bank header.
+    if (reboot) {
+      try {
+        await this.bridge.sendRebootSoc();
+        console.log('[FwUpdate] Reboot triggered — SoC will warm-reset within ~50 ms');
+        this.emit('activated');
+      } catch (err) {
+        const msg = (err as Error).message;
+        // CMD_REBOOT_SOC almost always times out (firmware resets
+        // before Ack lands) — that's the success path, not a failure.
+        // Same logic as POST /iot/system/reboot in apiRoutes.ts.
+        if (msg.startsWith('Command timeout')) {
+          console.log('[FwUpdate] Reboot triggered (firmware reset before Ack landed)');
+          this.emit('activated');
+        } else {
+          console.error(`[FwUpdate] Reboot failed: ${msg}`);
+          this.status.state = FwUpdateState.ERROR;
+          this.status.errorMessage = msg;
+          throw err;
+        }
+      }
+    } else {
+      // Caller asked to defer the reboot (e.g. wants to commit several
+      // updates atomically). Bank header is swapped but new image is
+      // not yet running — the OLD firmware keeps executing until the
+      // operator/orchestrator triggers a separate POST /iot/system/reboot.
+      this.emit('activated');
     }
   }
 

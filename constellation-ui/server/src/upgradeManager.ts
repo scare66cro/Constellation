@@ -33,10 +33,20 @@ const execAsync = promisify(exec);
 /** Password for extracting .rpi upgrade archives (matches production C source) */
 const RPI_ARCHIVE_PASSWORD = 'galaxy2008upgrade321software3587';
 
-/** Base paths — these match the QEMU environment */
+/** Base paths.
+ *
+ * On rpi5 production / source-deploy, both `UPGRADE_DIR` and `UPLOAD_DIR`
+ * default to the existing GellertFileSystem upgrade tree
+ * (`/home/gellert/Gellert/upgrade`), so uploaded `.rpi` files land where
+ * the legacy `CheckForUpgrade.sh` poller expects them. Override either by
+ * setting `UPGRADE_DIR` / `UPLOAD_DIR` env vars (e.g. for local Windows
+ * dev where neither path exists; the WSL-only QEMU-tm4c orchestration
+ * paths below are vestigial and never reached on Nova).
+ */
+const DEFAULT_UPGRADE_DIR = '/home/gellert/Gellert/upgrade';
 const BASE_DIR      = '/mnt/f/Agristar/Agristar';
-const UPGRADE_DIR   = join(BASE_DIR, 'qemu-tm4c', 'upgrades');
-const UPLOAD_DIR    = join(BASE_DIR, 'qemu-tm4c', 'upgrades', 'uploads');
+const UPGRADE_DIR   = process.env.UPGRADE_DIR ?? DEFAULT_UPGRADE_DIR;
+const UPLOAD_DIR    = process.env.UPLOAD_DIR  ?? join(UPGRADE_DIR, 'uploads');
 const EXTRACT_DIR   = '/tmp/agri_upgrade';
 const FIRMWARE_DIR  = join(BASE_DIR, 'Mini_IO', 'build');
 const FIRMWARE_BIN  = join(FIRMWARE_DIR, 'firmware.bin');

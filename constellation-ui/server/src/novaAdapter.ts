@@ -33,22 +33,107 @@ const MSG_BASIC_SETUP      = 20;
 const MSG_DATE_TIME        = 21;
 const MSG_HEARTBEAT        = 101;
 
-// Default equipment names (must match the array in index.ts)
-const DEFAULT_EQUIP_NAMES: Record<number, string> = {
-  0: 'Fan/Green Light', 1: 'Door', 2: 'Refrigeration', 3: 'ClimaCell',
-  4: 'Heat', 5: 'Cavity Heat', 6: 'Burner',
-  7: 'Humidifier 1 - Head', 8: 'Humidifier 1 - Pump',
-  9: 'Humidifier 2 - Head', 10: 'Humidifier 2 - Pump',
-  11: 'Humidifier 3 - Head', 12: 'Humidifier 3 - Pump',
-  13: 'Refrigeration Stage 1', 14: 'Refrigeration Stage 2',
-  15: 'Refrigeration Stage 3', 16: 'Refrigeration Stage 4',
-  17: 'Refrigeration Stage 5', 18: 'Refrigeration Stage 6',
-  19: 'Refrigeration Stage 7', 20: 'Refrigeration Stage 8',
-  21: 'Defrost 1', 22: 'Defrost 2',
-  23: 'Bay Lights 1', 24: 'Bay Lights 2',
-  25: 'Auxiliary 1', 26: 'Auxiliary 2', 27: 'Auxiliary 3', 28: 'Auxiliary 4',
-  29: 'Auxiliary 5', 30: 'Auxiliary 6', 31: 'Auxiliary 7', 32: 'Auxiliary 8',
-};
+/**
+ * Aggregated analog-board state used to rebuild AnalogAllData /
+ * SensorListData any time the firmware reports an AnalogBoard message.
+ * Keyed by board.address (1-based per the AS2 contract — see
+ * Nova_Firmware/Platform/nova_thread_overrides.c::ReadAnalogBoards()).
+ */
+const analogBoardAgg = new Map<number, any>();
+
+function rebuildAnalogAggregates(dataCache: DataCache): void {
+  const sortedAddrs = Array.from(analogBoardAgg.keys()).sort((a, b) => a - b);
+
+  // AnalogAllData stride 5: addr, type, label, version, disabled
+  const analogParts: string[] = [];
+  // SensorListData stride 6: label, sid, type, value, offset, disabled
+  const sensorParts: string[] = [];
+
+  for (const addr of sortedAddrs) {
+    const b = analogBoardAgg.get(addr);
+    if (!b) continue;
+    analogParts.push(
+      String(b.address),
+      String(b.type),
+      b.label ?? '',
+      b.version ?? '',
+      b.disabled ? '1' : '0',
+    );
+    const boardIdx0 = Math.max(0, b.address - 1);
+    for (const s of b.sensors ?? []) {
+      const sid = boardIdx0 * 4 + (s.slot ?? 0);
+      sensorParts.push(
+        s.label ?? '',
+        String(sid),
+        String(s.type),
+        Number.isFinite(s.value) ? s.value.toFixed(1) : '--',
+        Number.isFinite(s.offset) ? String(s.offset) : '0.0',
+        s.disabled ? '1' : '0',
+      );
+    }
+  }
+
+  dataCache.updateFromArm('AnalogAll', analogParts.join(','));
+  dataCache.updateFromArm('SensorList', sensorParts.join(','));
+}
+
+/**
+ * Aux-switch CSV — must match the legacy AS2 wire format that the
+ * Svelte equipment-status page (`getEquipment` in
+ * `lib/business/equipmentStatus.ts`) parses with
+ * `equipment.auxSwitches[c].split(':')`.
+ *
+ * Format: `s0:p0_1:p0_2:...:p0_8,s1:p1_1:p1_2:...:p1_8`
+ *   sN  = current AuxN switch position (0=off, 1=auto, 2=manual)
+ *   pN_K = sN if any rule in AuxProgram[K-1] references SW_AUXN_AUTO
+ *          or SW_AUXN_MANUAL; otherwise 5 (sentinel for "not assigned").
+ *
+ * Without this, the legacy code would explode on `auxSwitches[0].split(':')`
+ * (no optional chaining), which silently kills the entire equipment page.
+ *
+ * Equipment-IO indices below come from the legacy SerialShift.h enum
+ * (mirrored verbatim by the Nova firmware) — SW_AUX1_AUTO=55,
+ * SW_AUX1_MANUAL=56, SW_AUX2_AUTO=57, SW_AUX2_MANUAL=58.
+ */
+const SW_AUX1_AUTO   = 55;
+const SW_AUX1_MANUAL = 56;
+const SW_AUX2_AUTO   = 57;
+const SW_AUX2_MANUAL = 58;
+const NUM_AUX_OUTPUTS = 8;
+
+function rebuildAuxSwitches(dataStore: NovaDataStore, dataCache: DataCache): void {
+  const states = (dataStore as any).auxSwitches?.states ?? [0, 0];
+  const s0 = Number(states[0] ?? 0);
+  const s1 = Number(states[1] ?? 0);
+
+  // Per-aux assignments — start with sentinel 5 ("unassigned"), promote
+  // to the corresponding switch state when any rule references that
+  // switch's IoIndex.
+  const usage0 = new Array<number>(NUM_AUX_OUTPUTS).fill(5);
+  const usage1 = new Array<number>(NUM_AUX_OUTPUTS).fill(5);
+
+  const programs = (dataStore as any).auxProgram?.programs as
+    Array<{ auxIndex: number; rules: Array<{ ioIndex: number }> }> | undefined;
+
+  if (programs) {
+    for (const prog of programs) {
+      const k = prog.auxIndex;
+      if (k < 0 || k >= NUM_AUX_OUTPUTS) continue;
+      for (const rule of prog.rules ?? []) {
+        if (rule.ioIndex === SW_AUX1_AUTO || rule.ioIndex === SW_AUX1_MANUAL) {
+          usage0[k] = s0;
+        }
+        if (rule.ioIndex === SW_AUX2_AUTO || rule.ioIndex === SW_AUX2_MANUAL) {
+          usage1[k] = s1;
+        }
+      }
+    }
+  }
+
+  const part0 = [s0, ...usage0].join(':');
+  const part1 = [s1, ...usage1].join(':');
+  dataCache.updateFromArm('AuxSwitches', `${part0},${part1}`);
+}
 
 /**
  * Wire up the new protocol to the existing data pipeline.
@@ -158,6 +243,14 @@ export function createNovaAdapter(
       setup.animations,
     ].join(',');
     dataCache.updateFromArm('StorageName', csv);
+    // PanelName is the same string as StorageName but is published on the
+    // header-data WS frame (var 55) and used for the GellertHeader title,
+    // alarm-monitor banner and node dropdowns. Without this mirror the
+    // header would forever show the "Agristar Panel" default instead of
+    // the user's configured storage name (e.g. "Gellert Nova").
+    if (setup.storageName) {
+      dataCache.updateFromArm('PanelName', setup.storageName);
+    }
   });
 
   dataStore.on('dateTime', (dt: any) => {
@@ -170,7 +263,7 @@ export function createNovaAdapter(
       ps.humidSetpoint,
       ps.humidSetpointRef,
       ps.burnerTempSetpoint.toFixed(1),
-      ps.burnerThreshold || '',
+      ps.burnerThreshold.toFixed(1),
     ].join(',');
     dataCache.updateFromArm('p1Plenum', csv);
   });
@@ -211,24 +304,73 @@ export function createNovaAdapter(
   });
 
   dataStore.on('fanSpeedSettings', (fs: any) => {
+    // Legacy FreqCtrlData CSV layout (parsed by dataCache 'fanspeed'):
+    //   [0]=MaxSpeed  [1]=MinSpeed  [2]=RefrigSpeed  [3]=RecircSpeed
+    //   [4]=UpdatePeriod  [5]=TempDiff  [6]=TempRef1  [7]=TempRef2
+    //   [8]=PrevSpeed  [9]=UpdateMode
     const csv = [
-      fs.maxSpeed, fs.minSpeed, fs.coolSpeed, fs.recircSpeed, fs.updatePeriod
+      fs.maxSpeed ?? 60,
+      fs.minSpeed ?? 20,
+      fs.refrigSpeed ?? 100,
+      fs.recircSpeed ?? 50,
+      fs.updatePeriod ?? 4,
+      fs.tempDiff ?? 2.0,
+      fs.tempRef1 ?? 0,
+      fs.tempRef2 ?? 0,
+      fs.prevSpeed ?? 75,
+      fs.updateMode ?? 0,
     ].join(',');
-    dataCache.updateFromArm('FanSpeedData', csv);
+    // Cache row keys by msgTag; CGI#6 msgTag is 'maxFanSpeed'.
+    dataCache.updateFromArm('maxFanSpeed', csv);
   });
 
   dataStore.on('rampRateSettings', (rr: any) => {
-    dataCache.updateFromArm('RampRateData', `${rr.ratePerDay},${rr.enabled}`);
+    // CSV order matches dataCache `case 'ramp'` and apply_ramp_rate decoder:
+    //   [0]=ratePerDay, [1]=updatePeriod (255→'Automatically'), [2]=tempDiff,
+    //   [3]=tempRef, [4]=targetTemp
+    // updateFromArm() keys off msgTag, not varName — entry 7 is
+    //   { msgTag: 'updTemp', varName: 'RampRateData' }. Pass the msgTag.
+    const period = (rr.updatePeriod === 255) ? 'Automatically' : String(rr.updatePeriod ?? 0);
+    // Format float to 1 decimal so the UI doesn't show 0.4000000059604645.
+    const fmt = (v: number) => Number.isFinite(v) ? (Math.round(v * 10) / 10).toString() : '0';
+    const csv = `${fmt(rr.ratePerDay)},${period},${fmt(rr.tempDiff)},${rr.tempRef},${fmt(rr.targetTemp)}`;
+    dataCache.updateFromArm('updTemp', csv);
   });
 
   dataStore.on('refrigSettings', (rs: any) => {
-    const stageParts = rs.stages.flatMap((s: any) => [s.on, s.off]);
-    const csv = [
-      ...stageParts,
-      rs.pGain, rs.iGain, rs.dGain, rs.uLimit, rs.mode,
-      rs.defrostInterval, rs.defrostDuration
-    ].join(',');
-    dataCache.updateFromArm('RefrigData', csv);
+    // Match the legacy UI_SendRefrig() CSV layout exactly so the
+    // dataCache 'refrigeration' page handler can flow it through to the
+    // UI without re-ordering. 23 elements:
+    //   [0..11]  stages 1-6 (on/off pairs)
+    //   [12..15] PID p,i,d,u
+    //   [16]     Refrig.Purge mode
+    //   [17]     Co2.Purge.RefrigThresh
+    //   [18]     Log.PID.Refrig (refrig PID logging flag)
+    //   [19,20]  stage 7 on/off
+    //   [21,22]  stage 8 on/off
+    const stages = rs.stages ?? [];
+    const stage = (i: number) => ({
+      on:  stages[i]?.on  ?? 0,
+      off: stages[i]?.off ?? 0,
+    });
+    const csvParts: (number | string)[] = [];
+    for (let i = 0; i < 6; i++) {
+      const s = stage(i);
+      csvParts.push(s.on, s.off);
+    }
+    csvParts.push(rs.pGain ?? 0, rs.iGain ?? 0, rs.dGain ?? 0, rs.uLimit ?? 0);
+    csvParts.push(rs.purge ?? 0, rs.purgeThreshold ?? 0);
+    // Log.PID.Refrig flag isn't carried in RefrigSettings — pull from
+    // pidLogSettings if available, else 0. Keeps round-trip symmetry
+    // with apiRoutes (which doesn't write this slot from refrig page).
+    const pl = (dataStore as any).pidLogSettings;
+    csvParts.push(pl?.logRefrig ?? 0);
+    const s6 = stage(6);
+    const s7 = stage(7);
+    csvParts.push(s6.on, s6.off, s7.on, s7.off);
+    // varName='RefrigData' but updateFromArm keys off msgTag (entry 85
+    // in CGI_DEFINITIONS uses both names equal: 'RefrigData').
+    dataCache.updateFromArm('RefrigData', csvParts.join(','));
   });
 
   dataStore.on('humidCtrlSettings', (hc: any) => {
@@ -255,30 +397,109 @@ export function createNovaAdapter(
       flat[off + 5] = String(e.refOn);
       flat[off + 6] = String(e.refOff);
     }
-    dataCache.updateFromArm('HumidCtrlData', flat.join(','));
+    dataCache.updateFromArm('selHumidType', flat.join(','));
   });
 
   dataStore.on('outsideAirSettings', (oa: any) => {
-    dataCache.updateFromArm('OutsideAirData', `${oa.mode},${oa.differential}`);
+    // dataCache buildPageData('outside') parses this as a `&`-delimited
+    // tokens list: first token is positional ctrlMode, rest are key=value
+    // pairs (OutsideAirSet=, selAboveBelow=, selTempRef=, calcHumid=).
+    const parts = [
+      String(oa.mode ?? 0),
+      `OutsideAirSet=${oa.differential ?? 0}`,
+      `selAboveBelow=${oa.aboveBelow ?? 0}`,
+      `selTempRef=${oa.tempRef ?? 255}`,
+      `calcHumid=${oa.calcHumidMax ?? 0}`,
+    ];
+    dataCache.updateFromArm('ctrlMode', parts.join('&'));
   });
 
   dataStore.on('miscSettings', (mc: any) => {
-    dataCache.updateFromArm('MiscData', `${mc.heatTempThresh},${mc.kbPref},${mc.lightsFailUnits},${mc.cavStandbyOn}`);
+    // Legacy p1Misc CSV layout (consumed by dataCache 'misc' pageBuilder):
+    //   [0]=refrMode  [1]=defrostInterval [2]=defrostTime [3]=tempThresh
+    //   [4]=ctrlMode  [5]=cavityMode      [6]=cavityDiff  [7]=dutyOrSensor
+    //   [8]=cavSensor (legacy duplicate of [7]) [9]=kbPref [10]=cavStandbyOn
+    const csv = [
+      mc.refrigMode ?? 0,
+      mc.defrostInterval ?? 0,
+      mc.defrostDuration ?? 0,
+      mc.heatTempThresh ?? 0,
+      mc.cavityTarget ?? 0,
+      mc.cavityMode ?? 1,
+      mc.cavityDiff ?? 0,
+      mc.cavityDutyOrSensor ?? 0,
+      mc.cavityDutyOrSensor ?? 0,
+      mc.kbPref ?? 0,
+      mc.cavityStandbyOn ?? 0,
+    ].join(',');
+    dataCache.updateFromArm('p1Misc', csv);
   });
 
   dataStore.on('failureSettings', (fs: any) => {
-    // Flatten to CSV preserving the order expected by the UI
-    const v = fs.values;
-    const parts: string[] = [];
-    for (let i = 0; i < 11; i++) {
-      parts.push(String(v[`fail${i}Mode`] ?? 0), String(v[`fail${i}Timer`] ?? 0));
-    }
-    dataCache.updateFromArm('FailureData1', `${v.fanMode ?? 0},${v.fanTimer ?? 0},${parts.join(',')}`);
+    // The UI failures1 page treats FailureData1 as a 22-element CSV
+    // matching apiRoutes pageSaveMap.failures1 input order:
+    //   [0]FanMode  [1]FanTimer  [2]ClimacellMode  [3]ClimacellTimer
+    //   [4]RefridgeMode [5]RefridgeTimer [6]RefridgeRun
+    //   [7]RefrStagesMode [8]RefrStagesTimer
+    //   [9]HumidifiersMode [10]HumidifiersTimer
+    //   [11]AuxMode [12]AuxTimer [13]HeatMode [14]HeatTimer
+    //   [15]CavityHeatMode [16]CavityHeatTimer
+    //   [17]BurnerMode [18]BurnerTimer
+    //   [19]LightsMode [20]LightsTimer [21]LightsUnits
+    // Firmware only persists 11 of those — the rest are slot-padded with 0.
+    const v = fs.values || {};
+    const slots = new Array(22).fill('0');
+    slots[0]  = String(v.fanMode           ?? 0);
+    slots[1]  = String(v.fanTimer          ?? 0);
+    slots[2]  = String(v.climacellMode     ?? 0);
+    slots[3]  = String(v.climacellTimer    ?? 0);
+    slots[4]  = String(v.refrigMode        ?? 0);
+    slots[5]  = String(v.refrigTimer       ?? 0);
+    slots[6]  = String(v.refrigRun         ?? 0);
+    slots[7]  = String(v.refrigStagesMode  ?? 0);
+    slots[8]  = String(v.refrigStagesTimer ?? 0);
+    slots[9]  = String(v.humidMode         ?? 0);
+    slots[10] = String(v.humidTimer        ?? 0);
+    slots[11] = String(v.auxMode           ?? 0);
+    slots[12] = String(v.auxTimer          ?? 0);
+    slots[13] = String(v.heatMode          ?? 0);
+    slots[14] = String(v.heatTimer         ?? 0);
+    slots[15] = String(v.cavityHeatMode    ?? 0);
+    slots[16] = String(v.cavityHeatTimer   ?? 0);
+    slots[17] = String(v.burnerMode        ?? 0);
+    slots[18] = String(v.burnerTimer       ?? 0);
+    slots[19] = String(v.lightsMode        ?? 0);
+    slots[20] = String(v.lightsTimer       ?? 0);
+    slots[21] = String(v.lightsUnits       ?? 0);
+    // varName='FailureData1' but updateFromArm keys off msgTag='FanMode'.
+    dataCache.updateFromArm('FanMode', slots.join(','));
   });
 
   dataStore.on('failureSettings2', (fs2: any) => {
-    const v = fs2.values;
-    dataCache.updateFromArm('FailureData2', `${v.outAirMode ?? 0},${v.sensorMode ?? 0}`);
+    // 13-element CSV matching apiRoutes pageSaveMap.failures2 input order:
+    //   [0]OutAirMode [1]OutAirTimer
+    //   [2]OutHumidMode [3]OutHumidTimer
+    //   [4]HighCo2Mode [5]HighCo2Timer [6]Co2Setpt
+    //   [7]LowHumidMode [8]LowHumidTimer [9]LowHumidSet
+    //   [10]PlenSenMode [11]PlenSenTimer [12]PlenSenDiff (float).
+    const v = fs2.values || {};
+    const slots = [
+      String(v.outAirMode    ?? 0),
+      String(v.outAirTimer   ?? 0),
+      String(v.outHumidMode  ?? 0),
+      String(v.outHumidTimer ?? 0),
+      String(v.highCo2Mode   ?? 0),
+      String(v.highCo2Timer  ?? 0),
+      String(v.co2Setpt      ?? 0),
+      String(v.lowHumidMode  ?? 0),
+      String(v.lowHumidTimer ?? 0),
+      String(v.lowHumidSet   ?? 0),
+      String(v.plenSenMode   ?? 0),
+      String(v.plenSenTimer  ?? 0),
+      String(v.plenSenDiff   ?? 0),
+    ];
+    // varName='FailureData2' but updateFromArm keys off msgTag='OutAirMode'.
+    dataCache.updateFromArm('OutAirMode', slots.join(','));
   });
 
   dataStore.on('tempAlarmSettings', (ta: any) => {
@@ -287,15 +508,24 @@ export function createNovaAdapter(
     // off the legacy tag, NOT the varName — passing 'PlenTempDevData' here
     // is a silent no-op (returns false, drops the value on the floor).
     // CSV order must match legacy AlarmTempLow=:
-    //   lowTemp, lowMin, highTemp, highMin, cureLow, cureHigh.
+    //   lowTemp, lowTimer, highTemp, highTimer, cureLow, cureHigh.
     dataCache.updateFromArm(
       'AlarmTempLow',
-      `${ta.lowTemp ?? 0},${ta.lowMin ?? 0},${ta.highTemp ?? 0},${ta.highMin ?? 0},${ta.cureLow ?? 0},${ta.cureHigh ?? 0}`
+      `${ta.lowTemp ?? 0},${ta.lowTimer ?? 0},${ta.highTemp ?? 0},${ta.highTimer ?? 0},${ta.cureLow ?? 0},${ta.cureHigh ?? 0}`
     );
   });
 
   dataStore.on('doorSettings', (ds: any) => {
-    dataCache.updateFromArm('DoorData', `${ds.pGain},${ds.iGain},${ds.dGain},${ds.uLimit},${ds.actuatorTime},${ds.coolAirCycle}`);
+    // dataCache.case 'door' reads P2FreshAirData first (primary), DoorData fallback.
+    // 6 positional fields: PID_P,PID_I,PID_D,PID_U,ActuatorTime,CoolAirCycle.
+    // Field numbers + order MUST match proto/agristar/settings.proto DoorSettings
+    // and Nova_Firmware/Platform/nova_dataexc.c::apply_door().
+    // msgTag-vs-varName trap: updateFromArm keys by msgTag.
+    //   CGI_FRESHAIR:  msgTag='PAirValue',  varName='P2FreshAirData'
+    //   CGI_DOOR_LOG:  msgTag='DoorData',   varName='DoorData' (identical)
+    const csv = `${ds.pGain ?? 0},${ds.iGain ?? 0},${ds.dGain ?? 0},${ds.uLimit ?? 0},${ds.actuatorTime ?? 0},${ds.coolAirCycle ?? 0}`;
+    dataCache.updateFromArm('PAirValue', csv);
+    dataCache.updateFromArm('DoorData', csv);
   });
 
   dataStore.on('loadMonitorSettings', (lm: any) => {
@@ -307,7 +537,10 @@ export function createNovaAdapter(
   });
 
   dataStore.on('serviceInfo', (si: any) => {
-    dataCache.updateFromArm('ServiceData', `${si.dealerName},${si.dealerPhone},${si.techName},${si.techPhone}`);
+    // msgTag-vs-varName trap (see runclock fix, docs/firmware-bridge-protocol.md).
+    // dataCache.updateFromArm keys by msgTag (='dealerName'), NOT varName
+    // ('P2ServiceData' or 'ServiceData').
+    dataCache.updateFromArm('dealerName', `${si.dealerName},${si.dealerPhone},${si.techName},${si.techPhone}`);
   });
 
   dataStore.on('ioConfig', (io: any) => {
@@ -351,16 +584,28 @@ export function createNovaAdapter(
   });
 
   dataStore.on('ioDefinition', (ioDef: any) => {
-    // Build the IoNames CSV: "Name:Mode:IO:Renamable:Index,..."
-    const parts = ioDef.entries.map((e: any) => {
-      const name = e.name || DEFAULT_EQUIP_NAMES[e.index] || '';
-      return `${name}:${e.mode}:${e.ioPin}:${e.renamable ? 1 : 0}:${e.index}`;
-    });
-    dataCache.updateFromArm('IoNames', parts.join(','));
+    // Pass the firmware's IoEntry[] through verbatim. The firmware is the
+    // single source of truth for equipment names — if a name is empty here
+    // it means the firmware hasn't initialised it yet, and the UI must not
+    // synthesise a placeholder.
+    dataCache.setIoEntries(ioDef.entries);
   });
 
   dataStore.on('emailSettings', (em: any) => {
-    const csv = [em.enabled, em.toAddr, em.fromAddr, em.server, 0, em.port, em.username, em.password, ''].join(',');
+    // Legacy CSV layout (consumed by dataCache 'email' pageBuilder):
+    //   [0]=enabled, [1]=server, [2]=authType, [3]=port, [4]=account,
+    //   [5]=password, [6]=displayId, [7]=toAddr, [8]=fromAddr
+    const csv = [
+      em.enabled ?? 1,
+      em.server ?? '',
+      em.authType ?? 0,
+      em.port ?? '',
+      em.username ?? '',
+      em.password ?? '',
+      em.displayId ?? '',
+      em.toAddr ?? '',
+      em.fromAddr ?? '',
+    ].join(',');
     dataCache.updateFromArm('EmailConfig', csv);
   });
 
@@ -396,8 +641,11 @@ export function createNovaAdapter(
 
   dataStore.on('runtimes', (rt: any) => {
     const slots = new Array(48).fill(0);
-    for (const e of rt.entries) { if (e.slot < 48) slots[e.slot] = e.value; }
-    dataCache.updateFromArm('RunTimesData', slots.join(','));
+    for (const e of rt.entries) { if (e.slot < 48) slots[e.slot] = e.mode; }
+    // updateFromArm keys by msgTag, NOT varName. dataCache cgiTable maps
+    // msgTag 'runTimes' -> varName 'RunTimesData'; getByVarName then
+    // returns this entry to buildPageData('runtimes').
+    dataCache.updateFromArm('runTimes', slots.join(','));
   });
 
   dataStore.on('fanRuntime', (fr: any) => {
@@ -408,15 +656,29 @@ export function createNovaAdapter(
     dataCache.updateFromArm('HumidModeData', `${hm.head1},${hm.pump1},${hm.head2},${hm.pump2}`);
   });
 
-  dataStore.on('auxSwitches', (sw: any) => {
-    dataCache.updateFromArm('AuxSwitchData', sw.states.join(','));
+  dataStore.on('auxSwitches', (_sw: any) => {
+    rebuildAuxSwitches(dataStore, dataCache);
+  });
+  dataStore.on('auxProgram', (_ap: any) => {
+    rebuildAuxSwitches(dataStore, dataCache);
   });
 
   dataStore.on('analogBoard', (board: any) => {
+    // Aggregate every reported AnalogBoard into the two CSVs that
+    // GET /iot/analog/all reads:
+    //   AnalogAllData   stride 5: addr,type,label,version,disabled
+    //   SensorListData  stride 6: label,sid,type,value,offset,disabled
+    // SID = (boardAddr-1)*4 + slot — must match apiRoutes.ts merge logic.
+    //
+    // Per-board key kept for any legacy code that still references it,
+    // but the API endpoint itself relies on the two aggregated keys.
     const sensorCsv = board.sensors.map((s: any) =>
       `${s.slot},${s.type},${s.label},${s.offset},${s.disabled ? 1 : 0},${s.value.toFixed(1)}`
     ).join('|');
     dataCache.updateFromArm(`AnalogBoard${board.address}`, `${board.address},${board.type},${board.label},${board.version},${board.disabled ? 1 : 0}|${sensorCsv}`);
+
+    analogBoardAgg.set(board.address, board);
+    rebuildAnalogAggregates(dataCache);
   });
 
   dataStore.on('availableIo', (aio: any) => {
@@ -438,18 +700,26 @@ export function createNovaAdapter(
   });
 
   dataStore.on('accountSettings', (acct: any) => {
-    const userParts = acct.users.map((u: any) => `${u.slot},${u.userId}`).join('|');
-    dataCache.updateFromArm('AcctData', `${userParts}|count=${acct.count}|loginPw=${acct.hasLoginPw ? 1 : 0}`);
+    // Page reads `Object.values(data.array).slice(0, 10)` so the cache
+    // value must be a comma-CSV of usernames indexed by slot 0..9.
+    // dataCache CGI table maps msgTag 'AcctId0' → varName 'UserAccounts',
+    // and getArr() splits on ','. Sparse slots are empty strings.
+    const slots: string[] = Array(10).fill('');
+    for (const u of acct.users ?? []) {
+      if (typeof u?.slot === 'number' && u.slot >= 0 && u.slot < 10) {
+        slots[u.slot] = u.userId ?? '';
+      }
+    }
+    dataCache.updateFromArm('AcctId0', slots.join(','));
   });
 
-  dataStore.on('auxProgram', (ap: any) => {
-    for (const prog of ap.programs) {
-      const ruleParts = prog.rules.map((r: any) =>
-        `${r.type},${r.ioIndex},${r.state},${r.op},${r.sensorValue},${r.andOr},${r.referenceIndex}`
-      ).join('|');
-      dataCache.updateFromArm('AuxProgram', `${prog.auxIndex},${prog.eqIndex},${prog.dutyCycle},${prog.period},${prog.units}|${ruleParts}`);
-    }
-  });
+  // (Apr 2026 proto-direct migration: removed `dataStore.on('auxProgram')`
+  // CSV-translator that fed dataCache.auxPrograms via the AuxProgram tag.
+  // The auxiliary page now consumes the typed AuxProgramBundle store
+  // (`auxiliaryComposite` in protoStores.ts) directly. The /iot/aux/all
+  // GET, parseAuxProgram, buildDefaultAuxRules, discoverAuxPrograms,
+  // dataCache.getAllAuxPrograms, and the NextAux command dispatch are
+  // all retired in this same change.)
 
   dataStore.on('userLogSettings', (ul: any) => {
     dataCache.updateFromArm('recInterval', `${ul.interval},${ul.wrap}`);
@@ -459,13 +729,24 @@ export function createNovaAdapter(
     dataCache.updateFromArm('pidWrap', `${pid.eqIndex},${pid.wrap}`);
   });
 
+  dataStore.on('pidLogSettings', (pl: any) => {
+    // dataCache 'pid' page reads PidLogData as CSV "wrap,doors,refrig"
+    // and rebuilds the {pidWrap, logDoors, logRefrig} object the Svelte
+    // page expects.
+    dataCache.updateFromArm('PidLogData', `${pl.wrap},${pl.logDoors},${pl.logRefrig}`);
+  });
+
   dataStore.on('graphFavorites', (gfav: any) => {
     dataCache.updateFromArm('GraphFavData', gfav.csv);
   });
 
   dataStore.on('alertSettings', (alerts: any) => {
-    const bits = new Array(64).fill('0');
-    for (const idx of alerts.flags) { if (idx < 64) bits[idx] = '1'; }
+    // Match WARNING_KEYS.length (97) — firmware tracks up to NUM_WARNINGS
+    // entries which exceeds 64. A 64-bit bitmap silently drops indices
+    // ≥64 (WARN_ACTLOGWRITE and later).
+    const SIZE = 128;
+    const bits = new Array(SIZE).fill('0');
+    for (const idx of alerts.flags) { if (idx < SIZE) bits[idx] = '1'; }
     dataCache.updateFromArm('AlertSetup', bits.join(''));
   });
 
@@ -485,6 +766,37 @@ export function createNovaAdapter(
   });
 
   // ── Orbit module status ──
+  //
+  // Firmware is the sole source of truth. The bridge no longer probes
+  // the orbit-simulator REST API (Apr 29 2026 mbtcp migration); the
+  // QEMU PTY-collapse workaround that used to force `dropFirmwareConnected`
+  // is also gone. Production behaviour and dev behaviour are identical:
+  // dataCache.orbitBoards mirrors firmware OrbitStatus / OrbitDiscovery
+  // pushes verbatim. If sim shows wrong slot connectivity, the fix
+  // belongs in the firmware OrbitStatus emitter, not here.
+  function mergeFirmwareBoards(boards: any[]): void {
+    // Mirror every OrbitBoardStatus proto field into dataCache verbatim
+    // (see OrbitBoardCacheRow in dataCache.ts). No conversion/scaling —
+    // /memories/repo/data-path-rules.md mandates the bridge is a
+    // transparent passthrough; UI/proto consumers handle units.
+    dataCache.setOrbitBoards(boards.map((b: any) => ({
+      slot:        b.slot,
+      role:        b.role,
+      connected:   b.connected,
+      aoEquip:     b.aoEquip ?? [0, 0],
+      dipswitchId: b.dipswitchId,
+      commErrors:  b.commErrors,
+      estopActive: b.estopActive,
+      safeMode:    b.safeMode,
+      cpuTemp:     b.cpuTemp,
+      uptimeSecs:  b.uptimeSecs,
+      firmwareVer: b.firmwareVer,
+      zoneId:      b.zoneId,
+      legacySlot:  b.legacySlot,
+      refrigStage: b.refrigStage,
+      ipAddress:   b.ipAddress,
+    })));
+  }
 
   dataStore.on('orbitStatus', (os: any) => {
     // Build a CSV for legacy compatibility: slot,dip,conn,role,zone,legacy|...
@@ -492,13 +804,8 @@ export function createNovaAdapter(
       `${b.slot},${b.dipswitchId},${b.connected ? 1 : 0},${b.role},${b.zoneId},${b.legacySlot},${b.estopActive ? 1 : 0},${b.cpuTemp.toFixed(1)},${b.uptimeSecs}`
     );
     dataCache.updateFromArm('OrbitStatusData', parts.join('|'));
-    
-    // Update orbit boards for IOConfig ioAvailable
-    dataCache.setOrbitBoards(os.boards.map((b: any) => ({
-      slot: b.slot,
-      role: b.role,
-      connected: b.connected,
-    })));
+
+    mergeFirmwareBoards(os.boards);
 
     // Broadcast orbit update via WS
     if (wsManager) wsManager.broadcastArmUpdate('OrbitStatus');
@@ -510,13 +817,8 @@ export function createNovaAdapter(
       `${b.slot},${b.dipswitchId},${b.connected ? 1 : 0},${b.role},${b.zoneId},${b.legacySlot},${b.estopActive ? 1 : 0},${b.ipAddress}`
     );
     dataCache.updateFromArm('OrbitDiscoveryData', `${od.maxSlots},${od.boardsFound}|${parts.join('|')}`);
-    
-    // Update orbit boards for IOConfig ioAvailable
-    dataCache.setOrbitBoards(od.boards.map((b: any) => ({
-      slot: b.slot,
-      role: b.role,
-      connected: b.connected,
-    })));
+
+    mergeFirmwareBoards(od.boards);
 
     if (wsManager) wsManager.broadcastArmUpdate('OrbitDiscovery');
   });

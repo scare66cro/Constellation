@@ -2,17 +2,16 @@
  * WebSocket connection manager.
  * Manages client connections, channel subscriptions, and broadcasts.
  *
- * Channels map to the "protocol" names used by the UI's PollingClient:
- *   - "frontmatter-data"  → main dashboard data (polled every 3s)
- *   - "header-data"       → panel name, mode, date/time
+ * Channel names (consumed by the UI's WsClient):
+ *   - "frontmatter-data"  → main dashboard data
  *   - "tcpip-data"        → network node list for dropdown
  *   - "upgrade-data"      → firmware upgrade progress
- *   - "network-data"      → network monitor data
  *   - "download-data"     → log download progress
- *   - "equipment-data"    → equipment status images
  *
- * Instead of the UI polling every 3s, the server pushes data on these channels
- * whenever the ARM sends an update, or on a configurable interval.
+ * Server pushes data on these channels whenever the firmware sends an update,
+ * or on a configurable interval. Retired channels (header-data, network-data,
+ * sensor-data, vfd-data, equipment-data) — all UI consumers now derive
+ * these payloads from typed proto stores.
  */
 
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
@@ -20,6 +19,7 @@ import type { Server as HttpServer } from 'http';
 import type { IncomingMessage } from 'http';
 import type { DataCache } from './dataCache.js';
 import type { UpgradeManager, UpgradeStatus } from './upgradeManager.js';
+import type { RemoteSystemsSync } from './remoteSystemsSync.js';
 
 export interface WsClient {
   ws: WebSocket;
@@ -46,18 +46,19 @@ export class WsManager {
   private pushTimers = new Map<string, NodeJS.Timeout>();
   private dataCache: DataCache;
   private upgradeManager: UpgradeManager | null = null;
-  private vfdClient: any = null;
+  private remoteSystemsSync: RemoteSystemsSync | null = null;
+  // S9k cleanup (2026-04-20): vfdClient member removed — the only
+  // consumer was the retired `vfd-data` channel.
 
-  constructor(server: HttpServer, dataCache: DataCache, vfdClient?: any) {
+  constructor(server: HttpServer, dataCache: DataCache) {
     this.dataCache = dataCache;
-    this.vfdClient = vfdClient ?? null;
 
-    this.wss = new WebSocketServer({
-      server,
-      path: '/iot/ws',
-      // Verify origin for security (allow all during development)
-      verifyClient: (_info: unknown) => true,
-    });
+    // noServer mode: index.ts owns the HTTP `upgrade` event and dispatches
+    // by path to the right WebSocketServer instance. Multiple WS apps on
+    // the same HTTP server cannot use {server,path} together — the first
+    // one to fire abortHandshake(400) on path mismatch kills the socket
+    // before the second one's listener runs.
+    this.wss = new WebSocketServer({ noServer: true });
 
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
     this.wss.on('error', (err) => console.error('[WsManager] Server error:', err));
@@ -65,13 +66,25 @@ export class WsManager {
     // Start heartbeat to detect dead connections
     this.heartbeatTimer = setInterval(() => this.heartbeat(), 30_000);
 
-    // Start periodic push for dashboard channels
-    this.startPeriodicPush('frontmatter-data', 3_000);
-    this.startPeriodicPush('header-data', 3_000);
-    this.startPeriodicPush('sensor-data', 5_000);
+    // Start periodic push for dashboard channels.
+    // NOTE: `frontmatter-data` and `header-data` are no longer pushed — the
+    // SvelteKit UI now builds those payloads client-side from the typed-proto
+    // stream (`/proto/stream` → `frontMatterComposite` / `headerComposite`).
+    // S9k cleanup (2026-04-20): `sensor-data` periodic push retired —
+    // no UI consumer remained (pile page reads $sensorList directly).
     this.startPeriodicPush('tcpip-data', 10_000);
 
-    console.log('[WsManager] WebSocket server attached at /iot/ws');
+    console.log('[WsManager] WebSocket server attached at /iot/ws (noServer mode)');
+  }
+
+  /** Path this server expects (matches against req.url). */
+  readonly path = '/iot/ws';
+
+  /** Called by the HTTP-server `upgrade` dispatcher in index.ts. */
+  handleUpgrade(req: IncomingMessage, socket: any, head: Buffer): void {
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss.emit('connection', ws, req);
+    });
   }
 
   /**
@@ -84,6 +97,21 @@ export class WsManager {
       this.broadcast('upgrade-data', status);
     });
     console.log('[WsManager] UpgradeManager attached for upgrade-data broadcasts');
+  }
+
+  /**
+   * Attach the bridge-managed remote-systems list. Once set, the
+   * `tcpip-data` channel emits a node list merged from this source
+   * (UUID-keyed, DHCP-resilient) instead of the legacy
+   * `P2NodeSetupData` CSV path.
+   */
+  attachRemoteSystemsSync(rs: RemoteSystemsSync): void {
+    this.remoteSystemsSync = rs;
+    /* Push immediately whenever the list mutates so the header
+     * selector reflects add/remove/heal without waiting for the
+     * 10 s periodic tick. */
+    rs.on('change', () => this.broadcast('tcpip-data'));
+    console.log('[WsManager] RemoteSystemsSync attached for tcpip-data merge');
   }
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
@@ -170,14 +198,8 @@ export class WsManager {
    */
   private buildChannelData(channel: string): unknown {
     switch (channel) {
-      case 'frontmatter-data':
-        return this.dataCache.buildFrontmatterData();
-
-      case 'header-data':
-        return this.dataCache.buildHeaderData();
-
       case 'tcpip-data':
-        return this.dataCache.buildTcpIpData();
+        return this.dataCache.buildTcpIpData(this.remoteSystemsSync?.list());
 
       case 'upgrade-data':
         if (this.upgradeManager) {
@@ -185,33 +207,11 @@ export class WsManager {
         }
         return { UpgradeStatus: '', UpgradingSoftware: false, isEmpty: true };
 
-      case 'network-data':
-        return this.dataCache.buildPageData('network') ?? {};
-
-      case 'sensor-data':
-        return this.dataCache.buildPageData('sensors') ?? {};
-
-      case 'vfd-data':
-        return this.vfdClient ? { drives: this.vfdClient.getDrives() } : { drives: [] };
-
-      case 'equipment-data': {
-        const eqStatus = this.dataCache.getEquipStatus();
-        const pwmRaw = this.dataCache.getByVarName('PWMData')?.value ?? '';
-        const ioNamesRaw = this.dataCache.getByVarName('IoNamesData')?.value ?? '';
-        const auxRaw = this.dataCache.getByVarName('EquipAuxData')?.value ?? '';
-        const miscRaw = this.dataCache.getByVarName('MiscData')?.value ?? '';
-        const basicRaw = this.dataCache.getByVarName('P2BasicSetupData')?.value ?? '';
-        const basicArr = basicRaw ? basicRaw.split(',') : [];
-        return {
-          eqStatus,
-          pwmConfig: pwmRaw ? pwmRaw.split(',') : ['0'],
-          outputConfig: this.dataCache.getEqIndexedOutputConfig(),
-          ioNames: ioNamesRaw ? ioNamesRaw.split(',') : [],
-          auxSwitches: auxRaw ? auxRaw.split(',') : [],
-          miscData: miscRaw ? miscRaw.split(',') : ['0'],
-          systemMode: basicArr[4] ?? '0',
-        };
-      }
+      // S9k cleanup (2026-04-20): retired channels with no live UI subscribers.
+      // Active channels: tcpip-data (GellertHeader), upgrade-data (level1/version),
+      // download-data (history pages). Removed: header-data, network-data,
+      // sensor-data, vfd-data, equipment-data — all UI consumers now derive
+      // these payloads from the typed-proto store registry.
 
       case 'download-data':
         return { current: undefined, total: undefined };
@@ -249,24 +249,15 @@ export class WsManager {
    * Determines which channels are affected by the incoming tag and pushes updates.
    */
   broadcastArmUpdate(tag: string): void {
-    // Map ARM message tags to affected WebSocket channels
+    // Map ARM message tags to affected WebSocket channels.
+    // `frontmatter-data` and `header-data` are intentionally absent — the UI
+    // derives those payloads locally from the typed-proto stream now.
+    // S9k cleanup (2026-04-20): EquipStatus/SensorList/SensorData/AnalogAll
+    // mappings removed — all targeted retired channels (equipment-data,
+    // sensor-data) and produced no UI updates. tcpip-data is the only
+    // surviving event-driven channel.
     const tagChannels: Record<string, string[]> = {
-      'main':           ['frontmatter-data'],
-      'p1Plenum':       ['frontmatter-data'],
-      'EquipStatus':    ['frontmatter-data', 'equipment-data'],
-      'EquipSwitch':    ['frontmatter-data'],
-      'EquipAux':       ['frontmatter-data'],
-      'Mode':           ['frontmatter-data'],
-      'CurrentMode':    ['frontmatter-data', 'header-data'],
-      'PanelName':      ['header-data', 'tcpip-data'],
-      'DateTime':       ['header-data'],
-      'WarningData':    ['frontmatter-data'],
-      'AlarmData':      ['frontmatter-data'],
-      'StatusData':     ['frontmatter-data'],
-      'SensorList':     ['frontmatter-data', 'sensor-data'],
-      'SensorData':     ['sensor-data'],
-      'AnalogAll':      ['sensor-data'],
-      'FirmwareVersion':['frontmatter-data'],
+      'PanelName':      ['tcpip-data'],
     };
 
     const channels = tagChannels[tag];

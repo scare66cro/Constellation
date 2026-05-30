@@ -41,6 +41,10 @@ export interface SystemStatus {
   currentMode: number;
   /** Burner-cure substate (legacy CureState global; 0 = CS_OFF / not curing). */
   cureState: number;
+  /** E-Stop is the only physical input on Constellation (STORAGE orbit
+   * DI11). Closed = run permitted; open = SHUTDOWN with hardware
+   * relay de-energizing the output rail. */
+  estopActive: boolean;
 }
 
 export interface EquipState {
@@ -49,6 +53,11 @@ export interface EquipState {
   remoteOff: number;
   alarm: number;
   label: string;
+  /** Equipment input feedback contact (real DI readback via
+   *  io_config.input_map[i] in CONTROLLER firmware 0.A.17+). False
+   *  when the slot is unmapped or the orbit hasn't completed its
+   *  first FC01+FC02 cycle. */
+  inputOn: boolean;
 }
 
 export interface EquipmentStatus {
@@ -108,7 +117,7 @@ export interface PlenumSettings {
   humidSetpoint: number;
   humidSetpointRef: number;
   burnerTempSetpoint: number;
-  burnerThreshold: string;
+  burnerThreshold: number;
 }
 
 export interface BurnerSettings {
@@ -160,14 +169,24 @@ export interface ClimacellSettings {
 export interface FanSpeedSettings {
   maxSpeed: number;
   minSpeed: number;
-  coolSpeed: number;
+  refrigSpeed: number;
   recircSpeed: number;
   updatePeriod: number;
+  tempDiff: number;
+  tempRef1: number;
+  tempRef2: number;
+  prevSpeed: number;
+  updateMode: number;
 }
 
 export interface RampRateSettings {
   ratePerDay: number;
-  enabled: number;
+  /** Update period in hours (255 = Auto sentinel). */
+  updatePeriod: number;
+  tempDiff: number;
+  /** Sensor index for ref temp (0..N, 255 = Auto). */
+  tempRef: number;
+  targetTemp: number;
 }
 
 export interface RefrigSettings {
@@ -213,13 +232,24 @@ export interface HumidCtrlSettings {
 export interface OutsideAirSettings {
   mode: number;
   differential: number;
+  aboveBelow: number;
+  tempRef: number;
+  calcHumidMax: number;
 }
 
 export interface MiscSettings {
+  refrigMode: number;
+  defrostInterval: number;
+  defrostDuration: number;
   heatTempThresh: number;
+  cavityTarget: number;
+  cavityMode: number;
+  cavityDiff: number;
+  cavityDutyOrSensor: number;
+  cavityStandbyOn: number;
   kbPref: number;
   lightsFailUnits: number;
-  cavStandbyOn: number;
+  enthalpyOffPct: number;
 }
 
 export interface FailureSettings {
@@ -227,10 +257,12 @@ export interface FailureSettings {
 }
 
 export interface TempAlarmSettings {
-  lowLimit: number;
-  highLimit: number;
-  devLimit: number;
-  delayMins: number;
+  lowTemp: number;
+  lowTimer: number;
+  highTemp: number;
+  highTimer: number;
+  cureLow: number;
+  cureHigh: number;
 }
 
 export interface DoorSettings {
@@ -262,10 +294,11 @@ export interface IoConfig {
 export interface IoEntry {
   index: number;
   name: string;
-  mode: number;
-  ioPin: number;
+  mode: number;        // SYSTEM_MODE category (potato/onion/all/etc.)
+  ioPin: number;       // Physical output pin
   renamable: boolean;
   visible: boolean;
+  ioType: number;      // IO_OPTION enum: 0=OUTPUT, 1=INPUT, 2=BOTH, 3=SWITCH, 4=NONE
 }
 
 export interface IoDefinition {
@@ -280,6 +313,8 @@ export interface EmailSettings {
   fromAddr: string;
   toAddr: string;
   enabled: number;
+  authType: number;
+  displayId: string;
 }
 
 export interface LoadMonitorSettings {
@@ -295,7 +330,7 @@ export interface PasswordResponse {
 
 export interface RuntimeEntry {
   slot: number;
-  value: number;
+  mode: number;
 }
 
 export interface Runtimes {
@@ -403,6 +438,12 @@ export interface PidSettings {
   wrap: number;
 }
 
+export interface PidLogSettings {
+  wrap: number;
+  logDoors: number;
+  logRefrig: number;
+}
+
 export interface GraphFavorites {
   csv: string;
 }
@@ -460,6 +501,11 @@ export interface OrbitBoardStatus {
   legacySlot: number;  // -1 if not mapped
   refrigStage: number;
   ipAddress: string;
+  /** Per-AO equipment program (Settings.AoEquip[slot][ch]). Length 2.
+   *  0 = AO_EQUIP_UNUSED, 1 = AO_EQUIP_FAN_SPEED. Mirrors firmware
+   *  ao_equip_t in nova_fan_output.h. Operator picks per AO via the
+   *  Level 2 PWM 4-20 mA Output Setup page. */
+  aoEquip: number[];
 }
 
 export interface OrbitStatus {
@@ -470,6 +516,17 @@ export interface OrbitDiscovery {
   maxSlots: number;
   boardsFound: number;
   boards: OrbitBoardStatus[];
+}
+
+/** Raw orbit holding-register bank push. Mirrors `OrbitSensorBank` in
+ *  proto/agristar/orbit.proto. The bridge MUST NOT translate or scale
+ *  these values — they are forwarded as-is to UI proto subscribers. */
+export interface OrbitSensorBank {
+  slot: number;          // Discovery slot (0..15)
+  hrBase: number;        // First HR address in the bank (e.g. 200)
+  values: number[];      // Raw uint16 register values
+  seq: number;           // Per-board monotonic sequence
+  ts: number;            // Bridge receive timestamp (ms epoch)
 }
 
 /* ──────────────────────────────────────────────────────────────────────── *
@@ -580,6 +637,7 @@ export class NovaDataStore extends EventEmitter {
   accountSettings: AccountSettings | null = null;
   auxProgram: AuxProgram | null = null;
   userLogSettings: UserLogSettings | null = null;
+  pidLogSettings: PidLogSettings | null = null;
   pidSettings: PidSettings | null = null;
   graphFavorites: GraphFavorites | null = null;
   alertSettings: AlertSettings | null = null;
@@ -588,9 +646,37 @@ export class NovaDataStore extends EventEmitter {
   climacellTimes: ClimacellTimes | null = null;
   orbitStatus: OrbitStatus | null = null;
   orbitDiscovery: OrbitDiscovery | null = null;
+  /** Latest sensor-HR bank per orbit slot. Slot index = key. */
+  orbitSensorBanks: Map<number, OrbitSensorBank> = new Map();
 
-  // Raw storage for message types not yet decoded into typed interfaces
+  // Raw storage of every inner-message bytes received, keyed by Envelope
+  // field tag (msgId). Used both for "messages we don't decode yet" passthrough
+  // AND as the snapshot source for /proto/stream subscribers — the bytes here
+  // are exactly what came over the wire, so re-broadcasting them is faithful.
   private rawMessages: Map<number, Buffer> = new Map();
+
+  /** Snapshot of the most recent raw inner-message bytes for a given Envelope
+   *  field tag, or undefined if nothing has been received yet. */
+  getRawMessage(msgId: number): Buffer | undefined {
+    return this.rawMessages.get(msgId);
+  }
+
+  /** All cached raw inner-message bytes keyed by Envelope field tag. */
+  getRawMessages(): Map<number, Buffer> {
+    return this.rawMessages;
+  }
+
+  /**
+   * Override the cached raw bytes for an envelope tag. Used by the
+   * bridge in dev/sim mode to overwrite firmware-emitted frames with
+   * a corrected view (e.g. orbit `connected` flags from REST probe).
+   * Emits 'update' so /proto/stream subscribers receive the override.
+   * Production builds should not call this — firmware is authoritative.
+   */
+  setRawMessage(msgId: number, bytes: Buffer): void {
+    this.rawMessages.set(msgId, bytes);
+    this.emit('update', msgId);
+  }
 
   handleMessage(msgId: number, data: Buffer): void {
     this.rawMessages.set(msgId, data);
@@ -600,7 +686,7 @@ export class NovaDataStore extends EventEmitter {
       case 11: this.decodeEquipmentStatus(data); break;
       case 12: this.decodeWarningReport(data); break;
       case 13: this.decodeSensorData(data); break;
-      case 14: this.decodeRuntimes(data); break;
+      case 77: this.decodeRuntimes(data); break;
       case 15: this.decodeHumidModes(data); break;
       case 16: this.decodeAuxSwitches(data); break;
       case 17: /* DataLoadStatus — handled by bridge */ break;
@@ -642,9 +728,11 @@ export class NovaDataStore extends EventEmitter {
       case 63: this.decodeAlertSettings(data); break;
       case 64: this.decodePwmSettings(data); break;
       case 65: this.decodeNetworkNodes(data); break;
+      case 67: this.decodePidLogSettings(data); break;
       case 101: this.decodeHeartbeat(data); break;
       case 120: this.decodeOrbitStatus(data); break;
       case 121: this.decodeOrbitDiscovery(data); break;
+      case 124: this.decodeOrbitSensorBank(data); break;
       default:
         // Store raw for messages we pass through (climacellTimes, auxProgram, etc.)
         break;
@@ -697,6 +785,7 @@ export class NovaDataStore extends EventEmitter {
       accountSettings: this.accountSettings,
       auxProgram: this.auxProgram,
       userLogSettings: this.userLogSettings,
+      pidLogSettings: this.pidLogSettings,
       pidSettings: this.pidSettings,
       graphFavorites: this.graphFavorites,
       alertSettings: this.alertSettings,
@@ -730,6 +819,7 @@ export class NovaDataStore extends EventEmitter {
       calcHumid:    gf(f, 15),
       currentMode:  gv(f, 16),
       cureState:    gv(f, 17),
+      estopActive:  gv(f, 22) !== 0,
     };
     this.emit('systemStatus', this.systemStatus);
   }
@@ -743,6 +833,7 @@ export class NovaDataStore extends EventEmitter {
         remoteOff: gv(f, 3),
         alarm:     gv(f, 4),
         label:     gs(f, 5),
+        inputOn:   gv(f, 6) !== 0,
       } as EquipState;
     });
     this.equipmentStatus = { items };
@@ -812,7 +903,7 @@ export class NovaDataStore extends EventEmitter {
       humidSetpoint:     gv(f, 2),
       humidSetpointRef:  gv(f, 3),
       burnerTempSetpoint: gf(f, 4),
-      burnerThreshold:   gs(f, 5),
+      burnerThreshold:   gf(f, 5),
     };
     this.emit('plenumSettings', this.plenumSettings);
   }
@@ -888,9 +979,14 @@ export class NovaDataStore extends EventEmitter {
     this.fanSpeedSettings = {
       maxSpeed:     gv(f, 1),
       minSpeed:     gv(f, 2),
-      coolSpeed:    gv(f, 3),
-      recircSpeed:  gv(f, 7),
+      refrigSpeed:  gv(f, 3),
+      recircSpeed:  gv(f, 4),
       updatePeriod: gv(f, 5),
+      tempDiff:     gf(f, 6),
+      tempRef1:     gv(f, 7),
+      tempRef2:     gv(f, 8),
+      prevSpeed:    gv(f, 9),
+      updateMode:   gv(f, 10),
     };
     this.emit('fanSpeedSettings', this.fanSpeedSettings);
   }
@@ -898,8 +994,11 @@ export class NovaDataStore extends EventEmitter {
   private decodeRampRateSettings(data: Buffer): void {
     const f = pbDecode(data);
     this.rampRateSettings = {
-      ratePerDay: gf(f, 1),
-      enabled:    gv(f, 2),
+      ratePerDay:   gf(f, 1),
+      updatePeriod: gv(f, 2),
+      tempDiff:     gf(f, 3),
+      tempRef:      gv(f, 4),
+      targetTemp:   gf(f, 5),
     };
     this.emit('rampRateSettings', this.rampRateSettings);
   }
@@ -958,6 +1057,9 @@ export class NovaDataStore extends EventEmitter {
     this.outsideAirSettings = {
       mode:         gv(f, 1),
       differential: gf(f, 2),
+      aboveBelow:   gv(f, 3),
+      tempRef:      gv(f, 4),
+      calcHumidMax: gv(f, 5),
     };
     this.emit('outsideAirSettings', this.outsideAirSettings);
   }
@@ -965,38 +1067,83 @@ export class NovaDataStore extends EventEmitter {
   private decodeMiscSettings(data: Buffer): void {
     const f = pbDecode(data);
     this.miscSettings = {
-      heatTempThresh: gf(f, 1),
-      kbPref:         gv(f, 2),
-      lightsFailUnits: gv(f, 3),
-      cavStandbyOn:   gv(f, 4),
+      refrigMode:         gv(f, 1),
+      defrostInterval:    gv(f, 2),
+      defrostDuration:    gv(f, 3),
+      heatTempThresh:     gf(f, 4),
+      cavityTarget:       gv(f, 5),
+      cavityMode:         gv(f, 6),
+      cavityDiff:         gf(f, 7),
+      cavityDutyOrSensor: gv(f, 8),
+      cavityStandbyOn:    gv(f, 9),
+      kbPref:             gv(f, 10),
+      lightsFailUnits:    gv(f, 11),
+      enthalpyOffPct:     gv(f, 12),
     };
     this.emit('miscSettings', this.miscSettings);
   }
 
   private decodeFailureSettings(data: Buffer): void {
+    // Wire layout mirrors apply_failures() / NovaMsg_SendFailureSettings:
+    //   1 fanMode 2 fanTimer 3 heatMode 4 heatTimer
+    //   5 refrigMode 6 refrigTimer 7 refrigRun
+    //   8 burnerMode 9 burnerTimer 10 humidTimer 11 climacellTimer
+    //   12 lightsMode 13 lightsTimer 14 lightsUnits (1=mins, 60=hours)
+    //   15 climacellMode 16 refrigStagesMode 17 refrigStagesTimer
+    //   18 humidMode 19 auxMode 20 auxTimer
+    //   21 cavityHeatMode 22 cavityHeatTimer
     const f = pbDecode(data);
     this.failureSettings = {
       values: {
-        fanMode:  gv(f, 1),
-        fanTimer: gv(f, 2),
+        fanMode:           gv(f, 1),
+        fanTimer:          gv(f, 2),
+        heatMode:          gv(f, 3),
+        heatTimer:         gv(f, 4),
+        refrigMode:        gv(f, 5),
+        refrigTimer:       gv(f, 6),
+        refrigRun:         gv(f, 7),
+        burnerMode:        gv(f, 8),
+        burnerTimer:       gv(f, 9),
+        humidTimer:        gv(f, 10),
+        climacellTimer:    gv(f, 11),
+        lightsMode:        gv(f, 12),
+        lightsTimer:       gv(f, 13),
+        lightsUnits:       gv(f, 14),
+        climacellMode:     gv(f, 15),
+        refrigStagesMode:  gv(f, 16),
+        refrigStagesTimer: gv(f, 17),
+        humidMode:         gv(f, 18),
+        auxMode:           gv(f, 19),
+        auxTimer:          gv(f, 20),
+        cavityHeatMode:    gv(f, 21),
+        cavityHeatTimer:   gv(f, 22),
       },
     };
-    // Also decode repeated extra_limits (field 12) if present
-    const extras = ga(f, 12);
-    extras.forEach((buf, i) => {
-      const ef = pbDecode(buf);
-      this.failureSettings!.values[`fail${i}Mode`]  = gv(ef, 1);
-      this.failureSettings!.values[`fail${i}Timer`] = gv(ef, 2);
-    });
     this.emit('failureSettings', this.failureSettings);
   }
 
   private decodeFailureSettings2(data: Buffer): void {
+    // Wire layout mirrors apply_failures2() / NovaMsg_SendFailureSettings2:
+    //   1 outAirMode 2 outAirTimer 3 outHumidMode 4 outHumidTimer
+    //   5 highCo2Mode 6 highCo2Timer 7 co2Setpt
+    //   8 lowHumidMode 9 lowHumidTimer 10 lowHumidSet
+    //   11 plenSenMode 12 plenSenTimer 13 plenSenDiff (float)
     const f = pbDecode(data);
     this.failureSettings2 = {
       values: {
-        outAirMode: gv(f, 1),
-        sensorMode: gv(f, 2),
+        outAirMode:    gv(f, 1),
+        outAirTimer:   gv(f, 2),
+        outHumidMode:  gv(f, 3),
+        outHumidTimer: gv(f, 4),
+        highCo2Mode:   gv(f, 5),
+        highCo2Timer:  gv(f, 6),
+        co2Setpt:      gv(f, 7),
+        lowHumidMode:  gv(f, 8),
+        lowHumidTimer: gv(f, 9),
+        lowHumidSet:   gv(f, 10),
+        plenSenMode:   gv(f, 11),
+        plenSenTimer:  gv(f, 12),
+        plenSenDiff:   gf(f, 13),
       },
     };
     this.emit('failureSettings2', this.failureSettings2);
@@ -1005,15 +1152,15 @@ export class NovaDataStore extends EventEmitter {
   private decodeTempAlarmSettings(data: Buffer): void {
     // Wire layout matches firmware NovaMsg_SendTempAlarmSettings + the
     // legacy AlarmTempLow= CSV that the plensetup page consumes:
-    //   1=lowTemp, 2=lowMin, 3=highTemp, 4=highMin, 5=cureLow, 6=cureHigh.
+    //   1=lowTemp, 2=lowTimer, 3=highTemp, 4=highTimer, 5=cureLow, 6=cureHigh.
     const f = pbDecode(data);
     this.tempAlarmSettings = {
-      lowTemp:  gf(f, 1),
-      lowMin:   gv(f, 2),
-      highTemp: gf(f, 3),
-      highMin:  gv(f, 4),
-      cureLow:  gf(f, 5),
-      cureHigh: gf(f, 6),
+      lowTemp:   gf(f, 1),
+      lowTimer:  gv(f, 2),
+      highTemp:  gf(f, 3),
+      highTimer: gv(f, 4),
+      cureLow:   gf(f, 5),
+      cureHigh:  gf(f, 6),
     } as any;
     this.emit('tempAlarmSettings', this.tempAlarmSettings);
   }
@@ -1063,10 +1210,39 @@ export class NovaDataStore extends EventEmitter {
 
   private decodeIoConfig(data: Buffer): void {
     const f = pbDecode(data);
-    // Repeated uint32 fields
-    const outs = f.filter(x => x.field === 1 && x.wireType === PB_VARINT).map(x => x.value as number);
-    const ins  = f.filter(x => x.field === 2 && x.wireType === PB_VARINT).map(x => x.value as number);
-    this.ioConfig = { outputMap: outs, inputMap: ins };
+    /* Both halves accept either packed (wire=2) OR unpacked-repeated
+     * (wire=0) varint, mirroring LpSettings_ApplyIoConfig in
+     * lp_settings.c. LP firmware emits packed; legacy AS2 may emit
+     * unpacked. */
+    const collect = (field: number): number[] => {
+      const out: number[] = [];
+      for (const x of f) {
+        if (x.field !== field) continue;
+        if (x.wireType === PB_VARINT) {
+          out.push(x.value as number);
+        } else if (x.wireType === PB_LEN) {
+          const buf = x.value as Buffer;
+          let p = 0;
+          while (p < buf.length) {
+            let v = 0, shift = 0;
+            while (p < buf.length) {
+              const b = buf[p++];
+              v |= (b & 0x7F) << shift;
+              if (!(b & 0x80)) break;
+              shift += 7;
+              if (shift >= 35) { p = buf.length; break; }
+            }
+            out.push(v >>> 0);
+          }
+        }
+      }
+      return out;
+    };
+    this.ioConfig = { outputMap: collect(1), inputMap: collect(2) };
+    /* TEMP DEBUG */
+    const out = this.ioConfig.outputMap;
+    const ins = this.ioConfig.inputMap;
+    console.log(`[decodeIoConfig] outBytes=${data.length} outMap=[${out.slice(0,12).join(',')}${out.length>12?',...':''}] inMap=[${ins.slice(0,12).join(',')}${ins.length>12?',...':''}]`);
     this.emit('ioConfig', this.ioConfig);
   }
 
@@ -1081,6 +1257,7 @@ export class NovaDataStore extends EventEmitter {
         ioPin:     gv(ef, 4),
         renamable: gv(ef, 5) !== 0,
         visible:   gv(ef, 6) !== 0,
+        ioType:    gv(ef, 7),  // 0=OUTPUT is meaningful; firmware encodes with _force
       } as IoEntry;
     });
     this.ioDefinition = { entries };
@@ -1090,13 +1267,15 @@ export class NovaDataStore extends EventEmitter {
   private decodeEmailSettings(data: Buffer): void {
     const f = pbDecode(data);
     this.emailSettings = {
-      server:   gs(f, 1),
-      port:     gv(f, 2) || parseInt(gs(f, 2)) || 0,
-      username: gs(f, 3),
-      password: gs(f, 4),
-      fromAddr: gs(f, 5),
-      toAddr:   gs(f, 6),
-      enabled:  gv(f, 7),
+      server:    gs(f, 1),
+      port:      gv(f, 2),
+      username:  gs(f, 3),
+      password:  gs(f, 4),
+      fromAddr:  gs(f, 5),
+      toAddr:    gs(f, 6),
+      enabled:   gv(f, 7),
+      authType:  gv(f, 8),
+      displayId: gs(f, 9),
     };
     this.emit('emailSettings', this.emailSettings);
   }
@@ -1114,7 +1293,7 @@ export class NovaDataStore extends EventEmitter {
     const f = pbDecode(data);
     const entries = ga(f, 1).map(buf => {
       const ef = pbDecode(buf);
-      return { slot: gv(ef, 1), value: gv(ef, 2) };
+      return { slot: gv(ef, 1), mode: gv(ef, 2) };
     });
     this.runtimes = { entries };
     this.emit('runtimes', this.runtimes);
@@ -1226,6 +1405,16 @@ export class NovaDataStore extends EventEmitter {
     this.emit('userLogSettings', this.userLogSettings);
   }
 
+  private decodePidLogSettings(data: Buffer): void {
+    const f = pbDecode(data);
+    this.pidLogSettings = {
+      wrap:      gv(f, 1),
+      logDoors:  gv(f, 2),
+      logRefrig: gv(f, 3),
+    };
+    this.emit('pidLogSettings', this.pidLogSettings);
+  }
+
   private decodePidSettings(data: Buffer): void {
     const f = pbDecode(data);
     this.pidSettings = { eqIndex: gv(f, 1), wrap: gv(f, 6) };
@@ -1295,6 +1484,33 @@ export class NovaDataStore extends EventEmitter {
       legacySlot,
       refrigStage: gv(f, 13),
       ipAddress: gs(f, 14),
+      // Accept both packed (wire=PB_LEN, the proto3 default) and
+      // unpacked-repeated (wire=PB_VARINT) — LP firmware emits packed
+      // (a single len-delimited field 15 carrying ch0,ch1 varints).
+      aoEquip: (() => {
+        const out: number[] = [];
+        for (const x of f) {
+          if (x.field !== 15) continue;
+          if (x.wireType === PB_VARINT) {
+            out.push(x.value as number);
+          } else if (x.wireType === PB_LEN) {
+            const buf = x.value as Buffer;
+            let p = 0;
+            while (p < buf.length) {
+              let v = 0, shift = 0;
+              while (p < buf.length) {
+                const b = buf[p++];
+                v |= (b & 0x7F) << shift;
+                if (!(b & 0x80)) break;
+                shift += 7;
+                if (shift >= 35) { p = buf.length; break; }
+              }
+              out.push(v >>> 0);
+            }
+          }
+        }
+        return out;
+      })(),
     };
   }
 
@@ -1314,5 +1530,40 @@ export class NovaDataStore extends EventEmitter {
       boards,
     };
     this.emit('orbitDiscovery', this.orbitDiscovery);
+  }
+
+  /** Decode OrbitSensorBank (envelope tag 123). Field 3 (`values`) is
+   *  PACKED repeated uint32 per the firmware encoder, so we receive a
+   *  single PB_LEN field and must split the buffer back into varints. */
+  private decodeOrbitSensorBank(data: Buffer): void {
+    const f = pbDecode(data);
+    const slot   = gv(f, 1);
+    const hrBase = gv(f, 2);
+    const seq    = gv(f, 4);
+
+    // Find the packed values buffer — single PB_LEN field with id 3.
+    const packed = f.find(x => x.field === 3 && x.wireType === PB_LEN);
+    const values: number[] = [];
+    if (packed && Buffer.isBuffer(packed.value)) {
+      const buf = packed.value as Buffer;
+      let pos = 0;
+      while (pos < buf.length) {
+        let val = 0, shift = 0;
+        while (pos < buf.length) {
+          const b = buf[pos++];
+          val |= (b & 0x7F) << shift;
+          if (!(b & 0x80)) break;
+          shift += 7;
+          if (shift >= 35) break;
+        }
+        values.push(val >>> 0);
+      }
+    }
+
+    const bank: OrbitSensorBank = {
+      slot, hrBase, values, seq, ts: Date.now(),
+    };
+    this.orbitSensorBanks.set(slot, bank);
+    this.emit('orbitSensorBank', bank);
   }
 }

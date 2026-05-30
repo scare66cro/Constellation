@@ -9,23 +9,25 @@
  *           bound to a Django UserAccount UUID and audit entries can
  *           carry both local-slot and cloud-user identity
  *
- * Files live under <serverRoot>/data/ (auto-created):
+ * Files live under ${HOME}/.constellation/account/ (auto-created):
  *   account-meta.json    — {schema, factory, slots[10], cloudLinks[]}
  *   audit-log.ndjson     — append-only JSON lines, rotated at 5 MB
  *   audit-log.ndjson.1   — previous generation (one backup)
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
 // ── Paths ─────────────────────────────────────────────────────────────────
-// accountStore.ts compiles to server/dist/accountStore.js so __dirname
-// there is …/server/dist — place the data dir one level up next to src/.
-const DATA_DIR = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
-  '..', 'data'
-);
+// Persistent state lives in ${HOME}/.constellation/account/ alongside the
+// rest of the bridge's runtime state (nova_ospi.bin, lp-settings, etc.).
+// This path is in the systemd unit's ReadWritePaths= and is *not* clobbered
+// by `deploy_to_rpi5_hardware.sh` (which rsync-mirrors server/, wiping any
+// in-tree data dir). CONSTELLATION_DATA_DIR overrides for tests / sim.
+const DATA_DIR = process.env.CONSTELLATION_DATA_DIR ??
+  path.join(os.homedir(), '.constellation', 'account');
 const META_FILE  = path.join(DATA_DIR, 'account-meta.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit-log.ndjson');
 const AUDIT_ROTATE_BYTES = 5 * 1024 * 1024;      // 5 MB

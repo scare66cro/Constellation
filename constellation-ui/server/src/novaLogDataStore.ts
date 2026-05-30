@@ -12,6 +12,7 @@
 import type { NovaSerialBridge } from './novaSerialBridge.js';
 import type { DataCache } from './dataCache.js';
 import { LogDatabase } from './logDatabase.js';
+import { statfs } from 'fs/promises';
 
 // â”€â”€ Re-export interfaces for API route compatibility â”€â”€
 
@@ -49,7 +50,15 @@ const QUERY_TAG_NAMES = [
 export class NovaLogDataStore {
   private bridge: NovaSerialBridge;
   private dataCache: DataCache;
-  private logDb: LogDatabase;
+  /**
+   * Public so audit hooks (e.g. /proto/write/:field in index.ts) can
+   * call insertAudit() directly without going through a wrapper method.
+   */
+  readonly logDb: LogDatabase;
+  /** Public read-only handle for direct SQLite queries (CSV exports etc).
+   *  Writes still go through the typed insert* methods on this class so
+   *  the gap-detection counters stay consistent. */
+  public get db(): LogDatabase { return this.logDb; }
   private sources = new Map<string, LogSource>();
 
   /** Graph favorites stored locally */
@@ -57,6 +66,12 @@ export class NovaLogDataStore {
 
   /** Last seen LogRecord sequence number — used to detect gaps */
   private lastSeq = -1;
+
+  /** Last seen PidLogRecord sequence per loop_index — gap detection */
+  private lastPidSeq = new Map<number, number>();
+
+  /** Last seen LoadLogRecord sequence — gap detection */
+  private lastLoadLogSeq = -1;
 
   /** VFD alarm event log */
   private vfdAlarmLog: Array<{ date: string; time: string; text: string; status: 'ON' | 'OFF' }> = [];
@@ -84,7 +99,17 @@ export class NovaLogDataStore {
       this.handleActivityEvent(data);
     });
 
-    console.log('[NovaLogStore] SQLite log store initialized');
+    // Listen for PidLogRecord messages from firmware (replaces SD-card PIDLog)
+    bridge.on('PidLogRecord', (data: Buffer) => {
+      this.handlePidLogRecord(data);
+    });
+
+    // Listen for LoadLogRecord messages from firmware (replaces SD-card LoadLog)
+    bridge.on('LoadLogRecord', (data: Buffer) => {
+      this.handleLoadLogRecord(data);
+    });
+
+    console.log('[NovaLogStore] PostgreSQL log store initialized');
   }
 
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -105,9 +130,8 @@ export class NovaLogDataStore {
     if (source) source.connected = connected;
   }
 
-  getLogSources(): LogSource[] {
-    return Array.from(this.sources.values());
-  }
+  // (S9k cleanup 2026-04-21: getLogSources() removed — only consumer was
+  // the deleted GET /iot/log/sources route.)
 
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // Protobuf decoders
@@ -129,8 +153,9 @@ export class NovaLogDataStore {
         this.lastSeq = rec.sequence;
       }
 
-      this.logDb.insertUserLog(rec);
-      console.log(`[NovaLogStore] LogRecord stored: ${rec.date} ${rec.time} seq=${rec.sequence}`);
+      void this.logDb.insertUserLog(rec)
+        .then(() => console.log(`[NovaLogStore] LogRecord stored: ${rec.date} ${rec.time} seq=${rec.sequence}`))
+        .catch(err => console.error('[NovaLogStore] LogRecord pg insert error:', err.message));
     } catch (err: any) {
       console.error('[NovaLogStore] LogRecord insert error:', err.message);
     }
@@ -141,8 +166,9 @@ export class NovaLogDataStore {
       const evt = this.decodeActivityEvent(raw);
       if (!evt) return;
 
-      this.logDb.insertActivityEvent(evt);
-      console.log(`[NovaLogStore] ActivityEvent: type=${evt.event_type} eq=${evt.eq_index} "${evt.description}" state=${evt.new_state}`);
+      void this.logDb.insertActivityEvent(evt)
+        .then(() => console.log(`[NovaLogStore] ActivityEvent: type=${evt.event_type} eq=${evt.eq_index} "${evt.description}" state=${evt.new_state}`))
+        .catch(err => console.error('[NovaLogStore] ActivityEvent pg insert error:', err.message));
     } catch (err: any) {
       console.error('[NovaLogStore] ActivityEvent insert error:', err.message);
     }
@@ -219,6 +245,103 @@ export class NovaLogDataStore {
     };
   }
 
+  private handlePidLogRecord(raw: Buffer): void {
+    try {
+      const rec = this.decodePidLogRecord(raw);
+      if (!rec) return;
+
+      // Per-loop sequence-gap detection
+      const prev = this.lastPidSeq.get(rec.loop_index);
+      if (prev !== undefined && rec.sequence > 0) {
+        const gap = rec.sequence - prev - 1;
+        if (gap > 0) {
+          console.warn(`[NovaLogStore] PID loop=${rec.loop_index} sequence gap: expected ${prev + 1}, got ${rec.sequence} (${gap} record(s) lost)`);
+        }
+      }
+      if (rec.sequence > 0 || prev === undefined) {
+        this.lastPidSeq.set(rec.loop_index, rec.sequence);
+      }
+
+      void this.logDb.insertPidLog(rec)
+        .catch(err => console.error('[NovaLogStore] PidLog pg insert error:', err.message));
+    } catch (err: any) {
+      console.error('[NovaLogStore] PidLogRecord insert error:', err.message);
+    }
+  }
+
+  private decodePidLogRecord(raw: Buffer): {
+    date: string; time: string; loop_index: number;
+    p_term: number; i_term: number; d_term: number;
+    error: number; output: number; sequence: number;
+  } | null {
+    const fields = this.pbDecode(raw);
+    // output (field 8) is wire-encoded as a varint of two's-complement
+    // uint32 form by the firmware; convert back to signed int32.
+    const outU = this.pbVarint(fields, 8);
+    const outS = outU >= 0x80000000 ? outU - 0x100000000 : outU;
+    return {
+      date: this.pbString(fields, 1),
+      time: this.pbString(fields, 2),
+      loop_index: this.pbVarint(fields, 3),
+      p_term: this.pbFloat(fields, 4),
+      i_term: this.pbFloat(fields, 5),
+      d_term: this.pbFloat(fields, 6),
+      error: this.pbFloat(fields, 7),
+      output: outS,
+      sequence: this.pbVarint(fields, 9),
+    };
+  }
+
+  private handleLoadLogRecord(raw: Buffer): void {
+    try {
+      const rec = this.decodeLoadLogRecord(raw);
+      if (!rec) return;
+
+      if (this.lastLoadLogSeq >= 0 && rec.sequence > 0) {
+        const gap = rec.sequence - this.lastLoadLogSeq - 1;
+        if (gap > 0) {
+          console.warn(`[NovaLogStore] LoadLog sequence gap: expected ${this.lastLoadLogSeq + 1}, got ${rec.sequence} (${gap} record(s) lost)`);
+        }
+      }
+      if (rec.sequence > 0 || this.lastLoadLogSeq < 0) {
+        this.lastLoadLogSeq = rec.sequence;
+      }
+
+      void this.logDb.insertLoadLog(rec)
+        .then(() => console.log(`[NovaLogStore] LoadLogRecord stored: ${rec.date} ${rec.time} rec=${rec.record_num} bays=${rec.bays.length}`))
+        .catch(err => console.error('[NovaLogStore] LoadLog pg insert error:', err.message));
+    } catch (err: any) {
+      console.error('[NovaLogStore] LoadLogRecord insert error:', err.message);
+    }
+  }
+
+  private decodeLoadLogRecord(raw: Buffer): {
+    date: string; time: string; record_num: number; sequence: number;
+    bays: Array<{ pipe: number; sensor_x10: number; status: number }>;
+  } | null {
+    const fields = this.pbDecode(raw);
+    const bays: Array<{ pipe: number; sensor_x10: number; status: number }> = [];
+    for (const f of fields) {
+      if (f.field === 5 && f.wireType === 2) {
+        const sub = this.pbDecode(f.value as Buffer);
+        const sensorU = this.pbVarint(sub, 2);
+        const sensorS = sensorU >= 0x80000000 ? sensorU - 0x100000000 : sensorU;
+        bays.push({
+          pipe: this.pbVarint(sub, 1),
+          sensor_x10: sensorS,
+          status: this.pbVarint(sub, 3),
+        });
+      }
+    }
+    return {
+      date: this.pbString(fields, 1),
+      time: this.pbString(fields, 2),
+      record_num: this.pbVarint(fields, 3),
+      sequence: this.pbVarint(fields, 4),
+      bays,
+    };
+  }
+
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // User log endpoints (same interface as LogDataStore)
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -226,7 +349,7 @@ export class NovaLogDataStore {
   async getUserDates(startDate: string, endDate: string, _source?: string): Promise<string[]> {
     const start10 = startDate.slice(0, 10);
     const end10 = endDate.slice(0, 10);
-    const rows = this.logDb.getUserLogByDateRange(start10, end10);
+    const rows = await this.logDb.getUserLogByDateRange(start10, end10);
     return rows.map(r => `${r.date} ${r.time}`);
   }
 
@@ -238,7 +361,7 @@ export class NovaLogDataStore {
   ): Promise<string[]> {
     const start10 = startDate.slice(0, 10);
     const end10 = endDate.slice(0, 10);
-    const rows = this.logDb.getUserLogByDateRange(start10, end10);
+    const rows = await this.logDb.getUserLogByDateRange(start10, end10);
 
     // Map sensorId to column
     const colIndex = (QUERY_TAG_NAMES as readonly string[]).indexOf(sensorId);
@@ -270,7 +393,7 @@ export class NovaLogDataStore {
     if (sensorId.startsWith('tsen')) {
       const sid = parseInt(sensorId.slice(4), 10);
       const logIds = rows.map(r => r.id);
-      const sensorRows = this.logDb.getSensorLogByLogIds(logIds, 'temp');
+      const sensorRows = await this.logDb.getSensorLogByLogIds(logIds, 'temp');
       // Build a map: logId â†’ value for this sensor
       const valMap = new Map<number, number>();
       for (const sr of sensorRows) {
@@ -283,7 +406,7 @@ export class NovaLogDataStore {
     if (sensorId.startsWith('hsen')) {
       const sid = parseInt(sensorId.slice(4), 10);
       const logIds = rows.map(r => r.id);
-      const sensorRows = this.logDb.getSensorLogByLogIds(logIds, 'humid');
+      const sensorRows = await this.logDb.getSensorLogByLogIds(logIds, 'humid');
       const valMap = new Map<number, number>();
       for (const sr of sensorRows) {
         if (sr.sensor_id === sid) valMap.set(sr.log_id, sr.value);
@@ -306,8 +429,65 @@ export class NovaLogDataStore {
   async getActivityDates(startRec: string, endRec: string, _source?: string): Promise<string[]> {
     const start = parseInt(startRec, 10) || 1;
     const end = parseInt(endRec, 10) || 100;
-    const rows = this.logDb.getActivityLogByRange(start, end);
+    const rows = await this.logDb.getActivityLogByRange(start, end);
     return rows.map(r => `${r.date} ${r.time}`);
+  }
+
+  /**
+   * Return PID log records for the level-2 PID-tuning page.
+   * loopIndex undefined = all loops; otherwise filter to that loop only.
+   * Replaces the legacy SD-card PIDLog query path.
+   */
+  async getPidLogRecords(startDate: string, endDate: string, loopIndex?: number): Promise<Array<{
+    date: string; time: string; loop_index: number;
+    p_term: number; i_term: number; d_term: number;
+    error: number; output: number; sequence: number;
+  }>> {
+    const rows = await this.logDb.getPidLogByDateRange(startDate, endDate, loopIndex);
+    return rows.map(r => ({
+      date: r.date,
+      time: r.time,
+      loop_index: r.loop_index,
+      p_term: r.p_term,
+      i_term: r.i_term,
+      d_term: r.d_term,
+      error: r.error,
+      output: r.output,
+      sequence: r.sequence,
+    }));
+  }
+
+  async getPidLogCount(loopIndex?: number): Promise<number> {
+    return this.logDb.getPidLogCount(loopIndex);
+  }
+
+  /**
+   * Return LoadLog records (parent + per-bay) for a date range.
+   * Replaces the legacy SD-card LoadLog query path.
+   */
+  async getLoadLogRecords(startDate: string, endDate: string): Promise<Array<{
+    date: string; time: string; record_num: number; sequence: number;
+    bays: Array<{ pipe: number; sensor_x10: number; status: number }>;
+  }>> {
+    const parents = await this.logDb.getLoadLogByDateRange(startDate, endDate);
+    if (parents.length === 0) return [];
+    const bayRows = await this.logDb.getLoadLogBays(parents.map(p => p.id));
+    const byParent = new Map<number, Array<{ pipe: number; sensor_x10: number; status: number }>>();
+    for (const b of bayRows) {
+      if (!byParent.has(b.load_id)) byParent.set(b.load_id, []);
+      byParent.get(b.load_id)!.push({ pipe: b.pipe, sensor_x10: b.sensor_x10, status: b.status });
+    }
+    return parents.map(p => ({
+      date: p.date,
+      time: p.time,
+      record_num: p.record_num,
+      sequence: p.sequence,
+      bays: byParent.get(p.id) ?? [],
+    }));
+  }
+
+  async getLoadLogCount(): Promise<number> {
+    return this.logDb.getLoadLogCount();
   }
 
   async getActivitySensorData(
@@ -318,7 +498,7 @@ export class NovaLogDataStore {
   ): Promise<string[] | string[][]> {
     const start = parseInt(startRec, 10) || 1;
     const end = parseInt(endRec, 10) || 100;
-    const rows = this.logDb.getActivityLogByRange(start, end);
+    const rows = await this.logDb.getActivityLogByRange(start, end);
 
     if (sensorId === 'hsMode') {
       return rows.map(r => String(r.mode));
@@ -344,24 +524,49 @@ export class NovaLogDataStore {
   // Data info
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-  getDataInfo(): {
+  async getDataInfo(): Promise<{
     database: { activityCount: number; historyCount: number; percentUsed: number; startDate: string };
-    sdcard: string[];
-  } {
-    const historyCount = this.logDb.getUserLogCount();
-    const activityCount = this.logDb.getActivityLogCount();
+    storage: {
+      mount: string;
+      totalBytes: number;
+      usedBytes: number;
+      freeBytes: number;
+      percentUsed: number;
+    };
+  }> {
+    const historyCount  = await this.logDb.getUserLogCount();
+    const activityCount = await this.logDb.getActivityLogCount();
+
+    // Storage info: report the partition that holds the bridge process'
+    // working directory. On the rpi5 production target this is the SSD
+    // mount where Postgres's `paneldb` cluster also lives, so a single
+    // statfs covers both pg and any future on-disk artifacts. Falls back
+    // to zeros if statfs fails (e.g. on Windows during local dev).
+    let storage = { mount: process.cwd(), totalBytes: 0, usedBytes: 0, freeBytes: 0, percentUsed: 0 };
+    try {
+      const s = await statfs(process.cwd());
+      const total = s.blocks * s.bsize;
+      const free  = s.bavail * s.bsize;
+      const used  = total - free;
+      storage = {
+        mount: process.cwd(),
+        totalBytes: total,
+        usedBytes: used,
+        freeBytes: free,
+        percentUsed: total > 0 ? Math.round((used / total) * 100) : 0,
+      };
+    } catch (err) {
+      console.warn('[NovaLogStore] statfs failed:', (err as Error).message);
+    }
 
     return {
       database: {
         activityCount,
         historyCount,
-        percentUsed: 0,
+        percentUsed: storage.percentUsed,  // pg lives on the same SSD
         startDate: new Date().toISOString(),
       },
-      sdcard: [
-        '0', '0', '0', 'unlimited', String(historyCount),
-        '0', '0', '0', '0', '0',
-      ],
+      storage,
     };
   }
 
@@ -408,7 +613,7 @@ export class NovaLogDataStore {
     alarmdata: string[];
   }>> {
     // Get warning events from SQLite
-    const warnings = this.logDb.getRecentActivity(count, [1, 2]); // WARNING_ON, WARNING_OFF
+    const warnings = await this.logDb.getRecentActivity(count, [1, 2]); // WARNING_ON, WARNING_OFF
     const armAlarms = warnings.map(w => ({
       date: `${w.date} ${w.time}`,
       currentmode: String(w.mode),
@@ -447,26 +652,16 @@ export class NovaLogDataStore {
   // Activity log labels
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-  async getActivityEquipmentLabels(
-    _startRec: string,
-    _endRec: string,
-    _source?: string,
-  ): Promise<{ availLabels: string[]; availEquip: number[] }> {
-    return { availLabels: ['Equipment'], availEquip: [0] };
-  }
+  /* (Apr 2026: removed `getActivityEquipmentLabels` and
+   * `getActivityRemoteLabels` stub methods — they returned hardcoded
+   * `['Equipment']`/`['Remote']`. Their callers (`/iot/avail/*` routes)
+   * have been deleted; defaults are now seeded directly in the UI's
+   * `equipListStore`/`remoteListStore`.) */
 
-  async getActivityRemoteLabels(
-    _startRec: string,
-    _endRec: string,
-    _source?: string,
-  ): Promise<{ availLabels: string[]; availEquip: number[] }> {
-    return { availLabels: ['Remote'], availEquip: [1] };
-  }
-
-  /** Close the SQLite database cleanly (call on shutdown). */
-  close(): void {
+  /** Close the PostgreSQL pool cleanly (call on shutdown). */
+  async close(): Promise<void> {
     try {
-      this.logDb.close();
+      await this.logDb.close();
       console.log('[NovaLogStore] Database closed');
     } catch (err: any) {
       console.error('[NovaLogStore] Error closing database:', err.message);

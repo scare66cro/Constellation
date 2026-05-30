@@ -135,7 +135,7 @@ export class DjangoSync {
       'P2ClimaCellData', 'FailureData1', 'FailureData2', 'CurrentMode',
       'PlenTempDevData', 'DateTimeData', 'P2ServiceData', 'UserLogSettings',
       'AlarmData', 'OutputConfigData', 'InputConfigData', 'AvailableIoData',
-      'AirCureData', 'SysVersions', 'IoNames', 'BoardType', 'ControllerList',
+      'AirCureData', 'SysVersions', 'BoardType', 'ControllerList',
       'ClimaCellTimesData', 'LoadMonitorData', 'P2BurnerData', 'PileTempsData',
       'PileHumidsData', 'PileTempsLabels', 'PileHumidsLabels',
     ];
@@ -154,6 +154,14 @@ export class DjangoSync {
         payload[varName] = [];
       }
     }
+
+    // IoNames is no longer cached as a CSV string. The Azure storage PWA
+    // still expects the legacy "Name:Mode:IoType:Renamable:Index,..." shape,
+    // so synthesise it on demand from the structured IoEntry[]. When the
+    // PWA migrates to the structured format, drop this branch (and remove
+    // getIoNamesCsv()).
+    const ioCsv = this.cache.getIoNamesCsv();
+    payload['IoNames'] = ioCsv ? ioCsv.split(',') : [];
 
     // Temperature-unit normalization.
     //

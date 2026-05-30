@@ -1,252 +1,147 @@
 # Agristar Bridge Server
 
-WebSocket + REST bridge server that replaces the legacy C-based GellertServer.  
-Connects the Svelte UI directly to the ARM controller (TI TM4C129) via serial UART  
-**or** to the software ARM simulator via TCP (no hardware needed).
+WebSocket + REST + protobuf-stream bridge between the SvelteKit UI and
+the LP-AM2434 CONTROLLER firmware. Replaces the legacy C-based
+`gellertserverd`. Runs as `agristar-bridge.service` on the rpi5.
 
 ## Architecture
 
 ```
-                                ┌─────────────────┐
-                                │  ARM Simulator   │  ← armSimulator.ts
-                                │  TCP :9000       │     (runs without hardware)
-                                └────────┬────────┘
-                                         │ TCP
-┌──────────────┐  HTTP/WS :5173  ┌───────┴──────────┐  UART 230400   ┌─────────────┐
-│  Svelte UI   │ ──────────────▸ │  Bridge Server   │ ─────────────▸ │  ARM MCU    │
-│  (browser)   │  Vite proxy     │  HTTP :3001       │  8N1           │  TM4C129    │
-│              │  /iot/*         │                   │                │  FreeRTOS   │
-└──────────────┘                │  dataCache.ts     │                └─────────────┘
-                                │  serialBridge.ts  │
-                                │  protocol.ts      │
-                                └───────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  ws/http :80 (lighttpd) â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  UART2  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  Svelte UI   â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–¸ â”‚  Bridge Server   â”‚ â”€â”€â”€â”€â”€â”€â–¸ â”‚  CONTROLLER LP â”‚
+â”‚  (panel /    â”‚  /iot/* /proto/*        â”‚  (npx tsx        â”‚ 921600  â”‚  (AM2434)      â”‚
+â”‚   browser)   â”‚                         â”‚   src/index.ts)  â”‚         â”‚                â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜                         â”‚                  â”‚         â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                         â”‚  dataCache.ts    â”‚                 â”‚ Modbus TCP :502
+                                         â”‚  novaSerialBridgeâ”‚                 â”‚ on 10.47.27.x
+                                         â”‚  protoStream.ts  â”‚                 â–¼
+                                         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                                                                      â”‚  STORAGE / GDC â”‚
+                                                                      â”‚  / TRITON LPs  â”‚
+                                                                      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+```
+
+There is no longer a software ARM simulator, no `serialBridge.ts`, no
+`USE_NOVA` switch, no mock mode. The bridge speaks COBS+CRC+protobuf to a
+real LP-AM2434 board over UART2 in **both** dev and production.
+
+See [`docs/Simulator-to-Production-Transition.md`](../../docs/Simulator-to-Production-Transition.md)
+for the full transport / persistence / build story.
+
+---
+
+## Local development against a real LP board
+
+The bridge is meant to run on the rpi5 next to the CONTROLLER LP
+(/dev/ttyAMA0). For local hacking you have two options:
+
+### Option 1 â€” edit on Windows, deploy via scp
+
+The bridge runs `tsx` directly on the rpi5 (no build step), so any
+edit to `server/src/*.ts` just needs a file copy:
+
+```powershell
+scp F:\Constellation\constellation-ui\server\src\<file>.ts `
+    gellert@10.47.27.108:/home/gellert/Gellert/constellation/constellation-ui/server/src/
+ssh gellert@10.47.27.108 "sudo systemctl reset-failed agristar-bridge && sudo systemctl restart agristar-bridge"
+```
+
+Bridge logs:
+
+```bash
+bash F:\Constellation\_get_bridge_log.sh
+```
+
+### Option 2 â€” open a tunnel and hit the rpi5 bridge from the dev PC
+
+```powershell
+ssh -L 9001:127.0.0.1:9001 gellert@10.47.27.108
+# in another window:
+curl http://localhost:9001/iot/health
+curl http://localhost:9001/iot/orbits
+```
+
+`http://localhost:9001/proto/stream` accepts the proto-direct WS
+subscription (`{action:'subscribe', tags:[120,124,...]}`).
+
+---
+
+## Environment / runtime
+
+| Variable        | Default              | Notes                                                          |
+|-----------------|----------------------|----------------------------------------------------------------|
+| `PORT`          | `9001`               | HTTP/WebSocket listen port                                     |
+| `SERIAL_PORT`   | `/dev/ttyAMA0`       | UART device (set in the systemd unit on the rpi5)              |
+| `SERIAL_BAUD`   | `921600`             | Must match LP firmware UART2 config                            |
+| `SVELTE_BUILD`  | _(unset)_            | Optional path for static-serving the SvelteKit build           |
+
+Service unit on the rpi5:
+
+```
+WorkingDirectory=/home/gellert/Gellert/constellation/constellation-ui/server
+ExecStart=/usr/bin/npx tsx src/index.ts
+Restart=on-failure
+```
+
+Note the systemd start-rate-limit: rapid restarts can be blocked with
+`Start request repeated too quickly`. Always reset first:
+
+```bash
+sudo systemctl reset-failed agristar-bridge
+sudo systemctl restart agristar-bridge
 ```
 
 ---
 
-## Quick Start (step by step)
+## REST surface (`/iot/*`)
 
-### Prerequisites
+The legacy REST endpoints are still served for the SvelteKit pages that
+have not been migrated to `/proto/stream`. New pages SHOULD bind to
+proto stores and call `writeProto(TAG.X, draft)` instead of POSTing
+under `/iot/*` â€” see
+[`docs/proto-direct-redesign-plan.md`](../../docs/proto-direct-redesign-plan.md)
+and the `agristar-principles` user-memory note.
 
-- **Node.js** 18+ (check with `node --version`)
-- **npm** (comes with Node.js)
+| Method | Path                       | Description                                      |
+|--------|----------------------------|--------------------------------------------------|
+| GET    | `/iot/health`              | Bridge + UART health snapshot                    |
+| GET    | `/iot/orbits`              | Discovered orbit boards (slot/role/connected)    |
+| GET    | `/iot/orbits/sensor-banks` | Latest raw HR-200 banks per slot                 |
+| GET    | `/iot/triton/<slot>`       | Triton telemetry / setpoints                     |
+| POST   | `/iot/triton/<slot>/...`   | Triton manual / setpoints / safety control       |
+| GET    | `/iot/<page>`              | Legacy CSV page data (basic, analog, pid, etc.)  |
+| POST   | `/iot/PostSave.jsp`        | Legacy save shim (translates to SettingsUpdate)  |
+| POST   | `/iot/button`              | Forward a button press to firmware               |
 
-### 1. Install dependencies (one time)
+## Proto-direct surface (`/proto/*`)
 
-```bash
-cd ui-svelte/server
-npm install
+| Path                                | Description                                                         |
+|-------------------------------------|---------------------------------------------------------------------|
+| `WS  /proto/stream`                 | Subscribe to envelope tags; bridge broadcasts raw protobuf frames   |
+| `POST /proto/write/:settingsField`  | Send a `SettingsUpdate` payload (UI helper: `writeProto`)           |
 
-cd ../          # back to ui-svelte
-npm install
-```
+Wire format on `/proto/stream`: each frame is
+`[u16 LE tag][u32 LE len][payload]`.
 
-### 2. Pick a mode and start
+## Codebase landmarks
 
-There are **three ways** to run the system. Pick one:
+| File                                      | Responsibility                                          |
+|-------------------------------------------|---------------------------------------------------------|
+| `src/index.ts`                            | Express + WS bootstrap                                  |
+| `src/novaSerialBridge.ts`                 | UART transport, COBS+CRC framing, command/Ack queue     |
+| `src/novaDataStore.ts`                    | Decodes envelope tags, raw-message cache, `update` event|
+| `src/novaAdapter.ts`                      | Bridges proto messages into `dataCache` (CSV-shape)     |
+| `src/dataCache.ts`                        | Legacy CGI-name â†’ string store for `/iot/*`             |
+| `src/legacyShim.ts`                       | Translates POST forms into `SettingsUpdate` envelopes   |
+| `src/protoStream.ts`                      | `/proto/stream` WS server                               |
+| `src/apiRoutes.ts`                        | All `/iot/*` REST handlers                              |
 
----
+See also:
 
-#### Mode A — Simulator (recommended for development)
-
-No hardware needed. The ARM simulator mimics the real TM4C129 controller  
-with drifting temperatures, realistic timers, and full write support.
-
-**Open three terminals:**
-
-```bash
-# Terminal 1 — ARM Simulator (TCP port 9000)
-cd ui-svelte/server
-npm run dev:sim
-
-# Terminal 2 — Bridge Server (HTTP port 3001, connected to simulator)
-cd ui-svelte/server
-# Windows PowerShell:
-$env:SERIAL_PORT = "tcp://localhost:9000"; npx tsx src/index.ts
-# Linux/Mac:
-SERIAL_PORT=tcp://localhost:9000 npx tsx src/index.ts
-
-# Terminal 3 — SvelteKit UI (port 5173)
-cd ui-svelte
-npm run dev
-```
-
-Open **http://localhost:5173** in your browser.
-
----
-
-#### Mode B — Mock (static data, no protocol)
-
-Instant startup, no ARM simulator. Data is static (never changes).  
-Useful for quick UI layout work.
-
-```bash
-# Terminal 1 — Bridge in mock mode
-cd ui-svelte/server
-npm run dev          # SERIAL_PORT defaults to "mock"
-
-# Terminal 2 — SvelteKit UI
-cd ui-svelte
-npm run dev
-```
-
----
-
-#### Mode C — Real Hardware
-
-Connect to a real TM4C129 ARM controller via USB-to-serial adapter.
-
-```bash
-# Terminal 1 — Bridge with real serial port
-cd ui-svelte/server
-# Windows:
-$env:SERIAL_PORT = "COM3"; npx tsx src/index.ts
-# Linux:
-SERIAL_PORT=/dev/ttyUSB0 npx tsx src/index.ts
-
-# Terminal 2 — SvelteKit UI
-cd ui-svelte
-npm run dev
-```
-
----
-
-### 3. Verify it works
-
-After starting, open a browser or run:
-
-```bash
-# Health check — should return { status: "ok", cached: 44, cgiVars: 89 }
-curl http://localhost:3001/iot/health
-
-# Check live data — should return plenum temp, humidity, etc.
-curl http://localhost:3001/iot/ws/frontmatter-data
-```
-
----
-
-## Environment Variables
-
-| Variable       | Default  | Description                                     |
-|---------------|----------|-------------------------------------------------|
-| `PORT`        | `3001`   | HTTP/WebSocket listen port                      |
-| `SERIAL_PORT` | `mock`   | `mock`, `tcp://host:port`, or serial device path|
-| `SERIAL_BAUD` | `230400` | Serial baud rate (ignored for TCP/mock)         |
-| `SVELTE_BUILD`| _(empty)_| Path to SvelteKit build output for static serving |
-
-## npm Scripts (server)
-
-| Script       | Command                      | Description                              |
-|-------------|------------------------------|------------------------------------------|
-| `dev`       | `tsx watch src/index.ts`     | Bridge in mock mode with auto-reload     |
-| `dev:sim`   | `tsx src/armSimulator.ts`    | Start the ARM simulator on TCP port 9000 |
-| `build`     | `tsc`                        | Compile TypeScript to dist/              |
-| `start`     | `node dist/index.js`         | Run production build                     |
-
-## WebSocket Protocol
-
-Connect to `ws://localhost:3001/iot/ws` and send JSON messages:
-
-### Subscribe to a channel
-```json
-{ "action": "subscribe", "channel": "frontmatter-data" }
-```
-
-### Server pushes
-```json
-{ "channel": "frontmatter-data", "data": { "MainData": "22.5,65,..." }, "ts": 1709123456789 }
-```
-
-### Available channels
-- `frontmatter-data` — Main dashboard data (pushed every 3s or on ARM update)
-- `header-data` — Panel name, mode, date/time
-- `tcpip-data` — Network node list
-- `upgrade-data` — Firmware upgrade progress
-- `network-data` — Network monitor
-- `download-data` — Log download progress
-- `equipment-data` — Equipment status
-
-## REST API (backward compatible)
-
-All endpoints under `/iot/*`:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/iot/ws/<channel>` | Polling fallback for any WebSocket channel |
-| GET | `/iot/<page>` | Page data (basic, analog, pid, etc.) |
-| GET | `/iot/health` | Server health check |
-| GET | `/iot/debug/cache` | Dump all cached CGI variables |
-| POST | `/iot/button` | Send button press to ARM |
-| POST | `/iot/PostSave.jsp` | Save settings to ARM |
-
-## Serial Protocol
-
-Frame format matching the ARM firmware:
-```
-^<Tag>=<Value>$<CRC32 decimal>!
-```
-
-- Start: `^` (0x5E)
-- Payload: `Tag=Value1,Value2,...`
-- CRC separator: `$` (0x24)
-- CRC: Standard CRC-32 as decimal string
-- End: `!` (0x21)
-
-## Development with SvelteKit
-
-The Vite dev server is configured to proxy `/iot/*` to `http://localhost:3001`:
-
-```bash
-# Terminal 1: Start bridge server
-cd ui-svelte/server && npm run dev
-
-# Terminal 2: Start SvelteKit dev server
-cd ui-svelte && npm run dev
-```
-
-The proxy is configured in `vite.config.ts` with WebSocket support for `/iot/ws`.
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Main entry — Express + HTTP + WebSocket server |
-| `src/wsManager.ts` | WebSocket connection manager, channel subscriptions |
-| `src/serialBridge.ts` | Serial/TCP/mock communication with ARM |
-| `src/protocol.ts` | CRC-32, message framing, ACK/NAK |
-| `src/dataCache.ts` | In-memory cache of 89 CGI variables from ARM |
-| `src/apiRoutes.ts` | REST API endpoints |
-| `src/armSimulator.ts` | ARM TM4C129 simulator (TCP, no hardware needed) |
-
-## ARM Simulator Details
-
-The ARM simulator (`armSimulator.ts`) faithfully reproduces the behavior of the
-real TM4C129 firmware so you can develop and test the UI without hardware.
-
-### What it simulates
-
-| Feature | Detail |
-|---------|--------|
-| **Init handshake** | Version check, `Initialize=1.07,AS2` response |
-| **Push timers** | 3s (Main, Mode, DateTime, EquipStatus), 7s (SensorData, Warnings), 50s (all settings) |
-| **Sensor drift** | Plenum/outside/return temps drift ±0.15°C every 2s; humidity ±0.5%; CO2 ±10 ppm |
-| **MultiMsg protocol** | Versions, SensorLabels, IoDefinition sent as `MultiMsg`/`MultiEnd` sequences |
-| **Write protocol** | Full RTS → ACK → POST → REPOST → DataLoadStatus handshake |
-| **POST application** | Writing `p1Plenum` or `CurrentMode` updates the live sim state |
-
-### CLI options
-
-```bash
-npx tsx src/armSimulator.ts              # default: TCP port 9000
-npx tsx src/armSimulator.ts --port 9001  # custom port
-```
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `EADDRINUSE :9000` | Kill old node processes: `Get-Process node \| Stop-Process` (Windows) or `pkill node` (Linux) |
-| `EADDRINUSE :3001` | Same as above — old bridge still running |
-| Bridge shows "mock mode" | Set `SERIAL_PORT=tcp://localhost:9000` before starting bridge |
-| "Cannot GET /iot/health" | Bridge not started yet, or wrong port. Check `http://localhost:3001/iot/health` |
-| UI shows no data | Wait ~5s after bridge starts for init handshake + first data push |
+- [`/memories/repo/novaadapter-rpi5-deploy-gap.md`](../../memories/repo/novaadapter-rpi5-deploy-gap.md)
+  â€” `deploy.sh` does NOT push `server/src/*.ts`; manual scp is required.
+- [`/memories/repo/data-path-rules.md`](../../memories/repo/data-path-rules.md)
+  â€” the bridge MUST be a transparent passthrough (no unit conversion,
+  no fix-ups, no synthetic sensor values).
+- [`docs/firmware-bridge-protocol.md`](../../docs/firmware-bridge-protocol.md)
+  â€” full COBS+CRC+protobuf wire-protocol invariants.
