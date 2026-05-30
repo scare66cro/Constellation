@@ -129,7 +129,7 @@ mechanical, not a research project.
 - [`docs/factory-defaults-review-2026-05.md`](docs/factory-defaults-review-2026-05.md) — defaults audit.
 - [`docs/session-resume-ota-flash-write.md`](docs/session-resume-ota-flash-write.md) — OTA flash-write WIP.
 - [`docs/Azure-Cloud-Integration-Plan.md`](docs/Azure-Cloud-Integration-Plan.md) — cloud sync plan.
-- [`docs/remote-claude-code-from-phone.md`](docs/remote-claude-code-from-phone.md) — attach to the office Claude Code CLI session from a phone over Tailscale SSH + tmux (WSL).
+- [`docs/remote-claude-code-from-phone.md`](docs/remote-claude-code-from-phone.md) — reach the office (native-Windows) Claude Code CLI from a phone over Tailscale: RDP, or OpenSSH + MSYS2 tmux.
 - [`docs/history/save-path-postmortems.md`](docs/history/save-path-postmortems.md) — resolved save-path bugs.
 
 ## Repo-local memory notes (gitignored, ~100 files)
