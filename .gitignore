@@ -103,8 +103,15 @@ Azure/AgristarCloud/bin/
 Azure/AgristarCloud/obj/
 
 # ─── QEMU / runtime simulator data ───────────────────────────────────────
-qemu-constellation/*.qcow2
-qemu-constellation/*.raw
+# Catch QEMU images anywhere in the tree — they are routinely 10-15 GB
+# each and have no business in git history.
+**/*.qcow2
+**/*.qcow
+**/*.raw
+**/*.img
+**/*.iso
+**/*.vmdk
+**/*.vdi
 
 # ─── Generated proto bundles (large, regenerable) ────────────────────────
 # Keep proto/ source but ignore generated/ since it's reproducible

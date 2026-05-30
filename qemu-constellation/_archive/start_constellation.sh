@@ -20,8 +20,11 @@ NOVA_FW="$NOVA_DIR/build/nova_firmware.bin"
 SERVER_DIR="$BASE/constellation-ui/server"
 QEMU_ARM="$HOME/qemu-tm4c/build/qemu-system-arm"
 QEMU_AARCH64="$HOME/qemu-tm4c/build/qemu-system-aarch64"
-RPI_KERNEL="$HOME/rpi5_custom_kernel.img"
-RPI_DISK="$HOME/rpi5_constellation.qcow2"   # SEPARATE copy for Constellation
+# Project-local rpi5 image (qemu-constellation/images/, .gitignored).
+# Was previously $HOME/rpi5_custom_kernel.img + $HOME/rpi5_constellation.qcow2;
+# moved into the repo on 2026-04-20 so deploy is self-contained.
+RPI_KERNEL="$BASE/qemu-constellation/images/rpi5_custom_kernel.img"
+RPI_DISK="$BASE/qemu-constellation/images/rpi5.qcow2"
 
 # Color helpers
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -78,15 +81,17 @@ for f in "$QEMU_ARM" "$NOVA_FW"; do
 done
 [ "$MISSING" -eq 1 ] && { fail "Cannot start."; exit 1; }
 
-# Duplicate RPi5 image if needed
+# Image lives in the repo (qemu-constellation/images/, .gitignored).
+# If it's missing, fall back to copying from $HOME/rpi5.qcow2 (legacy location).
 if [ ! -f "$RPI_DISK" ]; then
     SRC_DISK="$HOME/rpi5.qcow2"
     if [ -f "$SRC_DISK" ]; then
-        info "Creating Constellation RPi5 disk copy..."
+        info "Seeding $RPI_DISK from $SRC_DISK ..."
+        mkdir -p "$(dirname "$RPI_DISK")"
         cp --reflink=auto "$SRC_DISK" "$RPI_DISK" 2>/dev/null || cp "$SRC_DISK" "$RPI_DISK"
-        ok "RPi5 disk copied to $RPI_DISK"
+        ok "RPi5 disk seeded into repo at $RPI_DISK"
     else
-        warn "No rpi5.qcow2 found — RPi5 emulation will be skipped"
+        warn "No rpi5 image at $RPI_DISK or $SRC_DISK — RPi5 emulation will be skipped"
     fi
 fi
 
@@ -189,7 +194,7 @@ if [ "$RPI_AVAILABLE" -eq 1 ]; then
         -kernel "$RPI_KERNEL" \
         -append "root=/dev/vda2 rootfstype=btrfs rootsubvol=@ rootwait rootdelay=5 console=ttyAMA0,115200 earlycon" \
         -drive "file=$RPI_DISK,format=qcow2,if=virtio" \
-        -netdev user,id=net0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443 \
+        -netdev user,id=net0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=tcp::8181-:3000,hostfwd=tcp::9001-:9001 \
         -device virtio-net-device,netdev=net0 \
         -serial file:/tmp/constellation_rpi5_serial.log \
         -display none \
@@ -197,15 +202,17 @@ if [ "$RPI_AVAILABLE" -eq 1 ]; then
         > /tmp/constellation_rpi5.log 2>&1 &
     PIDS+=($!)
     
+    # uisvelte.service inside the rpi5 image listens on :3000;
+    # QEMU forwards host :8181 → guest :3000.
     for i in $(seq 1 150); do
-        curl -s --connect-timeout 1 http://localhost:8080/ > /dev/null 2>&1 && break
+        curl -s --connect-timeout 1 http://localhost:8181/ > /dev/null 2>&1 && break
         sleep 1
     done
     
-    if curl -s --connect-timeout 2 http://localhost:8080/ > /dev/null 2>&1; then
-        ok "RPi 5 booted — UI at http://localhost:8080"
+    if curl -s --connect-timeout 2 http://localhost:8181/ > /dev/null 2>&1; then
+        ok "RPi 5 booted — UI at http://localhost:8181"
     else
-        warn "RPi 5 still booting — UI should appear at http://localhost:8080 shortly"
+        warn "RPi 5 still booting — UI should appear at http://localhost:8181 shortly"
     fi
 
     PATCH_SCRIPT="/mnt/f/Agristar/Agristar/qemu-tm4c/patch_rpi5_qemu.sh"
