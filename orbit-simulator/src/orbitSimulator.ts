@@ -265,30 +265,143 @@ export interface TritonSetpoints {
   exvMaxPct: number;
   /** Manual EXV opening (%) — used when manualMode != auto */
   exvManualPct: number;
+  /** EXV cold-start opening (%) used during the warm-up window after the
+   *  compressor cuts in.  Mirrors GRC `Settings.Expansion.StartPercent`
+   *  (default 30 %).  The PID's integrator is seeded so its initial
+   *  output matches this percentage exactly, avoiding a step on hand-off. */
+  exvStartPct: number;
+  /** EXV warm-up duration (minutes) following compressor cut-in.  During
+   *  this window the EXV is held at `exvStartPct` and PID output is
+   *  ignored.  Mirrors GRC `Settings.Expansion.Warmup` (default 1 min). */
+  exvWarmupMin: number;
+  /** EXV PID sample period (seconds).  Mirrors GRC `PID_PARAMS.U`
+   *  (default 3 s).  PID is recomputed at most once per `exvSamplePeriod`
+   *  seconds; between samples the slew-rate-limited output is held. */
+  exvSamplePeriod: number;
   /** Subcooling target (°F) */
   subcoolingTarget: number;
 
   // ── Defrost ──
-  /** Defrost mode: 0=NONE, 1=TIMED, 2=DEMAND, 3=HOT_GAS, 4=ELEC */
+  /** Defrost mode: 0=NONE, 1=TIMED, 2=DEMAND, 3=HOT_GAS, 4=ELEC.
+   *  This controls *how* defrost runs (fan/output behaviour).  The
+   *  *trigger* is independent — `defrostIntervalHours` always drives
+   *  the override-timer initiation.  `MANUAL` is always available via
+   *  the REST API regardless of mode (mirrors GRC). */
   defrostMode: number;
   /** Defrost stages (1..2) — GRC supports up to 2 hot-gas stages */
   defrostStages: number;
-  /** Defrost interval (hours) */
+  /** Defrost interval (hours) — once this many hours pass since the last
+   *  defrost end, a TIMED defrost initiates automatically.  Mirrors GRC
+   *  `Defrost.OverrideTimer`. */
   defrostIntervalHours: number;
-  /** Defrost max duration (minutes) */
+  /** Defrost max duration (minutes) — TIME-termination ceiling (also a
+   *  hard upper bound for TEMPERATURE/PRESSURE termination).  Mirrors
+   *  GRC `Defrost.TerminationTime`. */
   defrostMaxMinutes: number;
-  /** Defrost termination temperature (°F evap-out) */
+  /** Defrost termination temperature (°F) — when termType==TEMPERATURE,
+   *  defrost ends once `dischargeT >= defrostTermT`.  Mirrors GRC
+   *  `Defrost.TerminationTemperature`. */
   defrostTermT: number;
-  /** Drip / pump-out time after defrost (seconds) */
+  /** Defrost termination type:
+   *    0 = TIME        — terminate after `defrostMaxMinutes`
+   *    1 = TEMPERATURE — terminate when `dischargeT >= defrostTermT`
+   *                       (capped by `defrostMaxMinutes`)
+   *    2 = PRESSURE    — terminate when `dischargeP >= defrostTermP`
+   *                       (capped by `defrostMaxMinutes`)
+   *  Mirrors GRC `Defrost.TerminationType`. */
+  defrostTermType: number;
+  /** Defrost termination pressure (PSI) — when termType==PRESSURE,
+   *  defrost ends once `dischargeP >= defrostTermP`.  Mirrors GRC
+   *  `Defrost.TerminationPressure`. */
+  defrostTermP: number;
+  /** Drip / pump-out time after defrost (seconds).  Compressor stays
+   *  off and condenser fans stay off for this many seconds after the
+   *  defrost output drops, so meltwater drains before the system runs
+   *  again.  Mirrors GRC `Defrost.DripTime` (called "drip" in HMI). */
   dripTimeSec: number;
-  /** Pump down before starting defrost (0/1) */
+  /** Pump down before starting defrost (0/1).  When 1, a defrost
+   *  initiation while the compressor is running first commands a
+   *  pumpdown (suction → cutOutP) before energizing EQ_DEFROST.  When
+   *  0, the compressor is dropped immediately and defrost begins on
+   *  the next tick.  Mirrors GRC `Defrost.PumpdownBefore`. */
   pumpDownBeforeDefrost: number;
+
+  // ── Trend-based (DEMAND) defrost initiation ── (Phase 5.5)
+  // Mirrors GRC `DefrostCtrl.c §1` `Trend[].trend[128]` ring + trigger.
+  // **Disabled by default** (`defrostTrendVarTimerMin == 0`) — set to a
+  // positive value to enable trend-based initiation.  When enabled, the
+  // SM samples suction PSI once per minute while the compressor is on,
+  // and once `defrostTrendVarTimerMin` worth of samples is collected,
+  // computes the rolling mean.  When `currentSuction <= mean -
+  // defrostTrendDiffP` AND coils-freezing predicate AND condition holds
+  // for `defrostTrendInitiateMin` minutes, fires a TREND defrost.
+  /** Warm-up gate (minutes of compressor-on samples) before the trend
+   *  reading is trusted.  GRC `Defrost.VariableTimer`.  Default 0
+   *  (= TREND initiation disabled). */
+  defrostTrendVarTimerMin: number;
+  /** Sustain time (minutes) the suction must remain `≤ trend - diff`
+   *  before the SM commits to a TREND defrost.  GRC
+   *  `Defrost.InitiateTimer`. */
+  defrostTrendInitiateMin: number;
+  /** Suction-pressure differential (PSI) below the rolling mean that
+   *  qualifies as "coils icing up".  GRC `Defrost.SuctionDifferential`.
+   *  Default 5 PSI. */
+  defrostTrendDiffP: number;
+
+  // ── Capacity stage / unloaders ── (Triton supports up to 2 unloaders)
+  // Mirrors GRC `Settings.Compressor.Stage[]` (load on demand crossing)
+  // + `Settings.Compressor.HighHeadPressure[]` (HP override) +
+  // `Settings.Compressor.LowSuctionOverride[]` (LP override) +
+  // `UnloaderNormal` polarity flag.  Triton uses the operator-mapped
+  // DO_ROLE.UNLOADER1 / UNLOADER2 slots in `ioConfig.doRole`.
+  /** Demand % at/above which unloader[i] loads (energizes — adds
+   *  capacity).  GRC `Stage.On`.  Defaults: U1=30, U2=40. */
+  unloaderOnPct: number[];
+  /** Demand % at/below which unloader[i] unloads (de-energizes — sheds
+   *  capacity).  GRC `Stage.Off`.  Must be < `unloaderOnPct[i]` for
+   *  hysteresis.  Defaults: U1=20, U2=30. */
+  unloaderOffPct: number[];
+  /** Discharge PSI at/above which unloader[i] is forced OFF (HP
+   *  override).  GRC `HighHeadPressure[i].unload`.  Default 350 PSI. */
+  unloaderHpUnloadPsi: number[];
+  /** Discharge PSI at/below which the HP override clears.  GRC
+   *  `HighHeadPressure[i].load`.  Default 320 PSI. */
+  unloaderHpLoadPsi: number[];
+  /** Suction PSI at/below which unloader[i] is forced OFF (LP
+   *  override — protects compressor from low-side starvation).  GRC
+   *  `LowSuctionOverride[i].unload`.  Default 5 PSI. */
+  unloaderLpUnloadPsi: number[];
+  /** Suction PSI at/above which the LP override clears.  GRC
+   *  `LowSuctionOverride[i].load`.  Default 15 PSI. */
+  unloaderLpLoadPsi: number[];
+  /** Unloader contactor polarity: 0 = NORMALLY_OPENED (DO energized →
+   *  loaded), 1 = NORMALLY_CLOSED (DO energized → unloaded).  Mirrors
+   *  GRC `Compressor.UnloaderNormal`.  Default 0 (NO). */
+  unloaderNormal: number;
 
   // ── PID (capacity + cond-fan + EXV) ──
   /** Capacity PID gains ×10 */
   capP: number; capI: number; capD: number; capU: number;
   /** Condenser-fan PID gains ×10 */
   condP: number; condI: number; condD: number; condU: number;
+
+  // ── Safe-mode policy (deferral #4) ──
+  // Operator-configurable per-equipment behaviour while `safeOffMask != 0`
+  // OR `safeties.lockoutMask != 0`.  Compressor + unloaders are NEVER in
+  // policy: refrigeration safety pins them OFF.  Defaults match the
+  // original “all-zero” behaviour for backward compatibility EXCEPT
+  // condenser fans, which default to ALL_ON (industry practice: keep the
+  // condenser dumping residual head pressure even after a fault).
+  /** Cond-fan policy: 0=ALL_OFF, 1=HOLD_LAST, 2=ALL_ON  (default 2). */
+  safePolicyCondFans:   number;
+  /** When `condFanVfdMode==1`, the VFD % to drive while in safe mode.
+   *  Default 100 (full speed) so residual head pressure is dumped fast. */
+  safePolicyCondVfdPct: number;
+  /** EXV % to drive while in safe mode.  Default 0 (close) to prevent
+   *  liquid flood-back into the off compressor on restart. */
+  safePolicyExvPct:     number;
+  /** Oil-pump policy: 0=OFF, 1=HOLD_LAST  (default 0). */
+  safePolicyOilPump:    number;
 
   // ── Leak / low-charge detection (superheat-trend based) ──
   /** 0 = disabled, 1 = enabled.  When enabled, the simulator monitors the
@@ -339,6 +452,13 @@ export interface TritonFailureState {
   overSec: number;
   /** True once `overSec >= delaySec`; latched until ack-all */
   tripped: boolean;
+  /**
+   * Phase 6: GRC `CompressorPumpdown(); SetCompressorFailure();` parity.
+   * Set the first tick the latch trips so we arm a one-shot pumpdown
+   * countdown rather than slamming the compressor off via safeOffMask.
+   * Cleared when `tripped` falls back to false (ack-all).
+   */
+  _pumpdownArmed?: boolean;
 }
 
 export interface TritonFailureStates {
@@ -414,12 +534,16 @@ export const TRITON_ALARM_REG_ACKED_BASE  = 536;
  *    UNUSED | EEV | COMP_VFD | COND_VFD | EVAP_VFD
  *  Digital outputs can be assigned to:
  *    UNUSED | COMP | COND_FAN | EVAP_FAN | DEFROST | LIQ_SOL
- *    | UNLOADER1..4 | OIL_PUMP
+ *    | UNLOADER1..4 | OIL_PUMP | COMP_ALARM
  *
  *  The condenser-fan stage count = (number of DOs role'd as COND_FAN).
+ *
+ *  Phase 8: Triton hardware ships with **2 AOs** (per spec —
+ *  docs/triton-grc-port-plan.md §1).  The `aoMode` array is length 2.
+ *  Snapshots from earlier (length-4) are migrated by truncating to 2.
  */
 export interface TritonIoConfig {
-  /** 4 analog outputs */
+  /** 2 analog outputs (matches OrbitState.analogOutputs length) */
   aoMode: number[];
   /** 10 digital outputs (matches OrbitState.digitalOutputs length) */
   doRole: number[];
@@ -442,6 +566,21 @@ export interface TritonState {
   condenserFanStage: number;
   /** Configured number of condenser fans (typ. 2-4) */
   condenserFanCount: number;
+  /** Per-fan live state.  Length = `condenserFanCount`.  `runtimeSec` is the
+   *  lifetime accumulator for the *lead* slot (not the physical fan) — when
+   *  rotation fires we zero the lead-slot's runtime and pick the next fan
+   *  in lead-order.  `on` reflects the current commanded relay state and
+   *  is what gets driven onto the DO board.  Optional so pre-Phase-3.5
+   *  persisted snapshots migrate cleanly. */
+  condenserFans?: Array<{ on: boolean; runtimeSec: number }>;
+  /** Index (into `condenserFans`) of the current lead fan.  Stage j means
+   *  "fans at indices [leadIndex, leadIndex+1, …, leadIndex+j-1] (mod
+   *  count) are commanded on".  Mirrors GRC `CondenserRotation.LeadFan`. */
+  condenserLeadIndex?: number;
+  /** When `condFanVfdMode==1`, this is the VFD speed reference (0..100 %)
+   *  produced by `CondenserPID()`.  Slewed at PWM_INC=10 counts/cycle of
+   *  a 222-count range every 0.4 s ≈ 11.25 %/s.  Always 0 in STAGED mode. */
+  condenserVfdPct?: number;
   /** Live floating-head discharge-pressure target (PSI) — what the fan
    *  staging logic is actually chasing this tick.  Driven by
    *  `condenserMode` + ambient.  Exposed for SCADA. */
@@ -454,6 +593,52 @@ export interface TritonState {
   defrostActive: boolean;
   /** ms timestamp of last defrost end */
   lastDefrostEnd: number;
+  /** Defrost stage machine (Phase 5).  Optional so pre-Phase-5 persisted
+   *  snapshots migrate cleanly.
+   *    0 = NONE     — no defrost activity (normal cooling / off)
+   *    1 = PUMPDOWN — defrost requested, waiting for compressor pumpdown
+   *                    (only entered when `pumpDownBeforeDefrost==1` and
+   *                     compressor was running at request time)
+   *    2 = ACTIVE   — `EQ_DEFROST` energized; compressor forced OFF;
+   *                    HOT_GAS mode also forces all condenser fans ON
+   *                    and bypasses the floating-head target.
+   *    3 = DRIP     — defrost output dropped; compressor + fans stay off
+   *                    for `dripTimeSec` so meltwater drains.
+   *  `defrostActive` is true whenever `defrostStage >= 1`. */
+  defrostStage?: number;
+  /** Why this defrost was initiated (Phase 5).
+   *    0 NONE, 1 TIMED (override), 2 MANUAL (REST), 3 TREND (future) */
+  defrostType?: number;
+  /** Seconds elapsed in the current `defrostStage` (resets on each
+   *  stage transition).  Drives the termination timers + drip timer. */
+  defrostStageSec?: number;
+  /** Seconds since the last defrost end (TurnDefrostOff completion).
+   *  Once this exceeds `defrostIntervalHours * 3600`, the override
+   *  timer fires and a TIMED defrost initiates. */
+  defrostSinceLastSec?: number;
+  /** Set true by `POST /api/triton/defrost {action:'start'}` to request
+   *  a manual defrost.  Cleared by the SM as soon as the request is
+   *  consumed (PUMPDOWN or ACTIVE entered). */
+  defrostManualPending?: boolean;
+  /** Trend-based DEMAND defrost ring + trigger state (Phase 5.5).
+   *  Mirrors GRC `Trend[].trend[128]` + `IT_DEFROST_INITIATE` timer.
+   *  Optional so pre-Phase-5.5 snapshots migrate cleanly. */
+  defrostTrend?: TritonDefrostTrend;
+  /** Per-unloader latched on/off state (Phase capacity-stage).  Index 0
+   *  = UNLOADER1, index 1 = UNLOADER2.  Optional so pre-capacity-stage
+   *  snapshots migrate cleanly.  Length matches `setpoints.unloaderOnPct`. */
+  unloaderOn?: boolean[];
+  /** Per-unloader HP-override latch — true when discharge-P forced the
+   *  unloader off; cleared once discharge drops back below `…HpLoadPsi`. */
+  unloaderHpForced?: boolean[];
+  /** Per-unloader LP-override latch — true when suction-P forced the
+   *  unloader off; cleared once suction recovers above `…LpLoadPsi`. */
+  unloaderLpForced?: boolean[];
+  /** True whenever the oil-pump (DO role 10) should be energized.
+   *  Default policy: pump runs whenever the compressor is on (mirrors
+   *  GRC `EQ_OILPUMP` slaving).  Optional so pre-capacity-stage
+   *  snapshots migrate cleanly. */
+  oilPumpOn?: boolean;
   /** Manual override request from UI: 'auto' (default), 'force-on', 'force-off' */
   manualMode: 'auto' | 'force-on' | 'force-off';
   /**
@@ -494,6 +679,13 @@ export interface TritonState {
   safeties: TritonSafeties;
   /** Live state of the leak / low-charge detector. */
   leakDetect: TritonLeakDetect;
+  /** Live state of the GRC-faithful EXV PID (Phase 4).  Optional so
+   *  pre-Phase-4 persisted snapshots migrate cleanly. */
+  exvPid?: TritonExvPid;
+  /** Live state of the GRC-faithful condenser-fan PID (deferral #3).
+   *  Optional so pre-deferral-#3 persisted snapshots migrate cleanly.
+   *  Only meaningful when `condFanVfdMode==1`. */
+  condPid?: TritonCondPid;
   /** Per-channel timer state for the GRC failure machinery (FAIL_*).
    *  Optional so old persisted snapshots migrate cleanly. */
   failureStates?: TritonFailureStates;
@@ -504,6 +696,98 @@ export interface TritonState {
   /** ms timestamp of the last `updateTriton()` tick — used to detect
    *  power-fail / process-suspend gaps that exceed `powerFailMinutes`. */
   lastTickMs?: number;
+  /** Crankcase-prove countdown (seconds).  Set to `crankcaseRunHours*3600`
+   *  on cold boot, on power-fail-gap exceeding `powerFailMinutes`, or when
+   *  DI_1 (crankcase current) drops out while the compressor is off.
+   *  Decrements every tick; while non-zero the compressor cannot start
+   *  (`COMP_PROVE`).  Mirrors GRC `IntervalTimer[IT_PROVE_n]`. */
+  crankcaseProveSecRemaining: number;
+  /** Pumpdown countdown (seconds).  When >0 the compressor stays running
+   *  with the LLS commanded off; suction bleeds down.  Set when entering
+   *  pumpdown (auto cut-out with valid suction OR DI_8 manual command);
+   *  cleared when suction <= cutOutP again or the timer expires. */
+  pumpdownSecRemaining: number;
+  /** Seconds the phase monitor (DI_LT1) has been continuously open.
+   *  Drives the GRC tiered power-fail response: ≥20 s forces SYSTEM_OFF,
+   *  ≥3 min raises WARN_POWER, ≥`powerFailMinutes` latches FAIL_POWER and
+   *  forces a fresh crankcase prove.  Reset to 0 the moment the phase
+   *  monitor goes closed. */
+  phaseLossSec: number;
+  /** Phase 7 — diagnostic ring buffers.  Optional so old persisted
+   *  snapshots migrate cleanly.  Logs live in RAM only; mirrors GRC
+   *  behaviour where the SD card holds the last N records and the
+   *  buffer resets on cold boot.  See `TritonLogs`. */
+  logs?: TritonLogs;
+}
+
+/** Phase 7 — three-channel diagnostic log.  Each ring buffer is fixed-size
+ *  to bound memory on the AM2432 target.  When full, oldest entries are
+ *  evicted (FIFO).  All buffers reset on firmware boot — no persistence.
+ *
+ *  Sizes chosen to fit comfortably in R5F SRAM:
+ *    pid : 256  × ~32 B = ~8 KB    — every PID compute (3-15 s cadence)
+ *    user: 256  × ~96 B = ~24 KB   — 1-min snapshot of operator-visible state
+ *    sys : 256  × ~64 B = ~16 KB   — event-driven (alarm/mode/defrost edges)
+ */
+export interface TritonLogs {
+  pid:  TritonPidLogEntry[];
+  user: TritonUserLogEntry[];
+  sys:  TritonSysLogEntry[];
+  /** ms timestamp of the last UserLog write — used to gate the 1-min cadence. */
+  lastUserLogMs?: number;
+  /** Snapshot of `manualMode` at the end of the previous tick.  REST mode
+   *  changes happen between ticks, so a within-tick pre/post diff would
+   *  never see them — we compare against this persisted snapshot instead. */
+  lastManualMode?: 'auto' | 'force-on' | 'force-off';
+}
+
+/** PIDLog entry — mirrors GRC `PIDLOG_RECORD` (PIDLogs.h:36).  Type 0=EXV,
+ *  1=CONDENSER (Triton has no head-pressure / refrig PIDs yet). */
+export interface TritonPidLogEntry {
+  ts: number;       // ms timestamp
+  type: number;     // 0=EXV, 1=COND
+  P: number;        // proportional contribution
+  I: number;        // integral contribution
+  D: number;        // derivative contribution
+  output: number;   // post-clamp PID output (engineering units)
+  error: number;    // CurError (setpoint - measurement)
+}
+
+/** UserLog entry — minute-cadence snapshot for the SCADA history charts.
+ *  Mirrors GRC `USERLOG_RECORD` (UserLogs.h:31): main-page items + the
+ *  raw analog board values.  We don't carry every sensor — just the ones
+ *  the operator looks at on the Refrigeration Status page. */
+export interface TritonUserLogEntry {
+  ts: number;         // ms timestamp
+  mode: number;       // compressorStatus (operator-visible state)
+  suctionP: number;   // PSI
+  suctionT: number;   // °F
+  dischargeP: number; // PSI
+  dischargeT: number; // °F
+  oilP: number;       // PSI
+  ambientT: number;   // °F
+  superheat: number;  // °F (derived)
+  exvPct: number;     // 0-100
+  fanStage: number;   // 0..N
+  vfdPct: number;     // 0-100
+  demand: number;     // 0-100
+}
+
+/** SysLog (Activity log) entry — event-driven, written when the SM
+ *  observes a state edge worth recording.  Mirrors GRC `SystemLog`
+ *  activity-table semantics.  `kind` codes:
+ *    0 ALARM_RAISED, 1 ALARM_CLEARED, 2 ALARM_ACKED,
+ *    3 COMP_START,   4 COMP_STOP,     5 MANUAL_MODE,
+ *    6 DEFROST_BEGIN,7 DEFROST_END,   8 BOOT
+ */
+export interface TritonSysLogEntry {
+  ts: number;
+  kind: number;
+  /** Free-form code describing the event subject (e.g. alarm code,
+   *  manual mode value, defrost stage).  Kept short for memory. */
+  code: string;
+  /** Optional human-readable label (omit on firmware to save flash). */
+  label?: string;
 }
 
 /** Live state of the superheat-trend leak detector.  Updated every tick
@@ -524,19 +808,93 @@ export interface TritonLeakDetect {
   warmupSec: number;
 }
 
+/** Live state of the GRC-faithful EXV PID (`PIDCtrl.c PIDController`).
+ *
+ *  All values persist across snapshots so the integrator + slew limit
+ *  survive simulator restarts the same way GRC keeps them in NVRAM-
+ *  adjacent statics across power blips.  See section 4 of
+ *  `tritonControl.ts` for the algorithm and `docs/triton-grc-port-plan.md`
+ *  §5 for the GRC reference. */
+export interface TritonExvPid {
+  /** One-sided positive integrator (°F·s).  Clamped to [0, WindupLimit]
+   *  where `WindupLimit = (exvMaxPct - exvMinPct) / (0.022 * exvKi)`. */
+  intError: number;
+  /** Last sample's superheat error (°F) — feeds the D term. */
+  prevErr: number;
+  /** ms timestamp of the last PID sample.  Used to gate computation to
+   *  one update per `exvSamplePeriod` seconds. */
+  lastPidMs: number;
+  /** Seconds elapsed in the post-cut-in warm-up window.  While
+   *  `warmupSec < exvWarmupMin*60` the PID is bypassed and the EXV is
+   *  held at `exvStartPct`.  Reset on every compressor stop. */
+  warmupSec: number;
+  /** Latest PID-computed target opening (%) before slew limiting.  The
+   *  live `exvOpenPct` slews toward this between PID samples. */
+  targetPct: number;
+}
+
+/** Live state of the GRC-faithful condenser-fan PID (deferral #3 — mirrors
+ *  GRC `CondenserPID()` + `PIDController()` in CondenserFans.c / PIDCtrl.c).
+ *
+ *  Engages only when `condFanVfdMode==1`.  PID output is in PWM units
+ *  [PWM_MIN..PWM_MAX] = [55..277] (range=222) just like GRC; the live
+ *  `condenserVfdPct` is converted to % and clamped to
+ *  [`condFanVfdMinPct`, `condFanVfdMaxPct`] before being driven onto the AO. */
+export interface TritonCondPid {
+  /** One-sided positive integrator (PSI·sample).  Clamped to
+   *  [0, range / (0.022 * condI)] each cycle, matching GRC WindupLimit. */
+  intError: number;
+  /** Last sample's discharge-pressure error (PSI) — feeds the D term. */
+  prevErr: number;
+  /** ms timestamp of the last PID sample.  Gates computation to one update
+   *  per `condU` seconds (mirrors GRC `PID_PARAMS.U` / `pid->Timer`). */
+  lastPidMs: number;
+  /** Latest PID-computed target VFD percent (post conversion + clamp).  The
+   *  live `condenserVfdPct` slews toward this between PID samples. */
+  targetPct: number;
+}
+
+/** Trend-based DEMAND defrost state (Phase 5.5).  Mirrors GRC
+ *  `Trend[].trend[128]` ring + `IT_DEFROST_INITIATE` sustain timer.
+ *  See `tritonControl.ts §0c-trend` and `docs/triton-grc-port-plan.md §6`. */
+export interface TritonDefrostTrend {
+  /** Ring buffer of suction-PSI samples (head writes newest).  Length is
+   *  fixed at 128 to match GRC; older slots are NaN until filled. */
+  ring: number[];
+  /** Index of the next slot to write in `ring`. */
+  head: number;
+  /** Number of valid samples currently in the ring (saturates at 128). */
+  count: number;
+  /** Seconds since the last sample was added — accumulator that triggers
+   *  a new sample once it crosses 60. */
+  sampleAccumSec: number;
+  /** Compressor-on seconds elapsed since the trend was last reset (used
+   *  as the warm-up gate against `defrostTrendVarTimerMin*60`). */
+  warmupSec: number;
+  /** Last computed rolling mean (PSI), or NaN when warmup not yet
+   *  satisfied.  Surfaced in `apiGetTriton().defrost.trendPsi`. */
+  trendPsi: number;
+  /** Seconds the suction has held `≤ trendPsi - defrostTrendDiffP`
+   *  AND coils-freezing predicate.  Once it crosses
+   *  `defrostTrendInitiateMin*60`, a TREND defrost initiates. */
+  initiateSec: number;
+}
+
 /** Digital-input port names for orbits in TRITON role.  Index = DI number-1.
- *  Order matches GRC small-comm-refrig wiring conventions. */
+ *  Authoritative GRC main-board pinout (Demar Lott 2019 wiring drawing,
+ *  see docs/triton-grc-port-plan.md §1).  The 10-channel Triton orbit
+ *  maps DI_LT1 + DI_AF1 + DI_1..DI_8 onto its 10 inputs in order. */
 export const TRITON_DI_NAMES: readonly string[] = [
-  'Phase Monitor',          // DI1 — closed = OK   (auto-reset, blocks start)
-  'HP Switch',              // DI2 — closed = OK   (manual reset, latching)
-  'LP Switch',              // DI3 — closed = OK   (auto reset, ignored in pumpdown)
-  'Compressor Overload',    // DI4 — closed = OK   (manual reset, latching)
-  'Cond Fan Overload',      // DI5 — closed = OK   (auto reset, alarm only)
-  'Run Prove',              // DI6 — closed = proven (checked after proveSec)
-  'Pumpdown Switch',        // DI7 — open  = command pumpdown
-  'Auto-Run Permissive',    // DI8 — closed = enabled
-  '',                       // DI9 — spare
-  '',                       // DI10 — spare
+  'Phase Monitor',          // idx 0 = DI_LT1 — closed = OK
+  '(reserved)',             // idx 1 = DI_AF1 — was airflow, jumpered out in field
+  'Crankcase Heater',       // idx 2 = DI_1   — current sense, drives prove timer
+  'Cond Fan Overload',      // idx 3 = DI_2   — closed = OK (alarm only)
+  'Compressor Overload',    // idx 4 = DI_3   — closed = OK (manual reset)
+  'Oil Failure Switch',     // idx 5 = DI_4   — closed = OK (manual reset)
+  'HP Switch',              // idx 6 = DI_5   — closed = OK (manual reset)
+  'LP Switch',              // idx 7 = DI_6   — closed = OK (auto reset)
+  'Auto-Run Permissive',    // idx 8 = DI_7   — closed = enabled
+  'Pumpdown Switch',        // idx 9 = DI_8   — open = command pumpdown
 ];
 
 /** Display names for `TritonIoConfig.aoMode` values (index = mode value). */
@@ -548,7 +906,11 @@ export const TRITON_AO_NAMES: readonly string[] = [
   'Evap VFD',  // 4
 ];
 
-/** Display names for `TritonIoConfig.doRole` values (index = role value). */
+/** Display names for `TritonIoConfig.doRole` values (index = role value).
+ *  Phase 8: added `Comp Alarm` (11) so the per-circuit
+ *  `EQ_COMPRESSOR_ERROR` GRC slot has a Triton equivalent.  Slots 6-9 are
+ *  the four GRC unloaders (`EQ_UNLOADER1..4`); slot 10 is reserved for
+ *  oil-pump applications. */
 export const TRITON_DO_NAMES: readonly string[] = [
   '',                  // 0 UNUSED
   'Compressor',        // 1
@@ -561,21 +923,77 @@ export const TRITON_DO_NAMES: readonly string[] = [
   'Unloader 3',        // 8
   'Unloader 4',        // 9
   'Oil Pump',          // 10
+  'Comp Alarm',        // 11
 ];
 
-/** Live state of each Triton safety interlock.  Keys mirror TRITON_DI_NAMES. */
+/** Phase 8 — DO-role enum constants used by `applyTritonIoMapping()`.  Keep
+ *  in lockstep with TRITON_DO_NAMES.  Names mirror the GRC `COMPRESSOR_EQ`
+ *  slots from `SerialShift.h:54-72` minus the per-circuit suffixes
+ *  (Triton is single-circuit per orbit). */
+export const TRITON_DO_ROLE = {
+  UNUSED:    0,
+  COMP:      1,
+  COND_FAN:  2,
+  EVAP_FAN:  3,
+  DEFROST:   4,
+  LIQ_SOL:   5,
+  UNLOADER1: 6,
+  UNLOADER2: 7,
+  UNLOADER3: 8,
+  UNLOADER4: 9,
+  OIL_PUMP:  10,
+  COMP_ALARM: 11,
+} as const;
+
+/** Phase 8 — AO-mode enum constants used by `applyTritonIoMapping()`. */
+export const TRITON_AO_MODE = {
+  UNUSED:    0,
+  EEV:       1,
+  COMP_VFD:  2,
+  COND_VFD:  3,
+  EVAP_VFD:  4,
+} as const;
+
+/** Live state of each Triton safety interlock.  Mirrors the authoritative
+ *  GRC main-board pinout (see docs/triton-grc-port-plan.md §1):
+ *
+ *    DI index | Field              | GRC terminal | Healthy
+ *    ---------|--------------------|--------------|--------
+ *    0        | phaseMonitor       | DI_LT1       | closed
+ *    1        | (reserved)         | DI_AF1       | —      (was airflow)
+ *    2        | crankcaseCurrent   | DI_1         | closed when comp OFF
+ *    3        | condFanOverload    | DI_2         | closed
+ *    4        | compOverload       | DI_3         | closed
+ *    5        | oilFailSwitch      | DI_4         | closed
+ *    6        | hpSwitch           | DI_5         | closed
+ *    7        | lpSwitch           | DI_6         | closed
+ *    8        | autoRunPermissive  | DI_7         | closed
+ *    9        | pumpdownSwitch     | DI_8         | closed (open=pumpdown)
+ *
+ *  IMPORTANT: there is NO dedicated run-prove DI.  "Run-prove" in GRC is
+ *  the inverted DI_1 reading: while the compressor is OFF, DI_1 must read
+ *  TRUE (heater drawing current); if it falls open while OFF, the
+ *  `crankcaseProveSecRemaining` window restarts. */
 export interface TritonSafeties {
   /** Current input state — true = closed/OK, false = open/tripped */
   phaseMonitor: boolean;
+  /** Crankcase-heater current sense (DI_1).  When the compressor is OFF,
+   *  this MUST be true (heater drawing current) — otherwise the prove
+   *  timer resets. */
+  crankcaseCurrent: boolean;
+  condFanOverload: boolean;
+  compOverload: boolean;
+  /** Discrete oil-failure switch (DI_4) — independent of analog oil-P. */
+  oilFailSwitch: boolean;
   hpSwitch: boolean;
   lpSwitch: boolean;
-  compOverload: boolean;
-  condFanOverload: boolean;
-  runProve: boolean;
-  pumpdownSwitch: boolean;   // open (false) = pumpdown commanded
   autoRunPermissive: boolean;
+  pumpdownSwitch: boolean;   // open (false) = pumpdown commanded
   /** Latched lockout — must be ack'd before compressor can restart.
-   *  Bit positions: 0=hpSwitch, 1=compOverload, 2=runProve. */
+   *  Bit positions: 0=hpSwitch, 1=compOverload, 2=oilFailSwitch,
+   *  3=crankcaseProveUnmet (timer not yet expired since last loss).
+   *  Note: condFanOverload is alarm-only (auto-reset, GRC §3 hard-trip
+   *  list excludes it for compressor lockout). */
   lockoutMask: number;
 }
 
@@ -692,110 +1110,23 @@ function makeSensor(value: number, low: number, high: number): TritonSensor {
 //
 // Indexed by the GRC refrigerant enum.  We map our Triton enum (R22=0,
 // R134A=1, R404A=2, R407A=3, R407C=4, R410A=5, ...) onto these values via
-// `tritonToGrcRefrigerant()`.
-type GrcPressureVec = readonly [
-  number, number, number, number, number, number, number, number,
-  number, number, number, number, number, number, number, number,
-];
+// `tritonToGrcRefrigerant()` (re-exported from `tritonControl.ts`).
+//
+// PHASE 1 EXTRACT NOTE
+//   The refrigerant tables, `psatF()`, `tritonToGrcRefrigerant()`,
+//   `getGrcPressureDefaults()`, `applyRefrigerantDefaults()`, and the entire
+//   `updateTriton()` body now live in `tritonControl.ts` as the future home
+//   of the GRC-faithful state machines.  The names below are re-imports so
+//   the rest of this file (state initialisation, refrigerant change handler)
+//   keeps compiling unchanged.  See docs/triton-grc-port-plan.md.
 
-const GRC_PRESSURE_DEFAULTS: Record<number, GrcPressureVec> = {
-  // GRC enum:           OFF, ON, DISC,HHP1,HHP2,HHP3,HHP4, LSA, MIN, FIX, FAN, U1,  U2, U3, U4, DOF
-  /* R_22    */ 0:  [25, 55, 325, 290, 300, 310, 320, 20, 100, 200, 10,  60,  55, 50, 45, 250],
-  /* R_410A  */ 1:  [50, 95, 519, 482, 492, 502, 512, 20, 169, 326, 14, 105, 100, 95, 90, 401],
-  /* R_407C  */ 2:  [25, 55, 336, 300, 310, 320, 330, 20,  96, 202, 10,  54,  49, 44, 39, 254],
-  /* R_134A  */ 3:  [22, 30, 225, 192, 202, 212, 222, 20,  57, 128,  7,  29,  24, 19, 14, 164],
-  /* R_404A  */ 4:  [25, 55, 400, 358, 368, 378, 388, 20, 123, 241, 10,  74,  69, 64, 59, 298],
-  /* R_507   */ 5:  [25, 55, 400, 360, 370, 380, 390, 20, 130, 251, 10,  80,  75, 70, 65, 310],
-  /* R_407A  */ 6:  [25, 55, 360, 327, 337, 347, 357, 20, 100, 205, 10,  50,  45, 40, 35, 274],
-};
-
-/** Temperature → saturated-vapor pressure cubic coefficients [a,b,c,d]
- *  for `P(t) = a*t^3 + b*t^2 + c*t + d`, with `t` in °F and `P` in PSI.
- *  Lifted verbatim from GRC `Refrigerant.c` `TempToPressureCoefficients`.
- *  Indexed by GRC refrigerant enum (R22=0, R410A=1, R407C=2, R134A=3,
- *  R404A=4, R507=5, R407A=6). */
-const GRC_TEMP_TO_P_COEFF: Record<number, readonly [number, number, number, number]> = {
-  /* R_22    */ 0: [2.87064e-5, 6.104444e-3, 0.821491477, 24.04855744],
-  /* R_410A  */ 1: [4.54707e-5, 9.520674e-3, 1.278976335, 48.66722633],
-  /* R_407C  */ 2: [3.49531e-5, 6.717706e-3, 0.940156102, 29.99215385],
-  /* R_134A  */ 3: [2.56407e-5, 4.204094e-3, 0.500317987,  6.628019008],
-  /* R_404A  */ 4: [3.39324e-5, 7.142816e-3, 0.968937731, 32.11551756],
-  /* R_507   */ 5: [4.35828e-5, 5.933340e-3, 1.053624172, 35.44995267],
-  /* R_407A  */ 6: [3.57635e-5, 6.973933e-3, 0.997833893, 32.30318463],
-};
-
-/** Saturation pressure (PSI) for a given Triton refrigerant index at
- *  `tempF` °F.  Mirrors GRC `Refrigerant.c CalculatePressure()`.  Falls
- *  back to R-404A when the Triton refrigerant has no GRC analog. */
-function psatF(tritonType: number, tempF: number): number {
-  const grc = tritonToGrcRefrigerant(tritonType) ?? 4;
-  const c = GRC_TEMP_TO_P_COEFF[grc] ?? GRC_TEMP_TO_P_COEFF[4];
-  const t  = tempF;
-  const t2 = t * t;
-  return c[0] * t2 * t + c[1] * t2 + c[2] * t + c[3];
-}
-
-/** Triton refrigerantType enum value → GRC refrigerant index.
- *  Returns null when the Triton refrigerant has no GRC entry (we then fall
- *  back to R-404A as the closest HFC analog). */
-function tritonToGrcRefrigerant(triton: number): number | null {
-  switch (triton) {
-    case 0:  return 0; // R22
-    case 1:  return 3; // R134A
-    case 2:  return 4; // R404A
-    case 3:  return 6; // R407A
-    case 4:  return 2; // R407C
-    case 5:  return 1; // R410A
-    // 6=R448A, 7=R449A, 8=R450A, 9=R454A, 10=R513A, 11=R600A, 12=R744,
-    // 13=R32, 14=R454B, 15=R454C, 16=R455A, 17=R1234yf, 18=R1234ze(E),
-    // 19=R466A, 20=R515B — no GRC data; use closest analog via fallback.
-    default: return null;
-  }
-}
-
-/** Returns the GRC pressure-default vector for a Triton refrigerantType,
- *  falling back to R-404A for refrigerants the GRC firmware never shipped. */
-function getGrcPressureDefaults(tritonType: number): GrcPressureVec {
-  const grc = tritonToGrcRefrigerant(tritonType);
-  if (grc != null && GRC_PRESSURE_DEFAULTS[grc]) return GRC_PRESSURE_DEFAULTS[grc];
-  return GRC_PRESSURE_DEFAULTS[4]; // R-404A fallback
-}
-
-/**
- * Re-seed all pressure-derived setpoints from the GRC PressureDefaults table
- * for the given refrigerant.  Mirrors GRC `SetRefrigerationSettings()` in
- * Settings.c.  Called whenever the refrigerant type changes and once at
- * Triton creation.  Returns the same setpoints reference for chaining.
- */
-function applyRefrigerantDefaults(sp: TritonSetpoints, tritonType: number): TritonSetpoints {
-  const v = getGrcPressureDefaults(tritonType);
-  sp.refrigerantType   = tritonType;
-  sp.cutOutP           = v[0];
-  sp.cutInP            = v[1];
-  sp.discHighUnloadP   = v[2];
-  sp.sucLowUnloadP     = v[7];      // LOW_SUCTION_ALARM
-  // Floating-head cond-fan setpoint defaults to GRC FIXED_CONTROL value
-  sp.condFanVfdSetpointP = v[9];
-  // Floating-head clamps — `MinimumSetpoint` floor and P_sat(105 °F) ceiling,
-  // exactly matching GRC `TargetDischarge()`.
-  sp.condMinHeadP = v[8];
-  sp.condMaxHeadP = Math.round(psatF(tritonType, 105));
-  // Per-stage cond-fan staging: GRC uses (n+1)*FAN_DIFFERENTIAL above setpoint,
-  // off = on - 2*FAN_DIFFERENTIAL.  We pre-compute six absolute thresholds
-  // (PSI) anchored at FIXED_CONTROL so the staged-relay logic stays simple.
-  const fixed = v[9];
-  const diff  = v[10];
-  for (let s = 0; s < 6; s++) {
-    sp.fanStageOnP[s]  = fixed + (s + 1) * diff;
-    sp.fanStageOffP[s] = fixed + (s + 1) * diff - 2 * diff;
-    // Differential-mode equivalents (offsets above the floating target).
-    // ON  = (s+1) * FAN_DIFFERENTIAL  (e.g. 10/20/30/40/50/60 for R-404A)
-    // OFF = 5 PSI for every stage     (matches GRC default `fanXoff`=5)
-    sp.fanDiffOnP[s]  = (s + 1) * diff;
-    sp.fanDiffOffP[s] = 5;
-  }
-  return sp;
-}
+import {
+  tickTritonControl,
+  applyRefrigerantDefaults,
+  psatF,
+  tsatF,
+  type TritonControlCtx,
+} from './tritonControl';
 
 /**
  * Default Triton state — modeled on a small commercial refrigeration unit
@@ -815,11 +1146,37 @@ function createDefaultTriton(): TritonState {
     compressorAmps: 0,
     condenserFanStage: 0,
     condenserFanCount: 4,
+    condenserFans: [
+      { on: false, runtimeSec: 0 },
+      { on: false, runtimeSec: 0 },
+      { on: false, runtimeSec: 0 },
+      { on: false, runtimeSec: 0 },
+    ],
+    condenserLeadIndex: 0,
+    condenserVfdPct: 0,
     dischargeTargetP: 241,         // R-404A FIXED_CONTROL default
     evapFanOn: true,
     exvOpenPct: 0,
     defrostActive: false,
     lastDefrostEnd: 0,
+    defrostStage: 0,
+    defrostType: 0,
+    defrostStageSec: 0,
+    defrostSinceLastSec: 0,
+    defrostManualPending: false,
+    defrostTrend: {
+      ring: new Array(128).fill(NaN),
+      head: 0,
+      count: 0,
+      sampleAccumSec: 0,
+      warmupSec: 0,
+      trendPsi: NaN,
+      initiateSec: 0,
+    },
+    unloaderOn:        [false, false],
+    unloaderHpForced:  [false, false],
+    unloaderLpForced:  [false, false],
+    oilPumpOn:         false,
     manualMode: 'auto',
     demand: 50,
     sensors: {
@@ -887,6 +1244,9 @@ function createDefaultTriton(): TritonState {
       exvMinPct: 5,
       exvMaxPct: 100,
       exvManualPct: 50,
+      exvStartPct: 30,        // GRC Expansion.StartPercent
+      exvWarmupMin: 1,        // GRC Expansion.Warmup (minutes)
+      exvSamplePeriod: 3,     // GRC PID_PARAMS.U (seconds)
       subcoolingTarget: 8.0,
       // Defrost (GRC Settings.Defrost)
       defrostMode:            1,    // TIMED  (GRC TerminationType=TIME)
@@ -894,11 +1254,31 @@ function createDefaultTriton(): TritonState {
       defrostIntervalHours:   6,    // GRC Defrost.OverrideTimer
       defrostMaxMinutes:     10,    // GRC Defrost.TerminationTime
       defrostTermT:          55.0,
+      defrostTermType:        0,    // 0=TIME (default; matches GRC default)
+      defrostTermP:         250,    // GRC R-404A DOF (defrost-off pressure)
       dripTimeSec:          120,
       pumpDownBeforeDefrost:  1,
+      // Trend-based DEMAND defrost (Phase 5.5).  Disabled by default —
+      // operator must set `defrostTrendVarTimerMin > 0` to enable.
+      defrostTrendVarTimerMin: 0,    // GRC Defrost.VariableTimer
+      defrostTrendInitiateMin: 5,    // GRC Defrost.InitiateTimer
+      defrostTrendDiffP:       5,    // GRC Defrost.SuctionDifferential
+      // Capacity stage / unloaders (GRC defaults from Settings.c §236).
+      unloaderOnPct:        [30, 40],
+      unloaderOffPct:       [20, 30],
+      unloaderHpUnloadPsi:  [350, 350],
+      unloaderHpLoadPsi:    [320, 320],
+      unloaderLpUnloadPsi:  [5, 5],
+      unloaderLpLoadPsi:    [15, 15],
+      unloaderNormal:        0,
       // PID (capacity + cond-fan)  — GRC CondenserFan.PID was 5/15/2/3
       capP: 5.0, capI: 1.5, capD: 0.2, capU: 3.0,
       condP: 5.0, condI: 1.5, condD: 0.2, condU: 3.0,
+      // Safe-mode policy defaults (deferral #4).
+      safePolicyCondFans:   2,    // ALL_ON
+      safePolicyCondVfdPct: 100,
+      safePolicyExvPct:     0,    // close
+      safePolicyOilPump:    0,    // OFF
       // Leak / low-charge detection (no GRC equivalent — Triton extension)
       leakDetectEnabled:    1,
       leakSuperheatMarginF: 8.0,
@@ -917,11 +1297,24 @@ function createDefaultTriton(): TritonState {
       ambientT:   { mode: 0, delaySec: 600 },  // FAIL_OUTSIDE_AIR: FM_ALARM, Timer=10 min
     },
     ioConfig: {
-      // Default AO mapping: ch0=EEV, ch1=COMP_VFD, ch2/3=UNUSED
-      aoMode: [1, 2, 0, 0],
-      // Default DO mapping: 0=COMP, 1=EVAP_FAN, 2..5=COND_FAN×4,
-      //                     6=DEFROST, 7=LIQ_SOL, 8/9=UNUSED
-      doRole: [1, 3, 2, 2, 2, 2, 4, 5, 0, 0],
+      // Phase 8 — Triton orbit hardware spec: 2 AO, 10 DO
+      // (docs/triton-grc-port-plan.md §1 — "AM2432 Triton orbit").
+      // Default AO mapping: ch0=EEV, ch1=Cond VFD (recommended for an
+      // air-cooled scroll/recip Triton with EEV + variable-speed fans).
+      aoMode: [TRITON_AO_MODE.EEV, TRITON_AO_MODE.COND_VFD],
+      // Default DO mapping (recommended single-circuit Triton, see
+      // docs/triton-grc-port-plan.md §1 table):
+      //   DO_1 Compressor, DO_2 Liquid Solenoid,
+      //   DO_3..6 Condenser Fans 1-4,
+      //   DO_7..8 Unloader 1-2,
+      //   DO_9 Defrost, DO_10 Compressor Alarm.
+      doRole: [
+        TRITON_DO_ROLE.COMP, TRITON_DO_ROLE.LIQ_SOL,
+        TRITON_DO_ROLE.COND_FAN, TRITON_DO_ROLE.COND_FAN,
+        TRITON_DO_ROLE.COND_FAN, TRITON_DO_ROLE.COND_FAN,
+        TRITON_DO_ROLE.UNLOADER1, TRITON_DO_ROLE.UNLOADER2,
+        TRITON_DO_ROLE.DEFROST, TRITON_DO_ROLE.COMP_ALARM,
+      ],
     },
     compressorStatus: 0,        // AUTO_STANDBY
     totalRuntimeHours: 0,
@@ -929,21 +1322,38 @@ function createDefaultTriton(): TritonState {
     alarms: [],
     safeties: {
       phaseMonitor: true,
+      crankcaseCurrent: true,      // heater energized when comp off
+      condFanOverload: true,
+      compOverload: true,
+      oilFailSwitch: true,
       hpSwitch: true,
       lpSwitch: true,
-      compOverload: true,
-      condFanOverload: true,
-      runProve: true,
-      pumpdownSwitch: true,        // closed = no pumpdown command
       autoRunPermissive: true,
+      pumpdownSwitch: true,        // closed = no pumpdown command
       lockoutMask: 0,
     },
+    crankcaseProveSecRemaining: 0, // 0 = proven, ready to start (warm boot)
+    pumpdownSecRemaining: 0,
+    phaseLossSec: 0,
     leakDetect: {
       shAvgF: 0,
       exvAvgPct: 0,
       sustainedSec: 0,
       leakAlarmActive: false,
       warmupSec: 0,
+    },
+    exvPid: {
+      intError:  0,
+      prevErr:   0,
+      lastPidMs: 0,
+      warmupSec: 0,
+      targetPct: 0,
+    },
+    condPid: {
+      intError:  0,
+      prevErr:   0,
+      lastPidMs: 0,
+      targetPct: 0,
     },
     failureStates: {
       suctionP:     { overSec: 0, tripped: false },
@@ -957,6 +1367,7 @@ function createDefaultTriton(): TritonState {
     },
     safeOffMask: 0,
     lastTickMs: 0,
+    logs: { pid: [], user: [], sys: [], lastUserLogMs: 0 },
   };
   // Re-seed pressure-derived setpoints from the GRC PressureDefaults table
   // so the literal seeds above are kept consistent with the central source.
@@ -1015,6 +1426,12 @@ function defaultAnalogBoardsForRole(role: OrbitRole): AnalogBoardSim[] {
       sensorTypes: [SENSOR_TYPE_HUMID, SENSOR_TYPE_HUMID, SENSOR_TYPE_HUMID, SENSOR_TYPE_CO2],
       sensorValues: [450, 550, 400, 800],
       sensorLabels: ['Outside RH', 'Plenum RH', 'Return RH', 'CO2'],
+    },
+    {
+      address: 2, type: SENSOR_TYPE_TEMP, present: true, label: 'Pile Temp',
+      sensorTypes: [SENSOR_TYPE_TEMP, SENSOR_TYPE_TEMP, SENSOR_TYPE_TEMP, SENSOR_TYPE_TEMP],
+      sensorValues: [72, 74, 71, 73],
+      sensorLabels: ['Bd 3 - S 1', 'Bd 3 - S 2', 'Bd 3 - S 3', 'Bd 3 - S 4'],
     },
   ];
 }
@@ -1153,6 +1570,24 @@ export class OrbitSimulator extends EventEmitter {
     // we detect the old layout so the panel and sensor bus reflect the
     // actual Triton hardware (0-500 PSI transducers, demand mA).
     let migratedAnalogBoards = false;
+
+    // Migration: STORAGE orbits saved before the pile-temp board was added
+    // only have 2 analog boards.  Append the factory-default pile board if
+    // none with address >= 2 exists yet.
+    if ((this.state.role ?? role) === OrbitRole.STORAGE) {
+      const boards = this.state.analogBoards ?? [];
+      const hasPile = boards.some((b: AnalogBoardSim) => b.address >= 2);
+      if (!hasPile) {
+        const factory = defaultAnalogBoardsForRole(OrbitRole.STORAGE);
+        const pile = factory.find(b => b.address === 2);
+        if (pile) {
+          this.state.analogBoards = [...boards, pile];
+          migratedAnalogBoards = true;
+          console.log(`[Orbit ${this.state.id}] Migrated STORAGE: added pile-temp board (addr=2)`);
+        }
+      }
+    }
+
     if (this.state.role === OrbitRole.TRITON) {
       const board1 = this.state.analogBoards?.[1];
       if (!board1 || board1.type !== SENSOR_TYPE_PRESSURE) {
@@ -1206,23 +1641,76 @@ export class OrbitSimulator extends EventEmitter {
         ioConfig:  need('ioConfig')
           ? defaults.ioConfig
           : {
-              aoMode: Array.isArray(t.ioConfig?.aoMode) && t.ioConfig.aoMode.length === 4
-                ? t.ioConfig.aoMode : defaults.ioConfig.aoMode,
+              // Phase 8: hardware spec is 2 AOs.  Old length-4 snapshots
+              // are truncated to the first 2 channels (which on a real
+              // Triton orbit are the only physical AOs anyway).
+              aoMode: Array.isArray(t.ioConfig?.aoMode) && t.ioConfig.aoMode.length >= 2
+                ? t.ioConfig.aoMode.slice(0, 2)
+                : defaults.ioConfig.aoMode,
               doRole: Array.isArray(t.ioConfig?.doRole) && t.ioConfig.doRole.length === 10
                 ? t.ioConfig.doRole : defaults.ioConfig.doRole,
             },
-        alarms: Array.isArray(t.alarms) ? t.alarms : [],
+        // Phase 6: drop saved alarms — they're transient runtime state on
+        // GRC and re-evaluate from sensor reads on boot.  This avoids
+        // ghost-latched FAIL_* alarms surviving across firmware restarts.
+        alarms: [],
         safeties: need('safeties')
           ? defaults.safeties
           : { ...defaults.safeties, ...t.safeties },
         leakDetect: (t as any).leakDetect && typeof (t as any).leakDetect === 'object'
           ? { ...defaults.leakDetect, ...(t as any).leakDetect }
           : defaults.leakDetect,
-        failureStates: (t as any).failureStates && typeof (t as any).failureStates === 'object'
-          ? { ...defaults.failureStates!, ...(t as any).failureStates }
-          : defaults.failureStates,
-        safeOffMask: typeof (t as any).safeOffMask === 'number' ? (t as any).safeOffMask : 0,
-        lastTickMs:  typeof (t as any).lastTickMs  === 'number' ? (t as any).lastTickMs  : 0,
+        exvPid: (t as any).exvPid && typeof (t as any).exvPid === 'object'
+          ? { ...defaults.exvPid!, ...(t as any).exvPid }
+          : defaults.exvPid,
+        condPid: (t as any).condPid && typeof (t as any).condPid === 'object'
+          ? { ...defaults.condPid!, ...(t as any).condPid }
+          : defaults.condPid,
+        condenserFans: Array.isArray((t as any).condenserFans)
+          ? (t as any).condenserFans
+          : defaults.condenserFans,
+        condenserLeadIndex: typeof (t as any).condenserLeadIndex === 'number'
+          ? (t as any).condenserLeadIndex
+          : 0,
+        condenserVfdPct: typeof (t as any).condenserVfdPct === 'number'
+          ? (t as any).condenserVfdPct
+          : 0,
+        defrostStage:        typeof (t as any).defrostStage        === 'number' ? (t as any).defrostStage        : 0,
+        defrostType:         typeof (t as any).defrostType         === 'number' ? (t as any).defrostType         : 0,
+        defrostStageSec:     typeof (t as any).defrostStageSec     === 'number' ? (t as any).defrostStageSec     : 0,
+        defrostSinceLastSec: typeof (t as any).defrostSinceLastSec === 'number' ? (t as any).defrostSinceLastSec : 0,
+        defrostManualPending: !!(t as any).defrostManualPending,
+        defrostTrend: (t as any).defrostTrend && Array.isArray((t as any).defrostTrend.ring)
+          ? {
+              ring:           ((t as any).defrostTrend.ring as number[]).slice(0, 128),
+              head:           typeof (t as any).defrostTrend.head           === 'number' ? (t as any).defrostTrend.head           : 0,
+              count:          typeof (t as any).defrostTrend.count          === 'number' ? (t as any).defrostTrend.count          : 0,
+              sampleAccumSec: typeof (t as any).defrostTrend.sampleAccumSec === 'number' ? (t as any).defrostTrend.sampleAccumSec : 0,
+              warmupSec:      typeof (t as any).defrostTrend.warmupSec      === 'number' ? (t as any).defrostTrend.warmupSec      : 0,
+              trendPsi:       typeof (t as any).defrostTrend.trendPsi       === 'number' ? (t as any).defrostTrend.trendPsi       : NaN,
+              initiateSec:    typeof (t as any).defrostTrend.initiateSec    === 'number' ? (t as any).defrostTrend.initiateSec    : 0,
+            }
+          : defaults.defrostTrend,
+        unloaderOn:       Array.isArray((t as any).unloaderOn)       ? (t as any).unloaderOn.map((v: any) => !!v).slice(0, 2) : defaults.unloaderOn,
+        unloaderHpForced: Array.isArray((t as any).unloaderHpForced) ? (t as any).unloaderHpForced.map((v: any) => !!v).slice(0, 2) : defaults.unloaderHpForced,
+        unloaderLpForced: Array.isArray((t as any).unloaderLpForced) ? (t as any).unloaderLpForced.map((v: any) => !!v).slice(0, 2) : defaults.unloaderLpForced,
+        oilPumpOn:        typeof (t as any).oilPumpOn === 'boolean' ? (t as any).oilPumpOn : false,
+        // Phase 6: failure latches are TRANSIENT runtime state — they
+        // must NOT survive a firmware restart (GRC `IntervalTimer[]`
+        // resets to 0 on boot, alarm-and-error tables aren't persisted).
+        // Always start fresh from `defaults.failureStates`.  Acked
+        // alarms in `t.alarms` are also dropped by the
+        // `a.active && !a.acked` filter that runs against the inbound
+        // snapshot below; live `active` flags get re-evaluated on the
+        // first tick.
+        failureStates: defaults.failureStates,
+        safeOffMask: 0,
+        lastTickMs:  0,
+        // Phase 7 — log buffers are transient runtime state.  GRC's SD
+        // card persists across boots, but we treat the AM2432 RAM ring
+        // buffers as boot-fresh so a firmware restart clears the log
+        // (matches how the cold-boot path zeroes them above).
+        logs: { pid: [], user: [], sys: [], lastUserLogMs: 0 },
       };
       const after = JSON.stringify({
         ioCfg: !!this.state.triton.ioConfig,
@@ -1342,10 +1830,21 @@ export class OrbitSimulator extends EventEmitter {
       console.log(`  Sensor RTU : ${sensorRtuHost}:${sensorRtuPort}`);
     }
 
-    // ── VFD Bus: connect to VFD drives via RTU if configured ──
+    // ── VFD Bus: connect to VFD drives via RTU on STORAGE-role orbits ──
+    //
+    // STORAGE orbits front the supply-fan VFD bus (RS-485 Port B in
+    // production: orbit ↔ ABB ACS310/ACS380 drives). We default the RTU
+    // port to 5520 (the VFDSimulator's RTU server) so a typical dev
+    // setup auto-wires without env-var ceremony. Other roles (GDC,
+    // TRITON, PULSAR) don't host VFDs in this hardware generation.
+    //
+    // Set VFD_RTU_PORT=0 explicitly to disable.
     const vfdRtuHost = process.env.VFD_RTU_HOST ?? 'localhost';
-    const vfdRtuPort = parseInt(process.env.VFD_RTU_PORT ?? '0', 10);
-    if (vfdRtuPort > 0) {
+    const vfdRtuPort = parseInt(
+      process.env.VFD_RTU_PORT ?? (this.state.role === OrbitRole.STORAGE ? '5520' : '0'),
+      10,
+    );
+    if (vfdRtuPort > 0 && this.state.role === OrbitRole.STORAGE) {
       const driveIds = (process.env.VFD_DRIVE_IDS ?? '1,2,3')
         .split(',').map(s => parseInt(s.trim(), 10)).filter(n => n > 0);
 
@@ -1601,6 +2100,115 @@ export class OrbitSimulator extends EventEmitter {
     this.state.activeStageCount = activeStages.size;
 
     return targets;
+  }
+
+  /**
+   * Phase 8 — translate the pure-control TritonState into the orbit's
+   * physical I/O surface (10 DO + 2 AO) using the operator-configured
+   * `ioConfig.doRole[]` / `ioConfig.aoMode[]` mapping.
+   *
+   * This is the ONLY place logical control signals (compressorOn, EXV %,
+   * fan stage, …) become physical Modbus-visible outputs.  On real
+   * hardware the same translation lives in the AM2432 HAL layer.
+   *
+   * Called from `updateTriton()` every tick AFTER `tickTritonControl`
+   * has computed the new logical state.  Safe-mode override happens
+   * upstream in `enforceSafeMode()` (which fires after every Modbus
+   * write); when commLost we just skip the mapping so the safed
+   * outputs stay zeroed.
+   *
+   * Mapping rules:
+   *   COMP        → t.compressorOn
+   *   LIQ_SOL     → t.compressorOn && pumpdownSecRemaining===0
+   *                 (LLS closes immediately on pumpdown command).
+   *   COND_FAN    → t.condenserFans[k].on, where k = 0,1,2,…
+   *                 in the order the role appears in doRole[].
+   *                 Falls back to t.condenserFanStage > k for old
+   *                 snapshots that don't carry per-fan state.
+   *   EVAP_FAN    → t.evapFanOn
+   *   DEFROST     → defrostStage===2 (ACTIVE).  DRIP keeps it off.
+   *   UNLOADER1-4 → reserved for future capacity-stage logic;
+   *                 currently always OFF.
+   *   OIL_PUMP    → reserved; currently always OFF.
+   *   COMP_ALARM  → any active alarm in t.alarms.
+   *
+   * AOs (0-100 % values):
+   *   EEV       → t.exvOpenPct
+   *   COMP_VFD  → 0 (no compressor-VFD logic yet — Triton runs on/off)
+   *   COND_VFD  → t.condenserVfdPct (only meaningful when
+   *               setpoints.condFanVfdMode===1, else stays 0)
+   *   EVAP_VFD  → 100 when evapFanOn else 0
+   */
+  private applyTritonIoMapping(): void {
+    if (this.state.role !== OrbitRole.TRITON) return;
+    if (this.state.commLost || this.state.safeMode) return;
+    const t = this.state.triton;
+    const cfg = t.ioConfig;
+
+    const lssOn = t.compressorOn && (t.pumpdownSecRemaining ?? 0) === 0;
+    const defrostActive = (t.defrostStage ?? 0) === 2;
+    const anyAlarm = t.alarms.some(a => a.active);
+
+    // Walk DOs and assign according to role.  Track per-role index for
+    // multi-instance roles (CondFan stages, Unloader index).
+    let condFanIdx = 0;
+    let unloaderIdx = 0;
+    const unloaderInverted = (t.setpoints as any).unloaderNormal === 1;
+    for (let i = 0; i < 10 && i < cfg.doRole.length; i++) {
+      const role = cfg.doRole[i];
+      let on = false;
+      switch (role) {
+        case TRITON_DO_ROLE.COMP:        on = t.compressorOn;            break;
+        case TRITON_DO_ROLE.LIQ_SOL:     on = lssOn;                     break;
+        case TRITON_DO_ROLE.COND_FAN: {
+          const fan = t.condenserFans?.[condFanIdx];
+          on = fan ? !!fan.on : (t.condenserFanStage > condFanIdx);
+          condFanIdx++;
+          break;
+        }
+        case TRITON_DO_ROLE.EVAP_FAN:    on = t.evapFanOn;               break;
+        case TRITON_DO_ROLE.DEFROST:     on = defrostActive;             break;
+        case TRITON_DO_ROLE.COMP_ALARM:  on = anyAlarm;                  break;
+        // Unloaders 1..2: drive from latched `unloaderOn[]` (set by
+        // tritonControl §7g).  `unloaderNormal === 1` (NORMALLY_CLOSED
+        // contactor) inverts the physical output so a "loaded"
+        // unloader corresponds to the DO being de-energized.  Slots 8
+        // and 9 (UNLOADER3/4) currently fall through to OFF — Triton
+        // doesn't ship with them, but the DO_ROLE enum keeps the slot
+        // for parity with GRC.
+        case TRITON_DO_ROLE.UNLOADER1:
+        case TRITON_DO_ROLE.UNLOADER2: {
+          const loaded = !!t.unloaderOn?.[unloaderIdx];
+          on = unloaderInverted ? !loaded : loaded;
+          unloaderIdx++;
+          break;
+        }
+        case TRITON_DO_ROLE.UNLOADER3:
+        case TRITON_DO_ROLE.UNLOADER4:   on = false;                     break;
+        case TRITON_DO_ROLE.OIL_PUMP:    on = !!t.oilPumpOn;             break;
+        case TRITON_DO_ROLE.UNUSED:
+        default:                         on = false;                     break;
+      }
+      this.state.digitalOutputs[i] = on;
+    }
+
+    // Walk AOs.
+    for (let i = 0; i < 2 && i < cfg.aoMode.length; i++) {
+      const mode = cfg.aoMode[i];
+      let pct = 0;
+      switch (mode) {
+        case TRITON_AO_MODE.EEV:       pct = t.exvOpenPct;            break;
+        case TRITON_AO_MODE.COND_VFD:  pct = t.condenserVfdPct ?? 0;  break;
+        case TRITON_AO_MODE.EVAP_VFD:  pct = t.evapFanOn ? 100 : 0;   break;
+        case TRITON_AO_MODE.COMP_VFD:
+        case TRITON_AO_MODE.UNUSED:
+        default:                       pct = 0;                       break;
+      }
+      // Clamp 0-100 and store as percent.  The Modbus AO HRs read it
+      // back unscaled; the orbit board's analog driver does the
+      // PCT→counts conversion (4-20 mA at the terminal).
+      this.state.analogOutputs[i] = Math.max(0, Math.min(100, pct));
+    }
   }
 
   /**
@@ -2304,6 +2912,9 @@ export class OrbitSimulator extends EventEmitter {
       case 411: return u16(sp.defrostStages);
       case 412: return u16(sp.dripTimeSec);
       case 413: return u16(sp.pumpDownBeforeDefrost);
+      case 414: return u16(sp.defrostTrendVarTimerMin);
+      case 415: return u16(sp.defrostTrendInitiateMin);
+      case 416: return s16x10(sp.defrostTrendDiffP);
     }
 
     // ── 430-449: PID ──
@@ -2324,7 +2935,7 @@ export class OrbitSimulator extends EventEmitter {
     }
 
     // ── 450-479: IO config ──
-    if (addr >= 450 && addr <= 453) return u16(t.ioConfig.aoMode[addr - 450] ?? 0);
+    if (addr >= 450 && addr <= 451) return u16(t.ioConfig.aoMode[addr - 450] ?? 0);
     if (addr >= 454 && addr <= 463) return u16(t.ioConfig.doRole[addr - 454] ?? 0);
 
     // ── 480-519: failure modes ──
@@ -2420,6 +3031,7 @@ export class OrbitSimulator extends EventEmitter {
             for (const k of Object.keys(t.failureStates) as Array<keyof TritonFailureStates>) {
               t.failureStates[k].overSec = 0;
               t.failureStates[k].tripped = false;
+              t.failureStates[k]._pumpdownArmed = false;
             }
           }
           t.safeOffMask = 0;
@@ -2484,6 +3096,10 @@ export class OrbitSimulator extends EventEmitter {
       case 411: sp.defrostStages      = clamp(value, 1, 2);    return;
       case 412: sp.dripTimeSec        = clamp(value, 0, 600);  return;
       case 413: sp.pumpDownBeforeDefrost = clamp(value, 0, 1); return;
+      // Phase 5.5 trend defrost
+      case 414: sp.defrostTrendVarTimerMin = clamp(value, 0, 1440); return;
+      case 415: sp.defrostTrendInitiateMin = clamp(value, 0, 240);  return;
+      case 416: sp.defrostTrendDiffP       = clamp(signed / 10, 0, 100); return;
     }
 
     // ── 430-449: PID ──
@@ -2504,13 +3120,15 @@ export class OrbitSimulator extends EventEmitter {
     }
 
     // ── 450-479: IO config ──
-    if (addr >= 450 && addr <= 453) {
+    // Phase 8: Triton hardware ships 2 AO channels (450..451) and 10 DO
+    // channels (454..463).  doRole accepts 0..11 (COMP_ALARM was added).
+    if (addr >= 450 && addr <= 451) {
       t.ioConfig.aoMode[addr - 450] = clamp(value, 0, 4);
       this.refreshTritonIoLabels();
       return;
     }
     if (addr >= 454 && addr <= 463) {
-      t.ioConfig.doRole[addr - 454] = clamp(value, 0, 10);
+      t.ioConfig.doRole[addr - 454] = clamp(value, 0, 11);
       this.refreshTritonIoLabels();
       return;
     }
@@ -2791,6 +3409,14 @@ export class OrbitSimulator extends EventEmitter {
         this.apiAckTritonAlarm(req, res);
       } else if (req.method === 'POST' && url.pathname === '/api/triton/safety/reset') {
         this.apiResetTritonLockout(req, res);
+      } else if (req.method === 'POST' && url.pathname === '/api/triton/defrost') {
+        this.apiTritonDefrost(req, res);
+      } else if (req.method === 'GET' && url.pathname === '/api/triton/logs') {
+        this.apiGetTritonLogs(req, res, url);
+      } else if (req.method === 'POST' && url.pathname === '/api/triton/logs/reset') {
+        this.apiResetTritonLogs(req, res);
+      } else if (req.method === 'POST' && url.pathname === '/api/triton/sensor') {
+        this.apiSetTritonSensor(req, res);
       } else if (req.method === 'POST' && url.pathname === '/api/role') {
         this.apiSetRole(req, res);
       } else if (req.method === 'GET' && url.pathname === '/api/chaos') {
@@ -3353,407 +3979,41 @@ export class OrbitSimulator extends EventEmitter {
   private updateTriton(): void {
     if (this.state.role !== OrbitRole.TRITON) return;
     const t = this.state.triton;
-    const dt = 0.5; // seconds per tick — matches setInterval(updateTriton, 500)
 
-    // 0. Read safety inputs from DI 1-8 and evaluate interlocks.
-    //    Sets t.safeties.lockoutMask for latching faults; returns true if
-    //    the compressor is permitted to run this tick.
-    const di = this.state.digitalInputs;
-    const sf = t.safeties;
-    sf.phaseMonitor      = !!di[0];
-    sf.hpSwitch          = !!di[1];
-    sf.lpSwitch          = !!di[2];
-    sf.compOverload      = !!di[3];
-    sf.condFanOverload   = !!di[4];
-    sf.runProve          = !!di[5];
-    sf.pumpdownSwitch    = !!di[6];
-    sf.autoRunPermissive = !!di[7];
-
-    // Latching faults (manual reset): set bit when the input goes open
-    // and the compressor is/was running OR the fault is present at all.
-    if (!sf.hpSwitch)     sf.lockoutMask |= 0x01;
-    if (!sf.compOverload) sf.lockoutMask |= 0x02;
-    // Run-prove latch is set in the runtime check below (only meaningful
-    // after proveSec into a run).
-
-    // Pumpdown is in progress when the switch is open AND we have a
-    // pump-down before stop configured.  Used to bypass LP switch.
-    const pumpdownActive = !sf.pumpdownSwitch && t.compressorOn;
-
-    // Hard interlocks — any of these tripped → compressor not permitted.
-    const hardTrip =
-         !sf.phaseMonitor
-      || !sf.autoRunPermissive
-      || (!sf.lpSwitch && !pumpdownActive)
-      || (sf.lockoutMask !== 0)
-      || ((t.safeOffMask ?? 0) !== 0);
-
-    // Latch alarms for each safety state.  These use the existing
-    // alarm machinery so they show up alongside sensor alarms.
-    const latchAlarm = (code: string, label: string, cond: boolean) => {
-      const ex = t.alarms.find(a => a.code === code);
-      if (cond) {
-        if (ex) ex.active = true;
-        else t.alarms.push({ code, label, active: true, acked: false, timestamp: Date.now() });
-      } else if (ex) {
-        ex.active = false;
-        if (ex.acked) t.alarms = t.alarms.filter(a => a !== ex);
-      }
-    };
-    latchAlarm('SAF_PHASE',     'Phase Monitor Trip',          !sf.phaseMonitor);
-    latchAlarm('SAF_HP',        'High-Pressure Switch Open',   !sf.hpSwitch || (sf.lockoutMask & 0x01) !== 0);
-    latchAlarm('SAF_LP',        'Low-Pressure Switch Open',    !sf.lpSwitch && !pumpdownActive);
-    latchAlarm('SAF_COMP_OL',   'Compressor Overload',         !sf.compOverload || (sf.lockoutMask & 0x02) !== 0);
-    latchAlarm('SAF_COND_OL',   'Cond Fan Overload',           !sf.condFanOverload);
-    latchAlarm('SAF_PERMIT',    'Auto-Run Permissive Open',    !sf.autoRunPermissive);
-
-    // 1. Decide whether the compressor should be running this tick.
-    let shouldRun = t.compressorOn;
-    if (hardTrip) {
-      shouldRun = false;
-      if (t.compressorOn) t.compressorStatus = 10; // ERROR
-    } else if (t.manualMode === 'force-on') {
-      shouldRun = true;
-    } else if (t.manualMode === 'force-off' || !t.enabled) {
-      shouldRun = false;
-    } else {
-      // Auto: simple bang-bang on suction PSI
-      if (t.compressorOn && t.sensors.suctionP.value <= t.setpoints.cutOutP) {
-        shouldRun = false;
-      } else if (!t.compressorOn && t.sensors.suctionP.value >= t.setpoints.cutInP) {
-        // Honor minimum off time before restart
-        const offDur = (Date.now() - t.lastDefrostEnd) / 1000;
-        if (offDur >= t.setpoints.minOffTime) shouldRun = true;
-      }
-    }
-    if (shouldRun !== t.compressorOn) {
-      t.compressorOn = shouldRun;
-      if (!shouldRun) t.lastDefrostEnd = Date.now();
-    }
-
-    // 2. Advance runtime / amps.
-    if (t.compressorOn) {
-      t.compressorRuntimeSec += dt;
-      // Realistic-ish RLA: 12-18 amps under typical load
-      t.compressorAmps = 14.0 + (t.sensors.dischargeP.value - 150) * 0.02;
-      // Run-prove: after proveSec, the proof contact (DI6) MUST be closed.
-      // If it opens after the prove window, latch lockout bit 2.
-      if (t.compressorRuntimeSec >= t.setpoints.proveSec && !sf.runProve) {
-        sf.lockoutMask |= 0x04;
-        latchAlarm('SAF_PROVE', 'Run Prove Failure', true);
-      }
-    } else {
-      t.compressorAmps = Math.max(0, t.compressorAmps - dt * 5);
-      // Reset the runtime counter when stopped so prove window restarts cleanly.
-      t.compressorRuntimeSec = 0;
-    }
-    // Always evaluate the run-prove alarm so it clears once the lockout is reset.
-    if ((sf.lockoutMask & 0x04) === 0) latchAlarm('SAF_PROVE', 'Run Prove Failure', false);
-
-    // 3. Drive the sensors toward equilibrium values that depend on state.
-    //    When idle, suction PSI rises with the heat load on the box — model
-    //    that by drifting toward (cutInP + 5) so the bang-bang cycle
-    //    naturally restarts the compressor without operator intervention.
-    const ambient = t.sensors.ambientT.value;
-    const offSuctionTarget = Math.max(t.setpoints.cutInP + 5, 25);
-    const target = {
-      suctionP:   t.compressorOn ? Math.max(t.setpoints.cutOutP - 5, 25) : offSuctionTarget,
-      suctionT:   t.compressorOn ? 25 : ambient - 5,
-      dischargeP: t.compressorOn ? Math.min(140 + (ambient - 70) * 2.5, 350) : ambient + 30,
-      dischargeT: t.compressorOn ? 130 + (ambient - 70) : ambient + 5,
-      llsT:       t.compressorOn ? Math.min(95 + (ambient - 70) * 0.3, 130) : ambient,
-      oilP:       t.compressorOn ? 55 + (t.sensors.dischargeP.value - 150) * 0.05 : 0,
-      ambientT:   ambient, // free-running, set by user / chaos
-    };
-    const tau = 0.05; // exponential approach rate (per tick)
-    const lerp = (a: number, b: number) => a + (b - a) * tau;
-    t.sensors.suctionP.value   = lerp(t.sensors.suctionP.value,   target.suctionP);
-    t.sensors.suctionT.value   = lerp(t.sensors.suctionT.value,   target.suctionT);
-    t.sensors.dischargeP.value = lerp(t.sensors.dischargeP.value, target.dischargeP);
-    t.sensors.dischargeT.value = lerp(t.sensors.dischargeT.value, target.dischargeT);
-    t.sensors.llsT.value       = lerp(t.sensors.llsT.value,       target.llsT);
-    t.sensors.oilP.value       = lerp(t.sensors.oilP.value,       target.oilP);
-
-    // 3b. Mirror live values onto the sensor-bus analog boards so polls of
-    //     /api/sensors reflect the same physics as /api/triton.  Board 0 is
-    //     temperature (suction T, discharge T, LLS T, ambient T) and board 1
-    //     is pressure (suction P, discharge P, oil P, demand).  All values
-    //     are stored as int *10 to match the existing storage convention,
-    //     except channel 4 of the pressure board which carries the raw 0-100
-    //     demand percentage.
-    const tempBoard = this.state.analogBoards[0];
-    if (tempBoard && tempBoard.type === SENSOR_TYPE_TEMP) {
-      tempBoard.sensorValues[0] = Math.round(t.sensors.suctionT.value   * 10);
-      tempBoard.sensorValues[1] = Math.round(t.sensors.dischargeT.value * 10);
-      tempBoard.sensorValues[2] = Math.round(t.sensors.llsT.value       * 10);
-      tempBoard.sensorValues[3] = Math.round(t.sensors.ambientT.value   * 10);
-    }
+    // Build the per-tick context the pure control core consumes.  The temp
+    // board lives at index 0, the pressure board at index 1; if either is
+    // absent or the wrong type we omit the writer so the core latches the
+    // matching BOARD_MISSING_* alarm.
+    const tempBoard  = this.state.analogBoards[0];
     const pressBoard = this.state.analogBoards[1];
-    if (pressBoard && pressBoard.type === SENSOR_TYPE_PRESSURE) {
-      pressBoard.sensorValues[0] = Math.round(t.sensors.suctionP.value   * 10);
-      pressBoard.sensorValues[1] = Math.round(t.sensors.dischargeP.value * 10);
-      pressBoard.sensorValues[2] = Math.round(t.sensors.oilP.value       * 10);
-      pressBoard.sensorValues[3] = Math.round(t.demand);
-    }
+    const tempOk  = !!tempBoard  && tempBoard.present  && tempBoard.type  === SENSOR_TYPE_TEMP;
+    const pressOk = !!pressBoard && pressBoard.present && pressBoard.type === SENSOR_TYPE_PRESSURE;
 
-    // 4. EXV modulation — drive open-pct so suctionT - saturationT(suctionP)
-    //    approaches superheatTarget.  We approximate the saturation temp as
-    //    a linear function of pressure for the simulator (real R-404A would
-    //    use a P-T table).  Open more EXV → more refrigerant → less SH.
-    const satT = 0.55 * t.sensors.suctionP.value - 35;     // crude °F
-    const superheat = t.sensors.suctionT.value - satT;
-    if (t.compressorOn) {
-      const err = superheat - t.setpoints.superheatTarget;
-      t.exvOpenPct = Math.max(5, Math.min(95, t.exvOpenPct + err * 0.5));
-    } else {
-      t.exvOpenPct = Math.max(0, t.exvOpenPct - 1);
-    }
-
-    // 4b. Leak / low-charge detection.
-    //     A refrigerant leak shows up as the EXV opening further and further
-    //     while superheat refuses to come down — there is simply not enough
-    //     liquid to feed the evaporator.  We sample the EWMA of both signals
-    //     once the compressor has been running for a stabilisation window
-    //     (2 × warmUpSec, default 120 s); when the filtered superheat is
-    //     above target+margin AND the filtered EXV is at/above the open
-    //     threshold for `leakSustainMinutes` continuously, we latch a
-    //     LEAK_SUSP alarm.  Conditions reset on compressor stop or defrost.
-    const ld = t.leakDetect;
-    if (!t.compressorOn || t.defrostActive) {
-      ld.warmupSec    = 0;
-      ld.sustainedSec = 0;
-    } else {
-      ld.warmupSec += dt;
-    }
-    if (t.setpoints.leakDetectEnabled && t.compressorOn && !t.defrostActive) {
-      // EWMA with τ ≈ 60 s (α = dt/τ = 0.5/60 ≈ 0.0083).
-      const alpha = dt / 60;
-      // Seed the filters on the first sample of a new run.
-      if (ld.warmupSec <= dt) {
-        ld.shAvgF    = superheat;
-        ld.exvAvgPct = t.exvOpenPct;
-      } else {
-        ld.shAvgF    += alpha * (superheat        - ld.shAvgF);
-        ld.exvAvgPct += alpha * (t.exvOpenPct     - ld.exvAvgPct);
-      }
-      // Only credit sustain time once past the stabilisation gate.
-      const stableAfter = Math.max(60, t.setpoints.warmUpSec * 2);
-      if (ld.warmupSec >= stableAfter) {
-        const shHigh  = ld.shAvgF    >= t.setpoints.superheatTarget + t.setpoints.leakSuperheatMarginF;
-        const exvHigh = ld.exvAvgPct >= t.setpoints.leakExvOpenPct;
-        if (shHigh && exvHigh) ld.sustainedSec += dt;
-        else                   ld.sustainedSec  = 0;
-        if (ld.sustainedSec >= t.setpoints.leakSustainMinutes * 60) {
-          ld.leakAlarmActive = true;
-        }
-      }
-    } else {
-      // Detector disabled — keep the live filters frozen but never alarm.
-      ld.sustainedSec    = 0;
-      ld.leakAlarmActive = false;
-    }
-
-    // 5. Condenser fan staging.  Mirrors GRC `StageCondenserFans()` in
-    //    CondenserFans.c — first compute the head-pressure target via
-    //    `TargetDischarge()` (mode-aware: FIXED uses operator setpoint;
-    //    FLOATING/BALANCED uses `P_sat(OAT + approach)` clamped to
-    //    [condMinHeadP, condMaxHeadP]), then stage each fan with
-    //    on = target + diffOn[i], off = target + diffOff[i].  When the
-    //    operator picks FIXED — or the OAT sensor is invalid — we fall
-    //    back to the absolute thresholds in `fanStageOnP/OffP`.
-    const condSp = t.setpoints;
-    let headTarget: number;
-    let useDiffs = false;
-    const oatValid = t.sensors.ambientT.valid;
-    if (condSp.condenserMode === 0 || !oatValid) {
-      headTarget = condSp.condFanVfdSetpointP;
-    } else {
-      const psat = psatF(condSp.refrigerantType, t.sensors.ambientT.value + condSp.condApproachF);
-      let p = psat;
-      if (condSp.condMinHeadP > 0 && p < condSp.condMinHeadP) p = condSp.condMinHeadP;
-      if (condSp.condMaxHeadP > 0 && p > condSp.condMaxHeadP) p = condSp.condMaxHeadP;
-      headTarget = p;
-      useDiffs = true;
-    }
-    t.dischargeTargetP = Math.round(headTarget * 10) / 10;
-    let stage = t.condenserFanStage;
-    for (let i = 0; i < t.condenserFanCount; i++) {
-      const onP  = useDiffs
-        ? headTarget + (condSp.fanDiffOnP[i]  ?? 999)
-        : (condSp.fanStageOnP[i]  ?? 999);
-      const offP = useDiffs
-        ? headTarget + (condSp.fanDiffOffP[i] ?? 0)
-        : (condSp.fanStageOffP[i] ?? 0);
-      if (stage <= i && t.sensors.dischargeP.value >= onP) stage = i + 1;
-      else if (stage > i && t.sensors.dischargeP.value <= offP) stage = i;
-    }
-    t.condenserFanStage = Math.min(stage, t.condenserFanCount);
-
-    // 6. Latch alarms when a sensor crosses its threshold.  Acked alarms
-    //    stay in the list until they go inactive (operator acknowledges
-    //    before clearing); inactive+acked alarms are pruned.
-    const maybeAlarm = (code: string, label: string, condition: boolean) => {
-      const existing = t.alarms.find(a => a.code === code);
-      if (condition) {
-        if (existing) {
-          existing.active = true;
-        } else {
-          t.alarms.push({ code, label, active: true, acked: false, timestamp: Date.now() });
-        }
-      } else if (existing) {
-        existing.active = false;
-        if (existing.acked) {
-          t.alarms = t.alarms.filter(a => a !== existing);
-        }
-      }
+    const ctx: TritonControlCtx = {
+      dt:    0.5, // matches setInterval(updateTriton, 500)
+      nowMs: Date.now(),
+      digitalInputs: this.state.digitalInputs,
+      writeTempBoard: tempOk
+        ? (v) => {
+            tempBoard.sensorValues[0] = v[0];
+            tempBoard.sensorValues[1] = v[1];
+            tempBoard.sensorValues[2] = v[2];
+            tempBoard.sensorValues[3] = v[3];
+          }
+        : undefined,
+      writePressBoard: pressOk
+        ? (v) => {
+            pressBoard.sensorValues[0] = v[0];
+            pressBoard.sensorValues[1] = v[1];
+            pressBoard.sensorValues[2] = v[2];
+            pressBoard.sensorValues[3] = v[3];
+          }
+        : undefined,
     };
-    maybeAlarm('SUC_LOW_P',  'Suction Pressure Low',  t.sensors.suctionP.value   < t.sensors.suctionP.lowAlarm);
-    maybeAlarm('SUC_HIGH_P', 'Suction Pressure High', t.sensors.suctionP.value   > t.sensors.suctionP.highAlarm);
-    maybeAlarm('DIS_HIGH_P', 'Discharge Pressure High', t.sensors.dischargeP.value > t.sensors.dischargeP.highAlarm);
-    maybeAlarm('DIS_HIGH_T', 'Discharge Temp High',     t.sensors.dischargeT.value > t.sensors.dischargeT.highAlarm);
-    maybeAlarm('OIL_LOW_P',  'Oil Pressure Low',        t.compressorOn && t.sensors.oilP.value < t.sensors.oilP.lowAlarm);
-    // Leak / low-charge — driven by the EWMA detector above.  When the
-    // operator acks the alarm and we want to give the detector a fresh
-    // chance, we also clear the latch so a renewed leak signature can
-    // re-trigger after the same sustain window.
-    maybeAlarm('LEAK_SUSP',  'Refrigerant Leak Suspected (high SH + EXV wide open)',
-               t.leakDetect.leakAlarmActive);
-    {
-      const ackedLeak = t.alarms.find(a => a.code === 'LEAK_SUSP' && a.acked);
-      if (ackedLeak && !ackedLeak.active) {
-        t.leakDetect.leakAlarmActive = false;
-        t.leakDetect.sustainedSec    = 0;
-      }
-    }
-
-    // 7. GRC FAILURE machinery — timed thresholds with mode-respecting
-    //    actions.  Each `t.failures.*` channel has a `delaySec` and a
-    //    `mode` (0=ALARM_ONLY, 1=SAFE_OFF, 2=RUN_THROUGH).  We integrate
-    //    seconds-above-threshold per channel; when the timer expires we
-    //    latch the corresponding FAIL_* alarm and, for SAFE_OFF mode,
-    //    set a bit in `safeOffMask` that participates in `hardTrip` next
-    //    tick.  Latches and timers all clear via the ack-all command.
-    if (!t.failureStates) {
-      t.failureStates = {
-        suctionP:     { overSec: 0, tripped: false },
-        dischargeP:   { overSec: 0, tripped: false },
-        oilP:         { overSec: 0, tripped: false },
-        suctionT:     { overSec: 0, tripped: false },
-        superheatLow: { overSec: 0, tripped: false },
-        dischargeT:   { overSec: 0, tripped: false },
-        llsT:         { overSec: 0, tripped: false },
-        ambientT:     { overSec: 0, tripped: false },
-      };
-    }
-    if (typeof t.safeOffMask !== 'number') t.safeOffMask = 0;
-
-    const fs = t.failureStates;
-    const evalFail = (
-      code: string, label: string,
-      cfg: TritonFailureMode, st: TritonFailureState,
-      cond: boolean,
-    ) => {
-      // RUN_THROUGH (2) means: alarm only, never set safeOff bit.  ALARM_ONLY
-      // (0) — same as RUN_THROUGH for the simulator's purposes.  SAFE_OFF
-      // (1) — also engages the safeOffMask once tripped.
-      if (cond) st.overSec += dt;
-      else      st.overSec  = 0;
-
-      if (!st.tripped && st.overSec >= Math.max(0, cfg.delaySec)) {
-        st.tripped = true;
-      }
-      const bit = TRITON_ALARM_BITS[code] ?? -1;
-      if (st.tripped && cfg.mode === 1 && bit >= 0) {
-        t.safeOffMask = (t.safeOffMask ?? 0) | (1 << bit);
-      }
-      maybeAlarm(code, label, st.tripped);
-    };
-
-    // FAIL_SUPERHEAT — superheat above target+window for delaySec while running
-    evalFail('FAIL_SUPERHEAT', 'Superheat High (timed)',
-      t.failures.suctionT, fs.suctionT,
-      t.compressorOn && !t.defrostActive
-        && superheat > t.setpoints.superheatTarget + t.setpoints.superheatWindowHighF);
-    // FAIL_SUPERHEATLOW — superheat below the floodback floor
-    evalFail('FAIL_SUPERHEATLOW', 'Superheat Low (floodback risk)',
-      t.failures.suctionT, fs.superheatLow,
-      t.compressorOn && !t.defrostActive
-        && superheat < t.setpoints.superheatLowF);
-    // FAIL_DISCHARGE — discharge pressure over high alarm for delaySec
-    evalFail('FAIL_DISCHARGE', 'Discharge Pressure (sustained over)',
-      t.failures.dischargeP, fs.dischargeP,
-      t.sensors.dischargeP.value > t.sensors.dischargeP.highAlarm);
-    // FAIL_SUCTION — suction pressure out of range for delaySec
-    evalFail('FAIL_SUCTION', 'Suction Pressure (sustained out of range)',
-      t.failures.suctionP, fs.suctionP,
-      t.sensors.suctionP.value < t.sensors.suctionP.lowAlarm
-        || t.sensors.suctionP.value > t.sensors.suctionP.highAlarm);
-    // FAIL_OIL — oil low for delaySec while compressor running
-    evalFail('FAIL_OIL', 'Oil Pressure (sustained low)',
-      t.failures.oilP, fs.oilP,
-      t.compressorOn && t.sensors.oilP.value < t.sensors.oilP.lowAlarm);
-    // FAIL_OUTSIDE_AIR — ambient below configured cutout for delaySec
-    evalFail('FAIL_OUTSIDE_AIR', 'Outside Air Below Cutout',
-      t.failures.ambientT, fs.ambientT,
-      t.sensors.ambientT.valid
-        && t.sensors.ambientT.value < t.setpoints.lowAmbientCutoutF);
-
-    // 7b. Power-fail detector — gap between updateTriton ticks larger than
-    //     `powerFailMinutes` indicates the box was off long enough to need
-    //     the crankcase prove.  Latches FAIL_POWER until ack-all.
-    const nowMs = Date.now();
-    const lastMs = t.lastTickMs ?? 0;
-    if (lastMs > 0) {
-      const gapMin = (nowMs - lastMs) / 60000;
-      if (gapMin > Math.max(1, t.setpoints.powerFailMinutes)) {
-        const bit = TRITON_ALARM_BITS.FAIL_POWER;
-        // Power-fail is treated as ALARM_ONLY in the simulator (no
-        // safeOff) — Nova decides whether to enforce the prove.
-        const ex = t.alarms.find(a => a.code === 'FAIL_POWER');
-        if (ex) ex.active = true;
-        else t.alarms.push({
-          code: 'FAIL_POWER', label: 'Power-Fail (gap exceeded)',
-          active: true, acked: false, timestamp: nowMs,
-        });
-        // Mark on safeOffMask only if Nova / operator wants to enforce it
-        // by setting the failureModes mode for ambientT to SAFE_OFF; here
-        // we keep it as a plain alarm.
-        void bit;
-      }
-    }
-    t.lastTickMs = nowMs;
-
-    // 7c. Sensor-validity faults (transducer disconnected / out of range).
-    //     Each maps 1:1 to a SENS_FAULT_* code.  These don't go through
-    //     the timer — a single-tick invalid reading raises the alarm.
-    maybeAlarm('SENS_FAULT_SUC_P', 'Suction-P Sensor Fault',  !t.sensors.suctionP.valid);
-    maybeAlarm('SENS_FAULT_DIS_P', 'Discharge-P Sensor Fault', !t.sensors.dischargeP.valid);
-    maybeAlarm('SENS_FAULT_OIL_P', 'Oil-P Sensor Fault',       !t.sensors.oilP.valid);
-    maybeAlarm('SENS_FAULT_SUC_T', 'Suction-T Sensor Fault',   !t.sensors.suctionT.valid);
-    maybeAlarm('SENS_FAULT_DIS_T', 'Discharge-T Sensor Fault', !t.sensors.dischargeT.valid);
-    maybeAlarm('SENS_FAULT_LLS_T', 'LLS-T Sensor Fault',       !t.sensors.llsT.valid);
-    maybeAlarm('SENS_FAULT_AMB_T', 'Ambient-T Sensor Fault',   !t.sensors.ambientT.valid);
-
-    // 7d. Sensor-board missing — analog board[0] is temp, board[1] is press.
-    const tempBd  = this.state.analogBoards[0];
-    const pressBd = this.state.analogBoards[1];
-    maybeAlarm('BOARD_MISSING_TEMP',  'Temperature Board Missing',
-               !tempBd  || !tempBd.present);
-    maybeAlarm('BOARD_MISSING_PRESS', 'Pressure Board Missing',
-               !pressBd || !pressBd.present);
-
-    // 7e. NO_DISCHARGE — compressor has been running past the prove window
-    //     but discharge pressure is essentially the same as suction (no
-    //     compression happening).  Simple delta check.
-    maybeAlarm('NO_DISCHARGE', 'No Discharge Pressure Rise',
-      t.compressorOn
-        && t.compressorRuntimeSec > t.setpoints.proveSec
-        && t.sensors.dischargeP.value < t.sensors.suctionP.value + 20);
-
-    // 7f. BAD_OIL_SENSOR — value pinned out-of-range while running.
-    maybeAlarm('BAD_OIL_SENSOR', 'Oil Sensor Out of Range',
-      t.compressorOn
-        && (t.sensors.oilP.value < -5 || t.sensors.oilP.value > 500));
+    tickTritonControl(t, ctx);
+    // Phase 8 — translate logical control state to physical orbit I/O
+    // (10 DO + 2 AO) per the operator-configured ioConfig mapping.
+    this.applyTritonIoMapping();
   }
 
   /** GET /api/triton — full Triton state snapshot (for SCADA rendering) */
@@ -3764,8 +4024,9 @@ export class OrbitSimulator extends EventEmitter {
       return;
     }
     const t = this.state.triton;
-    // Derived helpers the UI commonly wants
-    const satT = 0.55 * t.sensors.suctionP.value - 35;
+    // Derived helpers the UI commonly wants.  Use the GRC P-T table so the
+    // displayed superheat matches what the EXV PID is actually controlling on.
+    const satT = tsatF(t.setpoints.refrigerantType, t.sensors.suctionP.value);
     const superheat = t.sensors.suctionT.value - satT;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -3788,11 +4049,60 @@ export class OrbitSimulator extends EventEmitter {
         stage: t.condenserFanStage,
         count: t.condenserFanCount,
         targetP: Number(t.dischargeTargetP.toFixed(1)),
+        leadIndex: t.condenserLeadIndex ?? 0,
+        vfdPct: Number((t.condenserVfdPct ?? 0).toFixed(1)),
+        // Live cond-fan PID state (deferral #3) — only meaningful when
+        // `condFanVfdMode==1`.  Exposed for SCADA / smoke probes.
+        pid: t.condPid ? {
+          intError:  Number(t.condPid.intError.toFixed(2)),
+          prevErr:   Number(t.condPid.prevErr.toFixed(2)),
+          targetPct: Number(t.condPid.targetPct.toFixed(2)),
+          lastSampleMs: t.condPid.lastPidMs,
+        } : null,
+        fans: (t.condenserFans ?? []).map(f => ({
+          on: f.on,
+          runtimeHours: Number((f.runtimeSec / 3600).toFixed(2)),
+        })),
       },
       evapFanOn: t.evapFanOn,
       exvOpenPct: Number(t.exvOpenPct.toFixed(1)),
+      // Capacity-stage / unloader telemetry.
+      unloaders: {
+        on:       (t.unloaderOn       ?? []).slice(0, 2),
+        hpForced: (t.unloaderHpForced ?? []).slice(0, 2),
+        lpForced: (t.unloaderLpForced ?? []).slice(0, 2),
+        normal:   (t.setpoints as any).unloaderNormal ?? 0,
+      },
+      oilPumpOn: !!t.oilPumpOn,
       defrostActive: t.defrostActive,
       lastDefrostEnd: t.lastDefrostEnd,
+      defrost: {
+        // Phase 5 GRC defrost SM telemetry.  `stage`: 0 NONE / 1 PUMPDOWN /
+        // 2 ACTIVE / 3 DRIP.  `type`: 0 NONE / 1 TIMED / 2 MANUAL / 3 TREND.
+        stage:           t.defrostStage ?? 0,
+        type:            t.defrostType  ?? 0,
+        stageSec:        Math.round(t.defrostStageSec     ?? 0),
+        sinceLastSec:    Math.round(t.defrostSinceLastSec ?? 0),
+        manualPending:   !!t.defrostManualPending,
+        mode:            t.setpoints.defrostMode,
+        termType:        t.setpoints.defrostTermType,
+        termTemperature: t.setpoints.defrostTermT,
+        termPressure:    t.setpoints.defrostTermP,
+        intervalHours:   t.setpoints.defrostIntervalHours,
+        maxMinutes:      t.setpoints.defrostMaxMinutes,
+        dripTimeSec:     t.setpoints.dripTimeSec,
+        // Phase 5.5 trend-defrost telemetry.
+        trend: t.defrostTrend ? {
+          enabled:       (t.setpoints as any).defrostTrendVarTimerMin > 0,
+          warmupSec:     Math.round(t.defrostTrend.warmupSec),
+          warmupTargetSec: Math.round(((t.setpoints as any).defrostTrendVarTimerMin ?? 0) * 60),
+          samples:       t.defrostTrend.count,
+          trendPsi:      isFinite(t.defrostTrend.trendPsi) ? Number(t.defrostTrend.trendPsi.toFixed(2)) : null,
+          diffP:         (t.setpoints as any).defrostTrendDiffP ?? 5,
+          initiateSec:   Math.round(t.defrostTrend.initiateSec),
+          initiateTargetSec: Math.round(((t.setpoints as any).defrostTrendInitiateMin ?? 0) * 60),
+        } : null,
+      },
       demand: t.demand,
       sensors: t.sensors,
       derived: {
@@ -3809,7 +4119,51 @@ export class OrbitSimulator extends EventEmitter {
       failures: t.failures,
       ioConfig: t.ioConfig,
       safeties: t.safeties,
+      // Phase 2 GRC compressor SM exposed timers (seconds).  UI / tests
+      // poll these to verify the prove window, pumpdown bleed, and phase-
+      // monitor escalation cadences match GRC behaviour.
+      crankcaseProveSecRemaining: Math.round(t.crankcaseProveSecRemaining ?? 0),
+      pumpdownSecRemaining:       Math.round(t.pumpdownSecRemaining ?? 0),
+      phaseLossSec:               Math.round((t.phaseLossSec ?? 0) * 10) / 10,
+      // Phase 6 — per-channel failure-timer state.  `overSec` is how
+      // long the threshold has been continuously violated; `tripped`
+      // latches when overSec reaches the channel's `delaySec`.  Cleared
+      // by the ack-all command.  `_pumpdownArmed` is the one-shot flag
+      // that gates the GRC-style 60 s pumpdown bleed on first trip.
+      failureStates: t.failureStates,
+      safeOffMask: t.safeOffMask ?? 0,
+      // Safe-mode policy snapshot (deferral #4).  `active` is true when
+      // any hard-trip / safeOff / lockout is engaged.
+      safePolicy: {
+        active: ((t.safeOffMask ?? 0) !== 0)
+                || ((t.safeties?.lockoutMask ?? 0) !== 0),
+        condFans:    (t.setpoints as any).safePolicyCondFans   ?? 0,
+        condVfdPct:  (t.setpoints as any).safePolicyCondVfdPct ?? 0,
+        exvPct:      (t.setpoints as any).safePolicyExvPct     ?? 0,
+        oilPump:     (t.setpoints as any).safePolicyOilPump    ?? 0,
+      },
       alarms: t.alarms,
+      // Phase 7 — log buffer summary (counts + most-recent ts).  Full
+      // entries are fetched via GET /api/triton/logs?type=…
+      logs: {
+        pid:  { count: t.logs?.pid.length  ?? 0,
+                latestMs: t.logs?.pid.length  ? t.logs!.pid[t.logs!.pid.length-1].ts   : 0 },
+        user: { count: t.logs?.user.length ?? 0,
+                latestMs: t.logs?.user.length ? t.logs!.user[t.logs!.user.length-1].ts : 0 },
+        sys:  { count: t.logs?.sys.length  ?? 0,
+                latestMs: t.logs?.sys.length  ? t.logs!.sys[t.logs!.sys.length-1].ts   : 0 },
+      },
+      // Phase 8 — physical orbit I/O surface as resolved by
+      // applyTritonIoMapping().  These are the same values the
+      // Modbus master sees in the DO/AO HRs (and the same values a
+      // real AM2432 HAL would drive onto the terminal block).
+      physical: {
+        digitalOutputs: this.state.digitalOutputs.slice(),
+        analogOutputs:  this.state.analogOutputs.slice(),
+        outputLabels:   this.state.outputLabels.slice(),
+        aoMode:         t.ioConfig.aoMode.slice(),
+        doRole:         t.ioConfig.doRole.slice(),
+      },
     }));
   }
 
@@ -3824,15 +4178,189 @@ export class OrbitSimulator extends EventEmitter {
     req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
     req.on('end', () => {
       try {
-        const { mode } = JSON.parse(body);
+        const { mode, demand } = JSON.parse(body);
         if (!['auto', 'force-on', 'force-off'].includes(mode)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'invalid mode' }));
           return;
         }
         this.state.triton.manualMode = mode;
+        if (typeof demand === 'number' && isFinite(demand)) {
+          this.state.triton.demand = Math.max(0, Math.min(100, demand));
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, mode }));
+        res.end(JSON.stringify({ ok: true, mode, demand: this.state.triton.demand }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
+  }
+
+  /**
+   * POST /api/triton/defrost — body: { action: 'start' | 'stop' }.
+   * `start`: arms `defrostManualPending`; the next tick of the SM picks it
+   * up and transitions NONE → PUMPDOWN/ACTIVE with `type=MANUAL`.
+   * `stop`:  hard-aborts any active defrost (jumps straight back to NONE,
+   * resets stage timer, sets `lastDefrostEnd`, restarts the override timer).
+   */
+  private apiTritonDefrost(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (this.state.role !== OrbitRole.TRITON) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Orbit is not in Triton mode' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const { action } = JSON.parse(body || '{}');
+        const t = this.state.triton;
+        if (action === 'start') {
+          t.defrostManualPending = true;
+        } else if (action === 'stop') {
+          t.defrostStage         = 0;
+          t.defrostType          = 0;
+          t.defrostStageSec      = 0;
+          t.defrostSinceLastSec  = 0;
+          t.defrostManualPending = false;
+          t.defrostActive        = false;
+          t.lastDefrostEnd       = Date.now();
+          if (t.pumpdownSecRemaining > 0) t.pumpdownSecRemaining = 0;
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid action (start|stop)' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true, action,
+          stage: t.defrostStage, type: t.defrostType,
+          manualPending: t.defrostManualPending,
+        }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
+  }
+
+  /**
+   * GET /api/triton/logs?type=pid|user|sys&limit=N&from=tsMs&to=tsMs
+   * Returns a slice of the requested ring buffer.  Defaults: type=sys,
+   * limit=100 (newest-first slice).  `from`/`to` are inclusive ms epoch
+   * filters applied before the limit.  Phase 7 — see `TritonLogs`.
+   */
+  private apiGetTritonLogs(
+    req: http.IncomingMessage, res: http.ServerResponse, url: URL,
+  ): void {
+    if (this.state.role !== OrbitRole.TRITON) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Orbit is not in Triton mode' }));
+      return;
+    }
+    const type   = (url.searchParams.get('type') || 'sys').toLowerCase();
+    const limit  = Math.max(1, Math.min(1024,
+      Number(url.searchParams.get('limit') || 100)));
+    const from   = url.searchParams.has('from')
+      ? Number(url.searchParams.get('from')) : null;
+    const to     = url.searchParams.has('to')
+      ? Number(url.searchParams.get('to'))   : null;
+    const logs   = this.state.triton.logs ?? { pid: [], user: [], sys: [] };
+    let src: { ts: number }[] = [];
+    if      (type === 'pid')  src = logs.pid;
+    else if (type === 'user') src = logs.user;
+    else if (type === 'sys')  src = logs.sys;
+    else {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid type (pid|user|sys)' }));
+      return;
+    }
+    let filtered = src;
+    if (from !== null) filtered = filtered.filter(e => e.ts >= from);
+    if (to   !== null) filtered = filtered.filter(e => e.ts <= to);
+    // Newest-first slice (last `limit` entries reversed).
+    const slice = filtered.slice(-limit).reverse();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true, type,
+      total: src.length, returned: slice.length,
+      entries: slice,
+    }));
+  }
+
+  /**
+   * POST /api/triton/logs/reset — body: { kind: 'pid'|'user'|'sys'|'all' }.
+   * Clears the chosen ring buffer(s).  `all` also rezeroes
+   * `lastUserLogMs` so the next tick re-emits a BOOT entry.
+   */
+  private apiResetTritonLogs(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (this.state.role !== OrbitRole.TRITON) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Orbit is not in Triton mode' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const { kind } = JSON.parse(body || '{}');
+        const t = this.state.triton;
+        if (!t.logs) t.logs = { pid: [], user: [], sys: [], lastUserLogMs: 0 };
+        if (kind === 'pid' || kind === 'all') t.logs.pid  = [];
+        if (kind === 'user'|| kind === 'all') t.logs.user = [];
+        if (kind === 'sys' || kind === 'all') t.logs.sys  = [];
+        if (kind === 'all') t.logs.lastUserLogMs = 0;
+        if (!['pid','user','sys','all'].includes(kind)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid kind (pid|user|sys|all)' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true, kind,
+          counts: {
+            pid: t.logs.pid.length, user: t.logs.user.length, sys: t.logs.sys.length,
+          },
+        }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
+  }
+
+  /**
+   * POST /api/triton/sensor — sim-only sensor injection.
+   * Body: `{ name: keyof TritonSensors, value: number, valid?: boolean }`.
+   * Writes directly into `t.sensors[name]` so smoke probes can prime
+   * physics inputs (ambient, dischargeP, suctionP, etc.) without going
+   * through the Modbus path.  Production firmware has no equivalent —
+   * sensor reads come from the analog board.  See
+   * `/memories/repo/triton-orbit-spec.md` "sim-only REST" notes.
+   */
+  private apiSetTritonSensor(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (this.state.role !== OrbitRole.TRITON) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Orbit is not in Triton mode' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (c: Buffer) => { body += c.toString(); });
+    req.on('end', () => {
+      try {
+        const { name, value, valid } = JSON.parse(body || '{}');
+        const s = (this.state.triton.sensors as any)[name];
+        if (!s || typeof s !== 'object') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: `unknown sensor '${name}'` }));
+          return;
+        }
+        if (typeof value === 'number' && isFinite(value)) s.value = value;
+        if (typeof valid === 'boolean')                   s.valid = valid;
+        else                                              s.valid = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, name, value: s.value, valid: s.valid }));
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
@@ -3890,6 +4418,7 @@ export class OrbitSimulator extends EventEmitter {
             for (const k of Object.keys(t.failureStates) as Array<keyof TritonFailureStates>) {
               t.failureStates[k].overSec = 0;
               t.failureStates[k].tripped = false;
+              t.failureStates[k]._pumpdownArmed = false;
             }
           }
           t.safeOffMask = 0;
@@ -3926,6 +4455,12 @@ export class OrbitSimulator extends EventEmitter {
         const mask = typeof parsed.mask === 'number' ? parsed.mask : 0xFF;
         const t = this.state.triton;
         t.safeties.lockoutMask &= ~mask;
+        // Bit 3 = crankcaseProveUnmet.  When the operator clears that bit
+        // they're declaring "compressor is allowed to run NOW" — also zero
+        // the prove-window timer so the next tick doesn't immediately
+        // re-latch SAF_PROVE.  The natural countdown will resume only if
+        // crankcaseRunHours > 0 AND DI_1 reads open while comp is OFF.
+        if ((mask & 0x08) !== 0) t.crankcaseProveSecRemaining = 0;
         // Auto-ack the matching latched alarms so they clear once the
         // input has restored.
         const codes = ['SAF_HP', 'SAF_COMP_OL', 'SAF_PROVE'];
@@ -3998,6 +4533,10 @@ export class OrbitSimulator extends EventEmitter {
           if (!this.tritonInterval) {
             this.tritonInterval = setInterval(() => this.updateTriton(), 500);
           }
+          // Phase 8 — refresh DI/DO labels so the orbit panel and the
+          // bridge see Triton names (Compressor / Cond Fan / EEV / …)
+          // instead of stale storage / unassigned labels.
+          this.refreshTritonIoLabels();
           console.log(`[Orbit ${this.state.id}] Switched to Triton mode`);
         } else if (newRole !== OrbitRole.TRITON && oldRole === OrbitRole.TRITON) {
           if (this.tritonInterval) {

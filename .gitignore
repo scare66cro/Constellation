@@ -78,6 +78,7 @@ logs/
 .constellation-pids
 .tmp-*.json
 constellation-ui/server/.sim-config/
+orbit-simulator/.sim-config/
 constellation-ui/__azurite_db_*
 constellation-ui/test-results/
 constellation-ui/playwright-report/
