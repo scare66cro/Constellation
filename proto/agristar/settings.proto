@@ -8,6 +8,8 @@ package agristar;
 
 import "agristar/common.proto";
 import "agristar/equipment.proto";
+import "agristar/accounts.proto";
+import "agristar/io.proto";
 
 // ─── SettingsUpdate — wrapper for Bridge → Firmware settings POST ────────
 // The bridge sends this; firmware unpacks the oneof and calls the matching
@@ -50,6 +52,14 @@ message SettingsUpdate {
     PublicAddressSettings public_address = 34;
     BayNameSettings      bay_names      = 35;
     SysModeSettings      sys_mode       = 36;
+    PidLogSettings       pid_log        = 37;
+    AccountSettings      accounts       = 38;  // accounts.proto::AccountSettings (Nova handler in lp_settings.c)
+    IoConfig             io_config      = 39;  // io.proto::IoConfig (Nova handler in lp_settings.c)
+    /* RemoteOutsideAir is TRANSIENT — firmware caches in RAM only,
+     * does NOT persist to OSPI. Master pushes every 5 s; slave
+     * applies as an override on the storage orbit's outside-air HRs
+     * for `ttl_secs` (default 30). See LpRemoteOutside in firmware. */
+    RemoteOutsideAir     remote_outside = 41;
   }
 }
 
@@ -59,21 +69,22 @@ message PlenumSettings {
   uint32 humid_setpoint        = 2;   // Target humidity %
   uint32 humid_setpoint_ref    = 3;   // Humidity reference sensor
   float  burner_temp_setpoint  = 4;   // Burner target temperature
-  string burner_threshold      = 5;   // Burner threshold
+  float  burner_threshold      = 5;   // Burner threshold (degrees, shared with manual mode restart temp)
 }
 
 // ─── Fan Speed (StoreFanSpeeds / UI_SendFanSpeed) ────────────────────────
+// Mirrors legacy FAN_CTRL.  Field numbers map to Settings.Fan.* members.
 message FanSpeedSettings {
-  uint32 max_speed           = 1;   // Maximum fan speed %
-  uint32 min_speed           = 2;   // Minimum fan speed %
-  uint32 cool_speed          = 3;   // Cooling speed %
-  uint32 heat_speed          = 4;   // Heating speed %
-  uint32 dry_speed           = 5;   // Drying speed %
-  uint32 cure_speed          = 6;   // Curing speed %
-  uint32 recirc_speed        = 7;   // Recirculation speed %
-  uint32 defrost_speed       = 8;   // Defrost speed %
-  uint32 manual_speed        = 9;   // Manual override speed %
-  uint32 outside_air_speed   = 10;  // Outside air speed %
+  uint32 max_speed      = 1;   // Settings.Fan.MaxSpeed (%)
+  uint32 min_speed      = 2;   // Settings.Fan.MinSpeed (%)
+  uint32 refrig_speed   = 3;   // Settings.Fan.RefrigSpeed (%)
+  uint32 recirc_speed   = 4;   // Settings.Fan.RecircSpeed (%)
+  uint32 update_period  = 5;   // Settings.Fan.UpdatePeriod (hours)
+  float  temp_diff      = 6;   // Settings.Fan.TempDiff (degrees)
+  uint32 temp_ref1      = 7;   // Settings.Fan.TempRef1 (sensor id)
+  uint32 temp_ref2      = 8;   // Settings.Fan.TempRef2 (sensor id)
+  uint32 prev_speed     = 9;   // Settings.Fan.PrevSpeed (current cooling %)
+  uint32 update_mode    = 10;  // Settings.Fan.UpdateMode (onion mode select)
 }
 
 // ─── Fan Boost (StoreFanBoost / UI_SendFanBoost, tag "selBoostMode") ─────
@@ -86,12 +97,20 @@ message FanBoostSettings {
 }
 
 // ─── Ramp Rate (StoreRampRate / UI_SendRampRate, tag "updTemp") ──────────
+// UpdatePeriod==255 in firmware means "Automatically" (UI shows that string).
 message RampRateSettings {
-  float  rate_per_day = 1;   // Degrees per day
-  uint32 enabled      = 2;
+  float  rate_per_day  = 1;   // Settings.Ramp.UpdateTemp (degrees per period)
+  uint32 update_period = 2;   // Settings.Ramp.UpdatePeriod (hours; 255=Auto)
+  float  temp_diff     = 3;   // Settings.Ramp.TempDiff (Auto-mode trigger differential)
+  uint32 temp_ref      = 4;   // Settings.Ramp.TempRef (sensor id; 255=return-air)
+  float  target_temp   = 5;   // Settings.Ramp.TargetTemp (final plenum setpoint)
 }
 
 // ─── Refrigeration (StoreRefrig / UI_SendRefrig, 23 fields) ─────────────
+//
+// Field numbers MUST match firmware nova_dataexc.c::apply_refrig.
+// (Cases 1 and 7 both write Settings.Refrig.Mode in the firmware decoder
+// — legacy duplication preserved; encoder uses field 7.)
 message RefrigSettings {
   uint32 num_stages         = 1;
   repeated RefrigStage stages = 2;  // Up to 8 stages
@@ -102,13 +121,22 @@ message RefrigSettings {
   uint32 mode               = 7;   // Refrig mode
   uint32 defrost_interval   = 8;
   uint32 defrost_duration   = 9;
-  uint32 manual_speed       = 10;
+  uint32 purge              = 10;  // RefrigerationPurge mode (0=Normal, 1=Pump-down)
+  uint32 purge_threshold    = 11;  // Cross-coupled with Settings.Co2.Purge.RefrigThresh
+  float  limit              = 12;
+  uint32 fail_mode          = 13;
 }
 
 message RefrigStage {
-  float  trigger_temp   = 1;
-  uint32 enabled        = 2;
-  uint32 delay_minutes  = 3;
+  // Field numbers + semantics match nova_dataexc.c::apply_refrig stage
+  // sub-decoder and NovaMsg_SendRefrigSettings exactly. Previous names
+  // (trigger_temp/enabled/delay_minutes) did NOT match the wire — see
+  // novaDataStore.decodeRefrigSettings which has always read 1=on,
+  // 2=off, 3=diagnostic. ts-proto decodes by NUMBER so wire stayed
+  // valid, but call sites read by NAME.
+  uint32 on          = 1;  // Stage on threshold (PID load %)
+  uint32 off         = 2;  // Stage off threshold (PID load %)
+  uint32 diagnostic  = 3;  // Per-stage diagnostic / control flag
 }
 
 // ─── Burner (StoreBurner / UI_SendBurner, tag "selBurnerMode") ───────────
@@ -191,57 +219,107 @@ message HumidCtrlSettings {
 }
 
 // ─── Outside Air (StoreOutsideAir / UI_SendOutsideAir, tag "ctrlMode") ──
+// Mirrors legacy OUTSIDE_AIR_CTRL struct in SettingsTypes.h.
 message OutsideAirSettings {
-  uint32 mode           = 1;
-  float  differential   = 2;
-  float  min_temp       = 3;
-  float  max_temp       = 4;
+  uint32 mode           = 1;  // CtrlMode (0=outside, 1=plenum)
+  float  differential   = 2;  // Diff (degrees)
+  uint32 above_below    = 3;  // AboveBelow select (0/1)
+  uint32 temp_ref       = 4;  // TempRef sensor id (255=plenum, 254=return#1, else sensor)
+  uint32 calc_humid_max = 5;  // CalcHumidMax % (onion)
 }
 
 // ─── Misc (StoreMisc / UI_SendMisc, tag "p1Misc") ───────────────────────
 message MiscSettings {
-  repeated uint32 values = 1;  // Misc settings array
+  uint32 refrig_mode         = 1;   // Settings.Refrig.Mode (0=econ,1=refrig,2=enth)
+  uint32 defrost_interval    = 2;   // Settings.Refrig.DefrostPeriod (hours)
+  uint32 defrost_duration    = 3;   // Settings.Refrig.DefrostDuration (minutes)
+  float  heat_temp_thresh    = 4;   // Settings.HeatTempThresh OR Refrig.Limit
+  uint32 cavity_target       = 5;   // Settings.CavityHeat.Label (0=cavity heat,1=pile fan)
+  uint32 cavity_mode         = 6;   // Settings.CavityHeat.Mode (1=Off,2=Manual,3=Auto)
+  float  cavity_diff         = 7;   // Settings.CavityHeat.Diff (degrees)
+  uint32 cavity_duty_or_sensor = 8; // Settings.CavityHeat.DutyCycle (0..100 manual, sensor id auto)
+  uint32 cavity_standby_on   = 9;   // Settings.CavityHeat.StandbyOn (0/1)
+  uint32 kb_pref             = 10;  // Settings.KbPref (0=standard,1=alpha)
+  uint32 lights_fail_units   = 11;  // Settings.LightsFailUnits
+  uint32 enthalpy_off_pct    = 12;  // Refrig off-threshold for enth cooling (UI helper)
 }
 
-// ─── Failure Limits, Group 1 (StoreFailures / UI_SendFailures, 22 fields)
+// ─── Failure Limits, Group 1 (StoreFailures / UI_SendFailures, 11 fields)
+//
+// Field numbers + semantics MUST mirror nova_messages.c::
+// NovaMsg_SendFailureSettings() and apply_failures() in nova_dataexc.c.
+// Names below describe the actual UI/firmware semantic — do NOT use
+// stale "fail_speed/fail_temp/fail_delay" names that previously appeared
+// here; those did not match the wire and misled consumers.
 message FailureSettings {
   uint32 fan_mode               = 1;
-  uint32 fan_fail_speed         = 2;
-  uint32 fan_fail_delay         = 3;
-  uint32 heat_fail_temp         = 4;
-  uint32 heat_fail_delay        = 5;
-  uint32 refrig_fail_temp       = 6;
-  uint32 refrig_fail_delay      = 7;
-  uint32 burner_fail_temp       = 8;
-  uint32 burner_fail_delay      = 9;
-  uint32 humid_fail_delay       = 10;
-  uint32 door_fail_delay        = 11;
-  repeated uint32 extra_limits  = 12;  // Remaining fields (variable count)
+  uint32 fan_timer              = 2;
+  uint32 heat_mode              = 3;
+  uint32 heat_timer             = 4;
+  uint32 refrig_mode            = 5;
+  uint32 refrig_timer           = 6;
+  uint32 refrig_fail_mode       = 7;   // Settings.Refrig.FailMode (run-in selector)
+  uint32 burner_mode            = 8;
+  uint32 burner_timer           = 9;
+  uint32 humid_timer            = 10;
+  uint32 climacell_timer        = 11;
+  // Bay-lights monitor (BayLightsMonitor in legacy Failures.c). UI offers
+  // 3 modes: 0=None, 1=Alarm, 3=Lights-Off. Mode 3 is Nova-only —
+  // implements 3-way switch toggle of Settings.RemoteOff[RO_LIGHTSn] when
+  // the timer expires (legacy AS2 silently no-ops mode==3). Units is the
+  // raw legacy multiplier: 1=minutes, 60=hours.
+  uint32 lights_mode            = 12;  // Settings.Failure[FAIL_LIGHTS].Mode
+  uint32 lights_timer           = 13;  // Settings.Failure[FAIL_LIGHTS].Timer
+  uint32 lights_units           = 14;  // Settings.LightsFailUnits (1 or 60)
+  // Remaining legacy StoreFailures fields — added 2026-04-21 to close the
+  // gap where UI binds to slots [2/7/8/9/11/12/15/16] but firmware had no
+  // proto path. All minute-based timers (no units selector). Modes are
+  // FM_NONE=0 / FM_ALARM=1 / FM_FAIL=2 (FAIL_AUXILIARY may also drive a
+  // hard-fail shutdown — see Failures.c::FAIL_AUXILIARY handler).
+  uint32 climacell_mode         = 15;  // Settings.Failure[FAIL_CLIMACELL].Mode
+  uint32 refrig_stages_mode     = 16;  // Settings.Failure[FAIL_REFRIG_STAGES].Mode
+  uint32 refrig_stages_timer    = 17;  // Settings.Failure[FAIL_REFRIG_STAGES].Timer
+  uint32 humid_mode             = 18;  // Settings.Failure[FAIL_HUMIDIFIERS].Mode
+  uint32 aux_mode               = 19;  // Settings.Failure[FAIL_AUXILIARY].Mode
+  uint32 aux_timer              = 20;  // Settings.Failure[FAIL_AUXILIARY].Timer
+  uint32 cavity_heat_mode       = 21;  // Settings.Failure[FAIL_CAVITY_HEAT].Mode
+  uint32 cavity_heat_timer      = 22;  // Settings.Failure[FAIL_CAVITY_HEAT].Timer
 }
 
 // ─── Failure Limits, Group 2 (StoreFailures2 / UI_SendFailures2, 13 fields)
+//
+// Field numbers + semantics match nova_dataexc.c::apply_failures2() and
+// NovaMsg_SendFailureSettings2 exactly. The names below describe the
+// actual UI semantic; previous names (sensor_fail_action / env_fail_*)
+// did NOT match the wire and were never consumed.
 message FailureSettings2 {
-  uint32 out_air_mode          = 1;
-  uint32 sensor_fail_action    = 2;
-  uint32 env_fail_temp_high    = 3;
-  uint32 env_fail_temp_low     = 4;
-  uint32 env_fail_humid_high   = 5;
-  uint32 env_fail_humid_low    = 6;
-  uint32 env_fail_co2_high     = 7;
-  uint32 power_fail_action     = 8;
-  uint32 comm_fail_action      = 9;
-  uint32 comm_fail_timeout     = 10;
-  uint32 analog_fail_action    = 11;
-  uint32 analog_fail_timeout   = 12;
-  float  extra                 = 13;
+  uint32 out_air_mode      = 1;   // Outside-temp-sensor fail mode
+  uint32 out_air_timer     = 2;   // …timer (minutes)
+  uint32 out_humid_mode    = 3;   // Outside-humidity-sensor fail mode
+  uint32 out_humid_timer   = 4;   // …timer
+  uint32 high_co2_mode     = 5;   // High-CO2 alarm mode
+  uint32 high_co2_timer    = 6;   // …timer
+  uint32 co2_setpt         = 7;   // High-CO2 setpoint (ppm)
+  uint32 low_humid_mode    = 8;   // Low-plenum-humidity alarm mode
+  uint32 low_humid_timer   = 9;   // …timer
+  uint32 low_humid_set     = 10;  // …setpoint (%)
+  uint32 plen_sen_mode     = 11;  // Plenum-sensor disagreement alarm mode
+  uint32 plen_sen_timer    = 12;  // …timer
+  float  plen_sen_diff     = 13;  // …temperature differential
 }
 
 // ─── Temperature Alarm Limits (StoreTempAlarms / UI_SendTempDevAlarms) ───
+// ─── Temp Alarm Settings (StoreTempAlarms) ──────────────────────────────
+// Field numbers MUST match nova_dataexc.c::apply_temp_alarms() exactly.
+// Firmware emits 6 distinct fields (high/low pairs of temp+timer plus the
+// cure low/high redundantly mirrored from CureLimitSettings).
 message TempAlarmSettings {
-  float  low_limit    = 1;
-  float  high_limit   = 2;
-  float  dev_limit    = 3;
-  uint32 delay_mins   = 4;
+  float  low_temp     = 1;  // Settings.LowAlarmTemp
+  uint32 low_timer    = 2;  // Settings.LowAlarmTimer (minutes)
+  float  high_temp    = 3;  // Settings.HighAlarmTemp
+  uint32 high_timer   = 4;  // Settings.HighAlarmTimer (minutes)
+  float  cure_low     = 5;  // Settings.Cure.TempLowLimit (mirror of CureLimitSettings.temp_low_limit)
+  float  cure_high    = 6;  // Settings.Cure.TempHighLimit (mirror of CureLimitSettings.temp_high_limit)
 }
 
 // ─── Cure Temperature Limits (StoreCureLimits) ──────────────────────────
@@ -257,10 +335,16 @@ message RuntimeSettings {
 }
 
 // ─── Door Settings (StoreDoor / UI_SendDoor) ─────────────────────────────
+// Fresh-air door PID controller. Field numbers MUST match
+// nova_dataexc.c::apply_door() and the bridge's decodeDoorSettings.
+// UI page level2/door reads positionally as door[0..5].
 message DoorSettings {
-  float  air_pressure   = 1;
-  uint32 door_sensor    = 2;
-  uint32 close_delay    = 3;
+  float  p_gain         = 1;  // PID P (door[0])
+  float  i_gain         = 2;  // PID I (door[1])
+  float  d_gain         = 3;  // PID D (door[2])
+  float  u_limit        = 4;  // PID U-limit (door[3])
+  uint32 actuator_time  = 5;  // total open time, seconds (door[4])
+  uint32 cool_air_cycle = 6;  // cooling air short-cycle, minutes (door[5])
 }
 
 // ─── Load Monitor (StoreLoadMonitor / UI_SendLoadMonitor, 16 fields) ─────
@@ -319,15 +403,43 @@ message PidSettings {
   uint32 wrap      = 6;
 }
 
+// ─── PID Log Settings (Settings.Log.PID.* — page-level toggles) ────────
+message PidLogSettings {
+  uint32 wrap       = 1;  // PIDLogWrap     (0 = stop when full, 1 = wrap)
+  uint32 log_doors  = 2;  // LogPIDDoor     (0 = off, 1 = recording)
+  uint32 log_refrig = 3;  // LogPIDRefrig   (0 = off, 1 = recording)
+}
+
 // ─── Graph Favorites (StoreGraphFavorites / UI_SendGraphFavorites) ────────
 message GraphFavoriteSettings {
   repeated uint32 favorites = 1;  // List of favorite graph indices
 }
 
 // ─── Master/Slave (StoreMasterSlave) ─────────────────────────────────────
+// AS2 only had {mode, master_ip}. Constellation extends this so the
+// master can keep an explicit slave list (delivery is HTTP POST,
+// confirmed) and the slave can keep an allowlist of accepted masters.
+// See bridge `masterSlaveSync.ts` and firmware `lp_remote_outside.c`.
 message MasterSlaveSettings {
-  uint32 mode         = 1;  // 0=Standalone, 1=Master, 2=Slave
-  string master_ip    = 2;
+  uint32 mode                     = 1;  // 0=Standalone, 1=Master, 2=Slave
+  string master_ip                = 2;  // Slave: which master is selected (must be in allowed_masters)
+  repeated string slave_ips       = 3;  // Master: peers it pushes outside-air to
+  repeated string allowed_masters = 4;  // Slave: peer IPs whose pushes are accepted
+}
+
+// ─── Remote outside air (transient — NOT persisted) ────────────────
+// Carried over the bridge-to-bridge POST (master → slave) and dispatched
+// to the slave's controller LP via SettingsUpdate.remote_outside (field
+// 41). Wire units are tenths-of-°C and tenths-of-%RH (the orbit's
+// native HR encoding) so the slave can substitute directly into
+// sensorHr[OUTSIDE_TEMP] / sensorHr[OUTSIDE_HUMID] on the storage orbit
+// sample without any unit conversion. Sentinel `INT16_MIN`
+// (-32768) signals "sensor invalid" — slave clears its override.
+message RemoteOutsideAir {
+  sint32 outside_temp_x10  = 1;
+  sint32 outside_humid_x10 = 2;
+  uint32 ttl_secs          = 3;  // Default 30 s if zero on the wire.
+  string master_ip         = 4;  // Diagnostic only; bridge already validates.
 }
 
 // ─── DateTime Update (StoreDateTime) ─────────────────────────────────────
@@ -339,13 +451,17 @@ message DateTimeUpdate {
 
 // ─── Email (StoreEmail / UI_SendEmail) ───────────────────────────────────
 message EmailSettings {
-  string server    = 1;
-  string port      = 2;
-  string username  = 3;
-  string password  = 4;
-  string from_addr = 5;
-  string to_addr   = 6;
-  uint32 enabled   = 7;
+  string server     = 1;
+  uint32 port       = 2;  // SMTP port (was `string` until 2026-04-20;
+                          // wire-compatible varint matches firmware's
+                          // long-standing pd_uint32 read-path).
+  string username   = 3;
+  string password   = 4;
+  string from_addr  = 5;
+  string to_addr    = 6;
+  uint32 enabled    = 7;
+  uint32 auth_type  = 8;  // 0=StartTLS, 1=TLS-SSL, 2=None
+  string display_id = 9;  // "ip:siteName" of display that sends the email
 }
 
 // ─── Alert Flags (StoreAlerts / UI_SendEmailAlertFlags) ──────────────────
@@ -374,10 +490,18 @@ message PwmChannelSettings {
 }
 
 message PwmChannel {
-  uint32 index     = 1;
-  uint32 enabled   = 2;
-  uint32 frequency = 3;
-  uint32 duty      = 4;
+  uint32 index   = 1;
+  uint32 enabled = 2;
+  // Output port (PID) assigned to this PWM channel. Firmware
+  // encodes `Settings.PWM[i].Channel` here. Despite the historical
+  // name, this field has never carried PWM frequency — it is the
+  // port-mapping the equipment-status page uses to decide whether a
+  // PWM-driven equipment item is wired. Renamed Apr 2026 from
+  // `frequency` to `port` (wire-compatible: same field number).
+  uint32 port    = 3;
+  // Per-channel duty cycle if the firmware ever stores one. Firmware
+  // does not populate this today; reserved for future use.
+  uint32 duty    = 4;
 }
 
 // ─── Service Info Update (StoreServiceInfo) ──────────────────────────────

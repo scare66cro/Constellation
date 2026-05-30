@@ -27,6 +27,9 @@ $ProtoFiles = @(
   "agristar/alarms.proto"
   "agristar/logs.proto"
   "agristar/accounts.proto"
+  "agristar/firmware.proto"
+  "agristar/orbit.proto"
+  "agristar/vfd.proto"
   "agristar/envelope.proto"
 )
 

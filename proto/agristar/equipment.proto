@@ -17,10 +17,11 @@ message EquipmentStatus {
 
 message EquipState {
   uint32         eq_index   = 1;  // Equipment index (from EQUIPMENT_IO enum)
-  bool           output_on  = 2;  // Physical output state
+  bool           output_on  = 2;  // Physical output state (real DO readback when wired, else falls back to REMOTE_MANUAL)
   RemoteOffState remote_off = 3;  // Manual override state
   AlarmSeverity  alarm      = 4;  // Current alarm level
   string         label      = 5;  // Equipment name (e.g. "Fan/Green Light")
+  bool           input_on   = 6;  // Equipment input feedback contact (real DI readback via io_config.input_map[i])
 }
 
 // ─── EquipmentCmd — toggle equipment (StoreRemoteOff) ────────────────────
@@ -38,16 +39,18 @@ message RefrigDiagCmd {
 }
 
 // ─── Runtimes (UI_SendRuntimes, tag "runTimes") ──────────────────────────
+//
+// 48 half-hour slots × run-mode (1..5: cooling/recirc/standby/refrig/manual).
+// Wire layout matches firmware NovaMsg_SendRuntimes() and apply_runtimes()
+// in nova_dataexc.c (field 33). NOT equipment-runtime hours/mins — that is
+// FanRuntime below.
 message Runtimes {
   repeated RuntimeEntry entries = 1;
 }
 
 message RuntimeEntry {
-  uint32 eq_index     = 1;
-  uint32 daily_hours  = 2;
-  uint32 daily_mins   = 3;
-  uint32 total_hours  = 4;
-  uint32 total_mins   = 5;
+  uint32 slot = 1;   // 0..47 (force-encoded — slot 0 is meaningful)
+  uint32 mode = 2;   // 1=Cool, 2=Recirc, 3=Standby, 4=Refrig, 5=Manual
 }
 
 // ─── FanRuntime — daily/total fan counters ───────────────────────────────

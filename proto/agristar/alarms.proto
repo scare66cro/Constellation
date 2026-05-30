@@ -69,4 +69,13 @@ enum SystemCmdType {
   CMD_NEXT_BOARD        = 42;
   CMD_PREV_BOARD        = 43;
   CMD_SAME_BOARD        = 44;
+  // System lifecycle (50-59)
+  CMD_REBOOT_SOC        = 50;  // Warm-reset the controller SoC via DMSC.
+                                // Used by OTA Activate so a freshly written
+                                // OSPI image takes effect without JTAG.
+                                // Firmware Ack is queued before the reset
+                                // so the bridge can confirm the request was
+                                // accepted; the reset itself happens ~50 ms
+                                // later (UART FIFO drain) and does not
+                                // return.
 }

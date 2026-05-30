@@ -37,6 +37,68 @@ message OrbitBoardStatus {
   int32     legacy_slot    = 12;  // IoBoard[] index, or -1 if not mapped
   uint32    refrig_stage   = 13;  // For REFRIG role: compressor stage 1-8
   string    ip_address     = 14;  // IP address string for display
+  // Per-AO equipment program (Settings.AoEquip[slot][ch]). Length 2 = ch0, ch1.
+  // 0 = unused, 1 = fan speed (mirrors ao_equip_t in nova_fan_output.h).
+  repeated uint32 ao_equip = 15;
+
+  // ─── Added April 2026 — LP I/O state plumbing ────────────────────────
+  // Live I/O state and operator-assigned labels published by the LP
+  // firmware so the bridge UI can drop its `LP-MISSING` placeholders.
+  //
+  // proto3 zero-suppression note: a 0-valued bitmap is omitted from the
+  // wire entirely. That decodes as "all bits clear" in every consumer,
+  // which is the correct semantic for "no inputs/outputs asserted" — so
+  // we deliberately do NOT use the _force encoder variants here. The
+  // repeated scalar / string fields below are similarly fine: an absent
+  // repeated field decodes as an empty array, which the bridge already
+  // treats as "no data yet" (LP-MISSING semantics retained for that case).
+
+  // Live discrete-input bitmap (Modbus discrete inputs 0..14). Bits:
+  //   0..9   → DI 0..9
+  //   10     → E-Stop
+  //   11..14 → DC24V monitor channels 0..3
+  // Bits 15..31 reserved for future LP DI expansion.
+  uint32 digital_inputs    = 16;
+
+  // Live discrete-output bitmap. Bits 0..9 → DO 0..9.
+  // Bits 10..31 reserved for future LP DO expansion.
+  uint32 digital_outputs   = 17;
+
+  // DC24V output channel state bitmap. Bits 0..3 → DC24V output 0..3.
+  // Bits 4..31 reserved. Kept separate from `digital_inputs` so the
+  // DC24V *monitor* (input side, bits 11..14 of digital_inputs) is not
+  // conflated with the DC24V *driver* (output side, this field).
+  uint32 dc24v_outputs     = 18;
+
+  // Analog-output level per channel, percent ×10 (matches HR encoding
+  // 0..1000 in the orbit storage map). Length=2 today (ch0, ch1); will
+  // grow as the LP exposes more AOs. Use pb_uint32_force on the encoder
+  // — 0% is a valid commanded level.
+  repeated uint32 analog_outputs_x10 = 19;
+
+  // Last-comm age in seconds per VFD slot (length=24 today, matching
+  // storage HR map 100..147). Use pb_uint32_force on the encoder — 0
+  // means "spoke this very second", which is meaningful.
+  repeated uint32 vfd_activity_secs    = 20;
+
+  // Last-comm age in seconds per sensor board (length=16). Use
+  // pb_uint32_force on the encoder — 0 is meaningful (just polled).
+  repeated uint32 sensor_activity_secs = 21;
+
+  // Operator-assigned labels for the 10 DO channels. Length=10. Empty
+  // string at slot N means "no label set" — UI falls back to "DO N".
+  repeated string output_labels = 22;
+
+  // Operator-assigned labels for the 10 DI channels. Length=10. Empty
+  // string at slot N means "no label set" — UI falls back to "DI N".
+  repeated string input_labels  = 23;
+
+  // Reserved for the next round of LP I/O additions (e.g. AI live values,
+  // per-channel fault flags, label revisions). Bump past 31 only with a
+  // comment justifying — keeping hot fields ≤15 minimises tag bytes for
+  // the periodic OrbitStatus push, but this message is already past 15
+  // for these bulk diagnostics, which is fine.
+  reserved 24 to 31;
 }
 
 // ─── Full discovery results (firmware → bridge) ──────────────────────────
@@ -61,4 +123,51 @@ message OrbitRoleAssign {
   uint32    zone_id        = 3;   // Zone index
   int32     legacy_slot    = 4;   // IoBoard[] mapping (-1 for none)
   uint32    refrig_stage   = 5;   // Compressor stage (REFRIG role only)
+}
+
+// ─── Per-AO equipment program assignment (bridge → firmware) ─────────────
+// Programs which equipment a single orbit AO drives. Persists to OSPI in
+// Settings.AoEquip[slot][channel]. equip values match ao_equip_t in
+// nova_fan_output.h (0 = unused, 1 = fan speed).
+message AoEquipAssign {
+  uint32 slot    = 1;   // Discovery slot index (0..15)
+  uint32 channel = 2;   // AO channel within the orbit (0..1)
+  uint32 equip   = 3;   // ao_equip_t value
+}
+
+// ─── Raw orbit sensor / register bank push (firmware → bridge) ───────────
+// Mirrors a contiguous block of holding registers from one orbit board,
+// 1:1, no scaling or type interpretation. Sent every ~1s per connected
+// board (LP firmware cycles through boards at 100ms cadence so all 5 are
+// covered in 500ms). The bridge MUST forward these as-is to UI proto
+// subscribers — no CSV translation, no unit conversion. Conversion to
+// engineering units is a UI-side concern and is driven by per-channel
+// IoDefinition metadata.
+//
+// Default bank used by the LP poller is hr_base=200, length=64
+// (sensor block defined by the orbit-simulator). Other banks (AO
+// readback, ident) get their own messages over time; this one only
+// covers the sensor block.
+message OrbitSensorBank {
+  uint32 slot      = 1;   // Discovery slot index (0..15)
+  uint32 hr_base   = 2;   // First holding-register address in the bank
+  // Raw register values (uint16 promoted to uint32 for proto3 wire
+  // compactness). Length matches the polled block size (typically 64).
+  // Use pb_uint32_force on the encoder side — 0 is a valid reading.
+  repeated uint32 values = 3;
+  uint32 seq       = 4;   // Per-board monotonic sequence (rolls at 2^32)
+}
+
+// ─── Triton control register write (bridge → firmware) ──────────────────
+// Forwards a single Modbus holding-register write from the UI through the
+// LP firmware's existing orbit Modbus TCP client. Used by the
+// /iot/triton/{slot}/{manual,setpoints,ioconfig,failures,ack} REST routes
+// — every Triton control surface flows through this one message.
+//
+// Use pb_uint32_force for `addr` and `value` on the encoder: 0 is a valid
+// register address and a valid write value.
+message TritonRegWrite {
+  uint32 slot  = 1;   // Discovery slot index (0..15) — must be REFRIG role
+  uint32 addr  = 2;   // Modbus holding register address
+  uint32 value = 3;   // Value to write (low 16 bits used)
 }

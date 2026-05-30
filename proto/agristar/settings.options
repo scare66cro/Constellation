@@ -22,7 +22,12 @@ agristar.EmailSettings.username          max_size:32
 agristar.EmailSettings.password          max_size:32
 agristar.EmailSettings.from_addr         max_size:48
 agristar.EmailSettings.to_addr           max_size:48
-agristar.MasterSlaveSettings.master_ip   max_size:16
+agristar.MasterSlaveSettings.master_ip       max_size:16
+agristar.MasterSlaveSettings.slave_ips       max_size:16
+agristar.MasterSlaveSettings.slave_ips       max_count:8
+agristar.MasterSlaveSettings.allowed_masters max_size:16
+agristar.MasterSlaveSettings.allowed_masters max_count:8
+agristar.RemoteOutsideAir.master_ip          max_size:16
 agristar.DateTimeUpdate.date_str         max_size:16
 agristar.DateTimeUpdate.time_str         max_size:16
 agristar.BasicSetupUpdate.storage_name   max_size:32

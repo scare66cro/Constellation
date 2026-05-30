@@ -1,0 +1,14 @@
+# nanopb options for orbit.proto
+#
+# OrbitBoardStatus.ip_address and ao_equip were previously unannotated
+# (callback) and the firmware/bridge used hand-rolled encoders, so we
+# leave them as callbacks to avoid changing existing struct shapes.
+#
+# The April 2026 LP-I/O-state fields below are new — size them as
+# STATIC arrays so consumers can use the generated nanopb structs
+# directly without a callback dispatch table.
+agristar.OrbitBoardStatus.analog_outputs_x10   max_count:8
+agristar.OrbitBoardStatus.vfd_activity_secs    max_count:24
+agristar.OrbitBoardStatus.sensor_activity_secs max_count:16
+agristar.OrbitBoardStatus.output_labels        max_count:10, max_size:24
+agristar.OrbitBoardStatus.input_labels         max_count:10, max_size:24

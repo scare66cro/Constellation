@@ -34,6 +34,29 @@ message SystemStatus {
                                 //   CS_MOD_BURNER_DOOR_UNLOCK=8,
                                 //   CS_HOLD_BURNER_MOD_DOOR=9).
                                 //   Onion mode only; 0 in potato/standby.
+  // Reserved diag fields 18-21 emitted by lp_am2434/main.c::
+  // build_system_status_envelope (raw varints from the engine):
+  //   18 = SystemState (legacy ST_* enum, 0=ST_UNDEFINED, 28=ST_REFRIG,
+  //        33=ST_SHUTDOWN, ...)
+  //   19 = RunClockMode() (RC_COOLING=1, RC_RECIRC=2, RC_STANDBY=3,
+  //        RC_REFRIG=4, RC_CURE=5)
+  //   20 = PWM_DOORS percent  (0..100, 0 = 4 mA endpoint)
+  //   21 = PWM_REFRIG percent (0..100, 0 = 4 mA endpoint)
+  //   23 = ro_bits (Settings.RemoteOff[] nibbles for FAN/REFRIG/
+  //        CLIMACELL/HUMIDIFIER1)
+  // These are debug-only; the typed surface is field 22 below.
+  uint32 system_state    = 18;  // Engine ST_* enum (raw)
+  uint32 run_clock_mode  = 19;  // RC_* enum (raw)
+  uint32 pwm_doors_pct   = 20;
+  uint32 pwm_refrig_pct  = 21;
+  // E-Stop is the ONLY physical input on Constellation. Sourced from
+  // STORAGE orbit DI11. Closed = run permitted; open = SHUTDOWN.
+  // When asserted, engine drops to ST_SHUTDOWN, all PWMs ramp to
+  // PWM_MIN_VALUE (4 mA), pulse-doors close, every output is gated
+  // off (firmware), and the hardware safety relay de-energizes the
+  // output rail (independent of firmware).
+  bool   estop_active    = 22;
+  uint32 ro_bits         = 23;  // Settings.RemoteOff[] nibbles, debug
 }
 
 // ─── DateTime (UI_SendDateTime, tag "Date") ──────────────────────────────
@@ -41,6 +64,24 @@ message DateTime {
   string date_str  = 1;   // "MM/DD/YYYY" or "DD/MM/YYYY"
   string time_str  = 2;   // "HH:MM:SS"
   uint32 am_pm     = 3;   // 0=24h, 1=AM, 2=PM
+}
+
+// ─── NetworkConfig — LAN configuration + identity (envelope tag 19) ──────
+// Pushed on link change / settings save. Replaces legacy CGI_IPADD,
+// CGI_IPMASK, CGI_IPGATEWAY, CGI_IPDMODE, CGI_HTTPPORT, CGI_MAC.
+message NetworkConfig {
+  string ip_addr    = 1;   // Local IPv4 address
+  string ip_mask    = 2;   // Subnet mask
+  string ip_gateway = 3;   // Default gateway
+  uint32 ip_mode    = 4;   // 0=DHCP, 1=Static
+  uint32 http_port  = 5;   // HTTP server port
+  string mac        = 6;   // NIC MAC address (read-only)
+  // Public-facing IPv4 the panel advertises (used by multi-panel
+  // discovery + email reports). Stored verbatim as 4 dotted octets.
+  string public_ip  = 7;
+  // Up to two static DNS servers. Empty when ip_mode=DHCP. Indices
+  // are positional (entries[0]=DNS1, entries[1]=DNS2).
+  repeated string dns = 8;
 }
 
 // ─── BasicSetup (UI_SendBasicSetup, tag "StorageName") ───────────────────
@@ -57,6 +98,7 @@ message BasicSetup {
   string     login_pw      = 9;   // Login password hash
   uint32     local_login   = 10;  // Require local login
   uint32     animations    = 11;  // UI animations enabled
+  uint32     net_monitor_enabled = 12; // Network monitor / cloud telemetry enabled
 }
 
 // ─── Version information (UI_SendVersions, tag "SysVersions") ────────────
@@ -73,9 +115,11 @@ message BoardVersion {
 }
 
 // ─── Service/dealer info (UI_SendService, tag "dealerName") ──────────────
+// Wire layout matches firmware NovaMsg_SendServiceInfo (nova_messages.c):
+// pb_string(1)=DealerName, (2)=DealerPhone, (3)=TechName, (4)=TechPhone.
 message ServiceInfo {
   string dealer_name  = 1;
   string dealer_phone = 2;
-  string dealer_email = 3;
-  string notes        = 4;
+  string tech_name    = 3;
+  string tech_phone   = 4;
 }

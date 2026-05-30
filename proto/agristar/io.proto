@@ -6,9 +6,12 @@
 syntax = "proto3";
 package agristar;
 
-// ─── IoConfig — pin → equipment mapping (UI_SendIoConfig) ────────────────
-// output_map[i] = equipment index assigned to output pin i
-// input_map[i]  = equipment index assigned to input pin i
+// ─── IoConfig — equipment → port mapping (UI_SendIoConfig) ──────────────
+// Wire layout (per Nova_Firmware nova_messages.c::NovaMsg_SendIoConfig):
+//   output_map[eqIdx] = port id assigned to equipment eqIdx
+//   input_map[eqIdx]  = port id assigned to equipment eqIdx
+// i.e. the array is **eq-indexed**, value = portId. Consumers that need a
+// port-indexed view (e.g. the IoConfig page) invert it client-side.
 //
 // PID formula: PID = board * 12 + pin + 1  (board 0-based, pin 0-based)
 // Legacy: boards 0-2 (36 PIDs). Multi-orbit: boards 0-15 (192 PIDs).
@@ -29,10 +32,12 @@ message IoDefinition {
 message IoEntry {
   uint32 index       = 1;  // Equipment/IO index
   string name        = 2;  // Human-readable name
-  uint32 mode        = 3;  // IO mode (output, input, PWM, etc.)
-  uint32 io_pin      = 4;  // Physical pin assignment
+  uint32 mode        = 3;  // SYSTEM_MODE category (potato/onion/all/etc.) — legacy EquipIo.Mode
+  uint32 io_pin      = 4;  // Physical pin assignment (legacy EquipIo.Output)
   bool   renamable   = 5;  // Whether user can rename this
   bool   visible     = 6;  // Whether shown in UI
+  uint32 io_type     = 7;  // IO_OPTION enum: 0=OUTPUT, 1=INPUT, 2=BOTH, 3=SWITCH, 4=NONE
+                           // (legacy EquipIo.IO; required because 0 is meaningful → encode with _force)
 }
 
 // ─── IoNameUpdate — rename a single I/O (StoreIoName, tag "ioRename") ────
@@ -54,11 +59,22 @@ message AnalogBoard {
 
 message AnalogSensor {
   uint32 slot      = 1;   // 0-3
-  uint32 type      = 2;   // Sensor type code
+  uint32 type      = 2;   // Sensor type code (5 = 4-20 mA — see display_unit for scaling)
   string label     = 3;
   float  offset    = 4;   // Calibration offset
   bool   disabled  = 5;
-  float  value     = 6;   // Current reading
+  float  value     = 6;   // Current reading (in display_unit when type=5 and eng_max != eng_min)
+  // ─── Custom 4-20 mA scaling (Phase: custom-sensor) ────────────────────
+  // Only meaningful when type=5 (mA). When eng_min == eng_max (defaults
+  // 0/0) firmware reports raw mA. Otherwise:
+  //   value = eng_min + (mA - 4) * (eng_max - eng_min) / 16
+  // display_unit drives the UI suffix. Add to the enum here and the
+  // UI's UnitOptions[] in lockstep.
+  //   0 = (none / typed)  1 = %    2 = ppm    3 = inH2O   4 = V
+  //   5 = A               6 = CFM  7 = FPM    8 = °F      9 = PSI
+  uint32 display_unit = 7;
+  float  eng_min      = 8;
+  float  eng_max      = 9;
 }
 
 // ─── AvailableIo — list of unassigned I/O pins (UI_SendAvailableIo) ──────

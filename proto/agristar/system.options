@@ -17,3 +17,10 @@ agristar.VersionInfo.arm_version         max_size:16
 agristar.VersionInfo.bootloader_version  max_size:16
 agristar.BoardVersion.version            max_size:16
 agristar.VersionInfo.boards              max_count:16
+agristar.NetworkConfig.ip_addr           max_size:16
+agristar.NetworkConfig.ip_mask           max_size:16
+agristar.NetworkConfig.ip_gateway        max_size:16
+agristar.NetworkConfig.mac               max_size:18
+agristar.NetworkConfig.public_ip         max_size:16
+agristar.NetworkConfig.dns               max_count:2
+agristar.NetworkConfig.dns               max_size:16

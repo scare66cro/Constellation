@@ -84,3 +84,47 @@ enum EventType {
   EVENT_MODE_CHANGE  = 3;   // Operating mode changed
   EVENT_REMOTE_CMD   = 4;   // Remote command received
 }
+
+// ─── PidLogRecord — per-tick PID controller telemetry ────────────────────
+// Replaces the legacy SD-card PIDLog (PIDLOG_RECORD).  Firmware fires this
+// once per PID tick from nova_controls.c::Pid() whenever Settings.Log.PID
+// has logging enabled for the given loop.  The bridge stores each record
+// in SQLite (pid_log table) for the Level-2 PID-tuning page graphs.
+//
+// Throttling lives in firmware: the encoder may coalesce / decimate by
+// pid_log_settings.wrap to keep the COBS pipe out of saturation.
+message PidLogRecord {
+  string  date         = 1;   // "MM/DD/YYYY"
+  string  time         = 2;   // "HH:MM:SS"
+  uint32  loop_index   = 3;   // PID loop ID (legacy "Type" field)
+  float   p_term       = 4;
+  float   i_term       = 5;
+  float   d_term       = 6;
+  float   error        = 7;
+  int32   output       = 8;   // -100..100 (bidirectional) or 0..100
+  uint32  sequence     = 9;   // Monotonic per-loop counter for gap detection
+}
+
+// ─── LoadLogRecord — per-bay commodity loading temperature record ────────
+// Replaces the legacy SD-card LoadLog (LOADLOG_RECORD).  Firmware
+// accumulates IR temperature samples per bay during ReadAnalogBoards()
+// and emits one record every ~5 minutes from the data-exchange thread
+// while at least one bay's Settings.LoadMonitor.Bay[i].Status is
+// LL_ACQUIRING.  The bridge persists into SQLite (load_log + load_log_bay).
+//
+// Bay temp wire format mirrors the legacy disk format: tenths of the
+// user-selected unit (°F or °C), so 21.5°F → 215.  Sensor reading 0xFFFF
+// (matching SENSOR_VAL_UNDEFINED) means "no IR sensor reading this period".
+message LoadLogRecord {
+  string  date         = 1;   // "MM/DD/YYYY"
+  string  time         = 2;   // "HH:MM"  (minute resolution mirrors legacy)
+  uint32  record_num   = 3;   // Monotonic per-boot record number
+  uint32  sequence     = 4;   // Same as record_num; bridge gap-detect
+  repeated LoadLogBay  bays  = 5;   // One entry per NUM_LOADLOG_SENSORS bay
+}
+
+message LoadLogBay {
+  uint32  pipe         = 1;   // Bay number / pipe (legacy LOADLOG_BAYTEMP.Pipe)
+  int32   sensor_x10   = 2;   // Avg IR temp × 10; -32768 = SENSOR_VAL_UNDEFINED
+  uint32  status       = 3;   // LL_ACQUIRING(0) / LL_PAUSED(1) / LL_FULL(2)
+}

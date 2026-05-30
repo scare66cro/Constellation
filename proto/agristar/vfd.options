@@ -1,0 +1,5 @@
+# nanopb options for vfd.proto
+# Bridge-emitted only — generous sizing since these never run on the MCU.
+agristar.VfdDrive.label                  max_size:32
+agristar.VfdDrive.fault_text             max_size:64
+agristar.VfdStatus.drives                max_count:16
