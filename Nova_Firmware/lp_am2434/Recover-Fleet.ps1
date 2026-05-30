@@ -70,6 +70,12 @@ function Invoke-Flash {
     Write-Host ("=" * 60) -ForegroundColor Cyan
     Write-Host ""
 
+    # 2026-05-27: -SkipWatchdog no longer needed. Flash-LP.ps1 now
+    # inserts a 10-s wait + java.exe cleanup between the main flash
+    # and the watchdog flash, which fixed the "Step 2 wedge" that
+    # made the second uniflash invocation hang. Re-flashing the
+    # watchdog every recovery keeps the watchdog image fresh for any
+    # mid-cycle changes.
     & ".\Flash-LP.ps1" -Probe $Probe -Role $Role -IP $IP -Force
     if ($LASTEXITCODE -ne 0) {
         throw "Flash-LP failed for $Label (Probe $Probe). Stopping."

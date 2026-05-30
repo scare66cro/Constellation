@@ -133,6 +133,14 @@ firmware-bundles/
 nohup.out
 flash_log.txt
 
+# ─── Bench helper scripts that embed credentials ────────────────────────
+# These wrap ssh/scp to the rpi5 bench with the SSH password hard-coded.
+# DO NOT COMMIT — they would leak the bench credential into git history.
+# If you want a shareable version, switch to ssh key auth (or read the
+# pw from $env:RPI_BENCH_SSHPASS) before unignoring.
+_get_bridge_log.sh
+_restart_bridge.sh
+
 # ─── Universal backup-file pattern ───────────────────────────────────────
 # Catches *.bak (one-off "before-this-change" snapshots) and the
 # *.bak.pre-<tag> convention used in Nova_Firmware/lp_am2434 for

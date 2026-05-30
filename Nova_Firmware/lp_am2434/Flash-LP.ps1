@@ -605,6 +605,21 @@ if ($SkipWatchdog -and $flashExitCode -eq 0) {
     Write-Host "[wd-flash] -SkipWatchdog set — leaving watchdog at 0x180000 intact" -ForegroundColor DarkGray
 } elseif ($flashExitCode -eq 0 -and (Test-Path $wdImage)) {
     Write-Host ""
+    # 2026-05-27: wait + java cleanup BEFORE the second DSS invocation.
+    # The previous uniflash_run.js fired Step 7 MAGIC_REBOOT which warm-
+    # resets the SoC; the SoC then re-runs ROM+SBL+boots the just-flashed
+    # main image in ~5 s. If we launch the next dss.bat (watchdog flash)
+    # immediately, the second DSS attaches JTAG to a SoC that is mid-boot,
+    # which wedges Step 2 ("Load auto-flasher") consistently. Documented
+    # bench symptom 2026-05-07 + reproduced 2026-05-27. Mitigation:
+    # (1) kill any leftover java.exe from the first DSS session that
+    # didn't exit cleanly, (2) wait 10 s for the warm-reset to complete
+    # and the SBL to load the new main image (Step 7 banner says ~5 s,
+    # giving 2× margin), (3) only THEN attempt the second JTAG attach.
+    Write-Host "[wd-flash] cleaning DSS Java + waiting 10 s for SoC warm-reset to complete..." `
+                -ForegroundColor DarkYellow
+    Get-Process java -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 10
     Write-Host "[wd-flash] $wdImage  ($((Get-Item $wdImage).Length) B) -> 0x180000" -ForegroundColor Yellow
     Remove-Item Env:UNIFLASH_MANIFEST -ErrorAction SilentlyContinue
     $env:UNIFLASH_FILE   = ($wdImage -replace '\\','/')

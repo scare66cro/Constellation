@@ -86,7 +86,12 @@ param(
     # Used during the first-light dry-run after JTAG-flashing one board to
     # the new firmware — keeps the install loop from trying to route to
     # boards still on the old firmware (which would noMatch the resolver).
-    [switch]$StorageOnly
+    [switch]$StorageOnly,
+    # Emit a .cfu with ONLY the controller component (slot=-1, role=0, ip=$ControllerIp).
+    # Used to bench-test the controller self-update path (nova_fw_update.c)
+    # in isolation from the orbit OTA path (lp_ota_task.c) when orbit boards
+    # are wedged or unavailable. Install goes straight to controller-self-update.
+    [switch]$ControllerOnly
 )
 $ErrorActionPreference = 'Stop'
 
@@ -199,6 +204,21 @@ try {
                 }
             }
         }
+    } elseif ($ControllerOnly) {
+        $manifestObj = [ordered]@{
+            schema     = 'constellation-firmware/v1'
+            version    = $fwVersion
+            build_date = $buildDate
+            components = [ordered]@{
+                controller = [ordered]@{
+                    file   = 'nova_lp.release.mcelf.hs_fs'
+                    slot   = -1
+                    role   = 0   # ORBIT_ROLE_CONTROLLER
+                    ip     = $ControllerIp
+                    sha256 = $sha
+                }
+            }
+        }
     } else {
         $manifestObj = [ordered]@{
             schema     = 'constellation-firmware/v1'
@@ -247,7 +267,9 @@ try {
     if (-not (Test-Path $BundlesDir)) {
         New-Item -ItemType Directory -Force -Path $BundlesDir | Out-Null
     }
-    $suffix  = if ($StorageOnly) { '-storage-only' } else { '' }
+    $suffix  = if ($StorageOnly) { '-storage-only' }
+               elseif ($ControllerOnly) { '-controller-only' }
+               else { '' }
     $cfuPath = Join-Path $BundlesDir "constellation-$Version$suffix.cfu"
     if (Test-Path $cfuPath) { Remove-Item $cfuPath -Force }
 
