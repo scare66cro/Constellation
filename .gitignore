@@ -31,6 +31,23 @@ qemu-constellation/build/
 **/*.a
 **/*.lst
 
+# TI ARM compiler / SDK build outputs (lp_am2434 + watchdog)
+**/*.mcelf
+**/*.mcelf_xip
+**/*.mcelf.hs_fs
+**/*.mcelf.hs_fs.flash-manifest.json
+**/*.out
+**/*.tiimage
+Nova_Firmware/lp_am2434/ti-arm-clang/obj/
+Nova_Firmware/lp_am2434/ti-arm-clang/xip_segments/
+Nova_Firmware/lp_am2434/ti-arm-clang/flash_log.txt
+Nova_Firmware/lp_am2434/watchdog_core/ti-arm-clang/obj/
+Nova_Firmware/lp_am2434/watchdog_core/ti-arm-clang/xip_segments/
+Nova_Firmware/lp_am2434/flasher_uart/ti-arm-clang/obj/
+
+# Editor / merge-conflict backup files (catch-all)
+**/*.orig
+
 # ─── Python ──────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

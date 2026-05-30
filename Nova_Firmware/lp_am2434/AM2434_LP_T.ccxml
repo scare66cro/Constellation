@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  AM2434_LP_T.ccxml - Probe T (XDS110 serial S24L0957, COM3/COM4).
+  TRITON role @ 10.47.27.4. Created 2026-05-11 after S24L0957 was
+  recovered (was thought bricked - actually just BOOTMODE DIP misconfigured).
+  See /memories/repo/lp-am243-pcb-190a-bootmode.md.
+-->
+<configurations XML_version="1.2" id="configurations_0">
+    <configuration XML_version="1.2" id="configuration_0">
+        <instance XML_version="1.2" desc="Texas Instruments XDS110 USB Debug Probe" href="connections/TIXDS110_Connection.xml" id="Texas Instruments XDS110 USB Debug Probe" xml="TIXDS110_Connection.xml" xmlpath="connections"/>
+        <connection XML_version="1.2" id="Texas Instruments XDS110 USB Debug Probe">
+            <instance XML_version="1.2" href="drivers/tixds510cs_dap.xml" id="drivers" xml="tixds510cs_dap.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510cortexR.xml" id="drivers" xml="tixds510cortexR.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510cortexM.xml" id="drivers" xml="tixds510cortexM.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510pru.xml" id="drivers" xml="tixds510pru.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510csstm.xml" id="drivers" xml="tixds510csstm.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510ctset2.xml" id="drivers" xml="tixds510ctset2.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/tixds510etbcs.xml" id="drivers" xml="tixds510etbcs.xml" xmlpath="drivers"/>
+            <property Type="choicelist" Value="0" id="The XDS110 probe connection">
+                <choice Name="USB Channel" value="0"/>
+                <choice Name="Ethernet Channel" value="1"/>
+            </property>
+            <property Type="stringfield" Value="S24L0957" id="The serial number is"/>
+            <platform XML_version="1.2" id="platform_0">
+                <instance XML_version="1.2" desc="AM243x_LAUNCHPAD" href="boards/AM243x_LP.xml" id="AM243x_LAUNCHPAD" xml="AM243x_LP.xml" xmlpath="boards"/>
+            </platform>
+        </connection>
+    </configuration>
+</configurations>

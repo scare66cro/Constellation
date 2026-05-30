@@ -1,0 +1,369 @@
+/**
+ * SysConfig for Constellation Nova on LP-AM2434 — Phase B (UART2 bridge + Ethernet)
+ *
+ * Combines:
+ *   - Existing nova bridge UART2 @ 921600 (CONFIG_UART_BRIDGE)
+ *   - SDK enet_lwip_cpsw reference: CPSW2G + 2× DP838xx PHYs + lwIP
+ *
+ * Memory layout follows the SDK enet ref (MSRAM 0x160000, FLASH 0x100000)
+ * because lwIP+enet pools need ~700KB of RAM. Nova-only IPC/log/user-SHM
+ * regions were dropped — they were boilerplate from the hello-world
+ * template and never referenced by Nova firmware code.
+ *
+ * @cliArgs --device "AM2434" --package "FCCSP (ALX)" --variant "AM2434-E" --context "r5fss0-0" --product "MCU_PLUS_SDK_AM243x@12.00.00"
+ */
+
+/* ---- Modules ---- */
+const eeprom          = scripting.addModule("/board/eeprom/eeprom", {}, false);
+const eeprom1         = eeprom.addInstance();
+const gpio            = scripting.addModule("/drivers/gpio/gpio", {}, false);
+const gpio1           = gpio.addInstance();
+const gpio2           = gpio.addInstance();
+/* GDC orbit DO[0] — onboard USR LED on GPMC0_AD7. Mirrors door 1's
+ * "open" contactor. Wired up by lp_orbit_io.c. Additional 9 DOs and
+ * 10 DIs will be added here once BoosterPack pin assignments are
+ * decided (see docs/LP-AM2434-Hardware-Bringup-Plan.md §11). */
+const gpio3           = gpio.addInstance();
+const i2c             = scripting.addModule("/drivers/i2c/i2c", {}, false);
+const i2c1            = i2c.addInstance();
+const debug_log       = scripting.addModule("/kernel/dpl/debug_log");
+const dpl_cfg         = scripting.addModule("/kernel/dpl/dpl_cfg");
+const mpu_armv7       = scripting.addModule("/kernel/dpl/mpu_armv7", {}, false);
+const mpu_armv71      = mpu_armv7.addInstance();
+const mpu_armv72      = mpu_armv7.addInstance();
+const mpu_armv73      = mpu_armv7.addInstance();
+const mpu_armv74      = mpu_armv7.addInstance();
+const mpu_armv75      = mpu_armv7.addInstance();
+const mpu_armv76      = mpu_armv7.addInstance();
+const default_linker  = scripting.addModule("/memory_configurator/default_linker", {}, false);
+const default_linker1 = default_linker.addInstance();
+const general         = scripting.addModule("/memory_configurator/general", {}, false);
+const general1        = general.addInstance();
+const region          = scripting.addModule("/memory_configurator/region", {}, false);
+const region1         = region.addInstance();
+const section         = scripting.addModule("/memory_configurator/section", {}, false);
+const section1        = section.addInstance();
+const section2        = section.addInstance();
+const section3        = section.addInstance();
+const section4        = section.addInstance();
+const section5        = section.addInstance();
+const section6        = section.addInstance();
+const section7        = section.addInstance();
+const section8        = section.addInstance();
+const section9        = section.addInstance();
+const enet_cpsw       = scripting.addModule("/networking/enet_cpsw/enet_cpsw", {}, false);
+const enet_cpsw1      = enet_cpsw.addInstance();
+
+/* Nova bridge UART (UART2 @ 921600, polled in main.c) */
+const uart            = scripting.addModule("/drivers/uart/uart", {}, false);
+const uart1           = uart.addInstance();
+
+/* OSPI NOR flash (W25Q64JV) — used by lp_device_config for per-board
+ * provisioning (role/IP/netmask/gateway) survival across power cycles.
+ * SBL already configures OSPI in DAC mode at 0x60000000 for XIP boot;
+ * adding the Flash driver here gives us indirect-mode write/erase. */
+const flash           = scripting.addModule("/board/flash/flash", {}, false);
+const flash1          = flash.addInstance();
+
+/* ---- EEPROM (board ID, MAC addresses) ---- */
+eeprom1.$name = "CONFIG_EEPROM0";
+
+/* ---- GPIOs for PHY reset + RGMII MUX select ---- */
+gpio1.pinDir         = "OUTPUT";
+gpio1.$name          = "CONFIG_ENET_RGMII_PHY_RST";
+gpio1.pu_pd          = "pu";
+gpio1.rx             = true;
+gpio1.GPIO_n.$assign = "GPMC0_AD11";
+
+gpio2.pinDir         = "OUTPUT";
+gpio2.$name          = "CONFIG_ENET_RGMII_MUX_SEL";
+gpio2.pu_pd          = "pu";
+gpio2.rx             = true;
+gpio2.GPIO_n.$assign = "GPMC0_AD12";
+
+/* ---- GDC orbit DO[0] = onboard USR LED (GPMC0_AD7) ----
+ * Visible smoke test: lights up while door 1's "open" contactor is
+ * energized. The DO direction is set by SysConfig's generated
+ * Drivers_open(); lp_orbit_io.c just calls GPIO_pinWriteHigh/Low. */
+gpio3.pinDir         = "OUTPUT";
+gpio3.$name          = "CONFIG_GDC_DO_0";
+gpio3.pu_pd          = "pd";
+gpio3.GPIO_n.$assign = "GPMC0_AD7";
+
+/* ---- I2C0 (EEPROM peripheral) ---- */
+i2c1.$name               = "CONFIG_I2C0";
+eeprom1.peripheralDriver = i2c1;
+i2c1.I2C.$assign         = "I2C0";
+i2c1.I2C_child.$name     = "drivers_i2c_v0_i2c_v0_template1";
+
+/* ---- UART0 console ---- */
+debug_log.enableUartLog        = true;
+debug_log.enableCssLog         = false;
+debug_log.uartLog.$name        = "CONFIG_UART_CONSOLE";
+debug_log.uartLog.UART.$assign = "USART0";
+
+/* ---- UART2 bridge (Nova ↔ RPi5 COBS+protobuf @ 921600) ---- */
+uart1.$name        = "CONFIG_UART_BRIDGE";
+uart1.baudRate     = 921600;
+uart1.operMode     = "13X";
+uart1.UART.$assign = "USART2";
+
+/* ---- OSPI NOR Flash (W25Q64JV @ 0x60000000) ----
+ * Provides Flash_open / Flash_write / Flash_eraseBlk for
+ * lp_device_config persistence. Reads stay memory-mapped (DAC mode);
+ * only writes/erases switch to indirect mode through this driver. */
+flash1.$name                         = "CONFIG_FLASH0";
+flash1.bootQuirks                    = "Flash_quirkQSPIEarlyFixup";
+flash1.peripheralDriver.$name        = "CONFIG_OSPI0";
+flash1.peripheralDriver.inputClkFreq = 100000000;
+
+/* ---- MPU regions ---- */
+mpu_armv71.$name             = "CONFIG_MPU_REGION0";
+mpu_armv71.size              = 31;
+mpu_armv71.attributes        = "Device";
+mpu_armv71.accessPermissions = "Supervisor RD+WR, User RD";
+mpu_armv71.allowExecute      = false;
+
+mpu_armv72.$name             = "CONFIG_MPU_REGION1";
+mpu_armv72.size              = 15;
+mpu_armv72.accessPermissions = "Supervisor RD+WR, User RD";
+
+mpu_armv73.$name             = "CONFIG_MPU_REGION2";
+mpu_armv73.baseAddr          = 0x41010000;
+mpu_armv73.size              = 15;
+mpu_armv73.accessPermissions = "Supervisor RD+WR, User RD";
+
+/* MSRAM: 8 MB region for code + lwIP/enet pools */
+mpu_armv74.$name             = "CONFIG_MPU_REGION3";
+mpu_armv74.accessPermissions = "Supervisor RD+WR, User RD";
+mpu_armv74.baseAddr          = 0x70000000;
+mpu_armv74.size              = 23;
+
+/* Non-cached enet DMA buffers */
+mpu_armv75.$name             = "CONFIG_MPU_REGION5";
+mpu_armv75.accessPermissions = "Supervisor RD+WR, User RD";
+mpu_armv75.baseAddr          = 0xA5000000;
+mpu_armv75.size              = 23;
+mpu_armv75.attributes        = "NonCached";
+
+/* OSPI flash window */
+mpu_armv76.$name    = "CONFIG_MPU_REGION6";
+mpu_armv76.size     = 27;
+mpu_armv76.baseAddr = 0x60000000;
+
+/* ---- Linker / general ---- */
+default_linker1.$name = "memory_configurator_default_linker0";
+
+general1.$name           = "CONFIG_GENERAL0";
+general1.heap_size       = 34000;
+general1.additional_data = "#include \"ti_enet_config.h\"";
+general1.stack_size      = 8192;
+general1.linker.$name    = "TIARMCLANG0";
+
+/* ---- Memory regions (enet ref layout) ---- */
+region1.$name                               = "MEMORY_REGION_CONFIGURATION0";
+region1.memory_region.create(5);
+region1.memory_region[0].type               = "TCMA_R5F";
+region1.memory_region[0].$name              = "R5F_VECS";
+region1.memory_region[0].size               = 0x40;
+region1.memory_region[0].auto               = false;
+region1.memory_region[1].type               = "TCMA_R5F";
+region1.memory_region[1].$name              = "R5F_TCMA";
+region1.memory_region[1].size               = 0x7FC0;
+region1.memory_region[2].type               = "TCMB_R5F";
+region1.memory_region[2].$name              = "R5F_TCMB0";
+region1.memory_region[2].size               = 0x8000;
+region1.memory_region[3].$name              = "MSRAM";
+region1.memory_region[3].auto               = false;
+region1.memory_region[3].manualStartAddress = 0x70080000;
+/* Shrunk from 0x160000 → 0x15FFC0 to carve out 64 B for the dual-
+ * core watchdog heartbeat at 0x701DFFC0 (struct LpWatchdogShm in
+ * lp_watchdog_ipc.h). Watchdog core (R5FSS1_0) image lives in MSRAM
+ * 0x701E0000..0x701FFFFF (next 128 KB). See
+ * docs/lp-am2434-watchdog-design.md §3 for the full layout. */
+region1.memory_region[3].size               = 0x15FFC0;
+region1.memory_region[4].type               = "FLASH";
+region1.memory_region[4].$name              = "FLASH";
+region1.memory_region[4].auto               = false;
+region1.memory_region[4].manualStartAddress = 0x60100000;
+region1.memory_region[4].size               = 0x100000;
+
+/* ---- Sections ---- */
+section1.$name                        = "Vector Table";
+section1.load_memory                  = "R5F_VECS";
+section1.group                        = false;
+section1.output_section.create(1);
+section1.output_section[0].$name      = ".vectors";
+section1.output_section[0].palignment = true;
+
+section2.$name                        = "Text Segments";
+section2.load_memory                  = "MSRAM";
+section2.output_section.create(5);
+section2.output_section[0].$name      = ".text.hwi";
+section2.output_section[0].palignment = true;
+section2.output_section[1].$name      = ".text.cache";
+section2.output_section[1].palignment = true;
+section2.output_section[2].$name      = ".text.mpu";
+section2.output_section[2].palignment = true;
+section2.output_section[3].$name      = ".text.boot";
+section2.output_section[3].palignment = true;
+section2.output_section[4].$name      = ".text:abort";
+section2.output_section[4].palignment = true;
+
+section3.$name                        = "Code and Read-Only Data";
+section3.load_memory                  = "MSRAM";
+section3.output_section.create(2);
+section3.output_section[0].$name      = ".text";
+section3.output_section[0].palignment = true;
+section3.output_section[1].$name      = ".rodata";
+section3.output_section[1].palignment = true;
+
+section4.$name                        = "Data Segment";
+section4.load_memory                  = "MSRAM";
+section4.output_section.create(1);
+section4.output_section[0].$name      = ".data";
+section4.output_section[0].palignment = true;
+
+section5.$name                        = "Memory Segments";
+section5.load_memory                  = "MSRAM";
+section5.output_section.create(2);
+section5.output_section[0].$name      = ".sysmem";
+section5.output_section[0].palignment = true;
+section5.output_section[1].$name      = ".stack";
+section5.output_section[1].palignment = true;
+
+section6.$name                                   = "CONFIG_SECTION2";
+section6.load_memory                             = "MSRAM";
+section6.output_section.create(1);
+section6.output_section[0].$name                 = ".bss";
+section6.output_section[0].palignment            = true;
+section6.output_section[0].output_sections_start = "__BSS_START";
+section6.output_section[0].output_sections_end   = "__BSS_END";
+
+section7.$name                                    = "Stack Segments";
+section7.load_memory                              = "MSRAM";
+section7.output_section.create(5);
+section7.output_section[0].$name                  = ".irqstack";
+section7.output_section[0].output_sections_start  = "__IRQ_STACK_START";
+section7.output_section[0].output_sections_end    = "__IRQ_STACK_END";
+section7.output_section[0].input_section.create(1);
+section7.output_section[0].input_section[0].$name = ". = . + __IRQ_STACK_SIZE;";
+section7.output_section[1].$name                  = ".fiqstack";
+section7.output_section[1].output_sections_start  = "__FIQ_STACK_START";
+section7.output_section[1].output_sections_end    = "__FIQ_STACK_END";
+section7.output_section[1].input_section.create(1);
+section7.output_section[1].input_section[0].$name = ". = . + __FIQ_STACK_SIZE;";
+section7.output_section[2].$name                  = ".svcstack";
+section7.output_section[2].output_sections_start  = "__SVC_STACK_START";
+section7.output_section[2].output_sections_end    = "__SVC_STACK_END";
+section7.output_section[2].input_section.create(1);
+section7.output_section[2].input_section[0].$name = ". = . + __SVC_STACK_SIZE;";
+section7.output_section[3].$name                  = ".abortstack";
+section7.output_section[3].output_sections_start  = "__ABORT_STACK_START";
+section7.output_section[3].output_sections_end    = "__ABORT_STACK_END";
+section7.output_section[3].input_section.create(1);
+section7.output_section[3].input_section[0].$name = ". = . + __ABORT_STACK_SIZE;";
+section7.output_section[4].$name                  = ".undefinedstack";
+section7.output_section[4].output_sections_start  = "__UNDEFINED_STACK_START";
+section7.output_section[4].output_sections_end    = "__UNDEFINED_STACK_END";
+section7.output_section[4].input_section.create(1);
+section7.output_section[4].input_section[0].$name = ". = . + __UNDEFINED_STACK_SIZE;";
+
+section8.$name                                              = "CONFIG_SECTION0";
+section8.group                                              = false;
+section8.type                                               = "NOLOAD";
+section8.load_memory                                        = "MSRAM";
+section8.output_section.create(1);
+section8.output_section[0].$name                            = ".enet_dma_mem ";
+section8.output_section[0].alignment                        = 128;
+section8.output_section[0].input_section.create(2);
+section8.output_section[0].input_section[0].$name           = "*(*ENET_DMA_DESC_MEMPOOL)";
+section8.output_section[0].input_section[1].$name           = "*(*ENET_DMA_RING_MEMPOOL)";
+section8.output_section[0].input_section[1].additional_data = "#if (ENET_SYSCFG_PKT_POOL_ENABLE == 1)\n        *(*ENET_DMA_PKT_MEMPOOL)\n#endif";
+
+section9.$name                       = "CONFIG_SECTION1";
+section9.load_memory                 = "MSRAM";
+section9.group                       = false;
+section9.type                        = "NOLOAD";
+section9.output_section.create(3);
+section9.output_section[0].$name     = "bss:ENET_DMA_OBJ_MEM";
+section9.output_section[0].alignment = 128;
+section9.output_section[1].$name     = ".bss:ENET_DMA_PKT_INFO_MEMPOOL";
+section9.output_section[1].alignment = 128;
+section9.output_section[2].$name     = ".bss:ENET_ICSSG_OCMC_MEM";
+section9.output_section[2].alignment = 128;
+
+/* ---- CPSW Ethernet ---- */
+enet_cpsw1.$name                        = "CONFIG_ENET_CPSW0";
+enet_cpsw1.LargePoolPktCount            = 32;
+enet_cpsw1.mdioMode                     = "MDIO_MODE_MANUAL";
+enet_cpsw1.PktInfoOnlyEnable            = true;
+/* CPSW host port acts as a normal switch port (forwards by default).
+ * Each MAC port is in mac-only mode (no L2 learning across MAC ports,
+ * which is the standard enet_lwip_cpsw layout for am64x/am243x).
+ *
+ * Earlier `macOnlyEn_hostPort=true` swallowed every TX frame: stats
+ * showed HOST txGood=6 / MAC1 txGood=0 / aleDrop=0 — i.e. the ALE
+ * silently never routed host-port traffic to MAC1 because there is no
+ * static unicast entry pointing the destination at MAC1.
+ * See /memories/repo/lp-am2434-cpsw-tx-debug.md . */
+enet_cpsw1.macOnlyEn_hostPort           = false;
+enet_cpsw1.macOnlyEn_macPort1           = true;
+enet_cpsw1.macOnlyEn_macPort2           = true;
+enet_cpsw1.DisableMacPort2              = true;
+enet_cpsw1.ExternalPhyMgmtEnable        = true;
+enet_cpsw1.MDIO.MDC.$assign             = "PRG1_MDIO0_MDC";
+enet_cpsw1.txDmaChannel[0].$name        = "ENET_DMA_TX_CH0";
+enet_cpsw1.rxDmaChannel[0].$name        = "ENET_DMA_RX_CH0";
+enet_cpsw1.rxDmaChannel[0].macAddrCount = 1;
+enet_cpsw1.netifInstance.create(1);
+enet_cpsw1.netifInstance[0].$name       = "NETIF_INST_ID0";
+
+const ethphy_cpsw_icssg  = scripting.addModule("/board/ethphy_cpsw_icssg/ethphy_cpsw_icssg", {}, false);
+const ethphy_cpsw_icssg1 = ethphy_cpsw_icssg.addInstance({}, false);
+ethphy_cpsw_icssg1.$name = "CONFIG_ENET_ETHPHY0";
+enet_cpsw1.ethphy1       = ethphy_cpsw_icssg1;
+
+/* PHY2 / MAC port 2 disabled — see DisableMacPort2 above. */
+
+const udma         = scripting.addModule("/drivers/udma/udma", {}, false);
+const udma1        = udma.addInstance({}, false);
+enet_cpsw1.udmaDrv = udma1;
+
+/* ---- Pinmux pins (frozen so future SysCfg solver versions match) ---- */
+i2c1.I2C.SCL.$suggestSolution                   = "I2C0_SCL";
+i2c1.I2C.SDA.$suggestSolution                   = "I2C0_SDA";
+debug_log.uartLog.UART.RXD.$suggestSolution     = "UART0_RXD";
+debug_log.uartLog.UART.TXD.$suggestSolution     = "UART0_TXD";
+uart1.UART.RXD.$suggestSolution                 = "UART2_RXD";
+uart1.UART.TXD.$suggestSolution                 = "UART2_TXD";
+enet_cpsw1.MDIO.$suggestSolution                = "MDIO0";
+enet_cpsw1.MDIO.MDIO.$suggestSolution           = "PRG1_MDIO0_MDIO";
+enet_cpsw1.RGMII.$suggestSolution               = "CPSW";
+enet_cpsw1.RGMII.RGMII1_RD0.$suggestSolution    = "PRG0_PRU1_GPO7";
+enet_cpsw1.RGMII.RGMII1_RD1.$suggestSolution    = "PRG0_PRU1_GPO9";
+enet_cpsw1.RGMII.RGMII1_RD2.$suggestSolution    = "PRG0_PRU1_GPO10";
+enet_cpsw1.RGMII.RGMII1_RD3.$suggestSolution    = "PRG0_PRU1_GPO17";
+enet_cpsw1.RGMII.RGMII1_RX_CTL.$suggestSolution = "PRG0_PRU0_GPO9";
+enet_cpsw1.RGMII.RGMII1_RXC.$suggestSolution    = "PRG0_PRU0_GPO10";
+enet_cpsw1.RGMII.RGMII1_TD0.$suggestSolution    = "PRG1_PRU1_GPO7";
+enet_cpsw1.RGMII.RGMII1_TD1.$suggestSolution    = "PRG1_PRU1_GPO9";
+enet_cpsw1.RGMII.RGMII1_TD2.$suggestSolution    = "PRG1_PRU1_GPO10";
+enet_cpsw1.RGMII.RGMII1_TD3.$suggestSolution    = "PRG1_PRU1_GPO17";
+enet_cpsw1.RGMII.RGMII1_TX_CTL.$suggestSolution = "PRG1_PRU0_GPO9";
+enet_cpsw1.RGMII.RGMII1_TXC.$suggestSolution    = "PRG1_PRU0_GPO10";
+/* RGMII2_* pinmux suggestions removed — DisableMacPort2=true means
+ * SysCfg does not instantiate the RGMII2.* pin objects, so referencing
+ * them throws "Cannot set properties of undefined". */
+
+/* OSPI flash pinmux — copied verbatim from flasher_uart/example.syscfg
+ * so the running app uses the exact same pins the SBL configured at
+ * cold boot. No conflicts with anything else (no other syscfg-pinmuxed
+ * module touches OSPI0_*). */
+flash1.peripheralDriver.OSPI.$suggestSolution      = "OSPI0";
+flash1.peripheralDriver.OSPI.CLK.$suggestSolution  = "OSPI0_CLK";
+flash1.peripheralDriver.OSPI.CSn0.$suggestSolution = "OSPI0_CSn0";
+flash1.peripheralDriver.OSPI.D3.$suggestSolution   = "OSPI0_D3";
+flash1.peripheralDriver.OSPI.D2.$suggestSolution   = "OSPI0_D2";
+flash1.peripheralDriver.OSPI.D1.$suggestSolution   = "OSPI0_D1";
+flash1.peripheralDriver.OSPI.D0.$suggestSolution   = "OSPI0_D0";
