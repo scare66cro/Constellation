@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Constellation — Sensor Injector</title>
+<style>
+:root {
+  --bg:#0f172a; --bg2:#1e293b; --bg3:#334155; --border:#475569;
+  --text:#e2e8f0; --text2:#94a3b8; --accent:#4fc3f7; --on:#4ade80;
+  --off:#64748b; --warn:#fbbf24; --err:#f87171;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+header { background:var(--bg2); border-bottom:1px solid var(--border); padding:12px 24px; display:flex; justify-content:space-between; align-items:center; }
+header h1 { font-size:16px; color:var(--accent); }
+.meta { font-size:12px; color:var(--text2); }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+.dot.on { background:var(--on); box-shadow:0 0 6px var(--on); }
+.dot.off { background:var(--err); }
+main { padding:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:12px; }
+.board { background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:10px; }
+.board h2 { font-size:13px; color:var(--accent); margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
+.ch { display:grid; grid-template-columns:130px 80px 1fr 90px; gap:6px; align-items:center; padding:4px 0; border-top:1px dashed var(--border); }
+.ch:first-child { border-top:none; }
+.ch label { font-size:12px; color:var(--text2); }
+.ch select { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 4px; font-size:11px; }
+.ch input[type=range] { width:100%; }
+.ch .val { text-align:right; font-family:monospace; font-size:12px; }
+.ch.none .val { color:var(--off); }
+.board-hdr { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.board-hdr h2 { font-size:13px; color:var(--accent); text-transform:uppercase; letter-spacing:0.5px; }
+.board-hdr .pile-toggle { font-size:10px; }
+footer { padding:8px 24px; background:var(--bg2); border-top:1px solid var(--border); font-size:11px; color:var(--text2); display:flex; justify-content:space-between; }
+button { background:var(--bg3); color:var(--text); border:1px solid var(--border); padding:4px 10px; border-radius:3px; font-size:11px; cursor:pointer; }
+button:hover { border-color:var(--accent); }
+
+/* ---- tab strip ---- */
+nav.tabs { background:var(--bg2); border-bottom:1px solid var(--border); padding:0 24px; display:flex; gap:0; }
+nav.tabs button { background:transparent; color:var(--text2); border:none; border-bottom:2px solid transparent; border-radius:0; padding:8px 16px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }
+nav.tabs button.active { color:var(--accent); border-bottom-color:var(--accent); }
+nav.tabs button:hover { color:var(--text); }
+.view { display:none; }
+.view.active { display:block; }
+main.eq { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; }
+.io-card { background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:10px; }
+.io-card h2 { font-size:13px; color:var(--accent); margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
+.io-row { display:grid; grid-template-columns:80px 1fr 60px; gap:8px; align-items:center; padding:5px 0; border-top:1px dashed var(--border); }
+.io-row:first-child { border-top:none; }
+.io-row label { font-size:12px; color:var(--text2); }
+.io-row .led { width:14px; height:14px; border-radius:50%; background:var(--off); justify-self:center; transition:background 120ms, box-shadow 120ms; }
+.io-row .led.on { background:var(--on); box-shadow:0 0 8px var(--on); }
+.io-row .toggle { background:var(--bg3); color:var(--text); border:1px solid var(--border); padding:3px 8px; border-radius:3px; font-size:11px; cursor:pointer; justify-self:end; }
+.io-row .toggle.on { background:var(--on); color:var(--bg); border-color:var(--on); }
+.eq-status { padding:8px 16px; background:var(--bg2); margin:0 0 12px 0; border-radius:4px; font-size:12px; color:var(--text2); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Constellation Sensor Injector</h1>
+  <div class="meta">
+    <span><span id="dot" class="dot off"></span><span id="target">--</span></span>
+    &middot; HR <span id="hrbase">200</span>+ &middot;
+    Display:
+    <select id="unit" title="Display + slider unit for TEMP channels. Wire to LP stays °C tenths; injector converts on push.">
+      <option value="C">°C</option>
+      <option value="F" selected>°F</option>
+    </select>
+    &middot;
+    <button id="readback">Read back</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="sensors" class="active">Sensors</button>
+  <button data-tab="equipment">Equipment I/O</button>
+</nav>
+
+<main id="boards" class="view active" data-view="sensors"></main>
+
+<section class="view" data-view="equipment" style="padding:16px;">
+  <div class="eq-status">
+    DOs are read-only here — driven by CONTROLLER LP via FC05. DI toggles
+    inject into <code>HR 41000+</code> on STORAGE; live hardware sweep wins.
+    <span id="eq-meta" style="float:right;"></span>
+  </div>
+  <main class="eq">
+    <div class="io-card">
+      <h2>Digital Outputs (FC01)</h2>
+      <div id="do-list"></div>
+    </div>
+    <div class="io-card">
+      <h2>Digital Inputs (FC02 / inject FC06)</h2>
+      <div id="di-list"></div>
+    </div>
+  </main>
+</section>
+
+<footer>
+  <span>FC06 per slider, FC16 batch every 5s for safety</span>
+  <span id="lastpush">—</span>
+</footer>
+
+<script>
+const TYPES = [
+  { v: 3,  name: 'TEMP',    min: -40, max: 85,    step: 0.5, unit: '°C' },
+  { v: 1,  name: 'HUMID',   min: 0,   max: 100,   step: 0.5, unit: '%RH' },
+  { v: 2,  name: 'CO2',     min: 0,   max: 5000,  step: 50,  unit: 'ppm' },
+  { v: 0,  name: 'IR_TEMP', min: -40, max: 85,    step: 0.5, unit: '°C' },
+  { v: 15, name: 'NONE',    min: 0,   max: 0,     step: 1,   unit: '' },
+];
+function typeMeta(v) { return TYPES.find(t => t.v === v) ?? TYPES[4]; }
+
+const $unit = document.getElementById('unit');
+// User-selected display unit for TEMP channels. The canonical in-memory
+// value (state.channels[i].value) and the wire value pushed to the LP
+// (HR 200..263) are ALWAYS °C — only the slider range, step, and readout
+// switch into °F when this is 'F'. Conversion happens at push time.
+let displayUnit = localStorage.getItem('sensor-injector-unit') || 'F';
+$unit.value = displayUnit;
+$unit.addEventListener('change', () => {
+  displayUnit = $unit.value;
+  localStorage.setItem('sensor-injector-unit', displayUnit);
+  if (state) render();
+});
+function isTempType(t) { return t === 3 /* TEMP */ || t === 0 /* IR_TEMP */; }
+function cToF(c) { return c * 1.8 + 32; }
+function fToC(f) { return (f - 32) / 1.8; }
+// Display-unit slider geometry for TEMP channels.
+const TEMP_F_RANGE = { min: -40, max: 185, step: 1 };
+function sliderMeta(type) {
+  const meta = typeMeta(type);
+  if (isTempType(type) && displayUnit === 'F') {
+    return { ...meta, ...TEMP_F_RANGE, unit: '°F' };
+  }
+  return meta;
+}
+// Convert canonical °C value -> the unit the slider is currently in.
+function toSlider(value, type) {
+  if (isTempType(type) && displayUnit === 'F') return cToF(value);
+  return value;
+}
+// Convert a slider value back to canonical °C for storage / wire push.
+function fromSlider(sliderValue, type) {
+  if (isTempType(type) && displayUnit === 'F') return fToC(sliderValue);
+  return sliderValue;
+}
+function formatVal(value, type) {
+  const meta = typeMeta(type);
+  if (isTempType(type)) {
+    if (displayUnit === 'F') return cToF(value).toFixed(1) + ' °F';
+    return value.toFixed(1) + ' °C';
+  }
+  return value + ' ' + meta.unit;
+}
+
+const $boards = document.getElementById('boards');
+const $dot    = document.getElementById('dot');
+const $target = document.getElementById('target');
+const $hrbase = document.getElementById('hrbase');
+const $last   = document.getElementById('lastpush');
+
+let state = null;
+
+async function load() {
+  try {
+    const r = await fetch('/api/state');
+    state = await r.json();
+    $dot.className = 'dot ' + (state.connected ? 'on' : 'off');
+    $target.textContent = state.target + (state.connected ? ' (connected)' : ' (disconnected)');
+    $hrbase.textContent = state.hrBase;
+    render();
+  } catch (e) {
+    $dot.className = 'dot off';
+    $target.textContent = 'panel server unreachable';
+  }
+}
+
+function render() {
+  $boards.innerHTML = '';
+  for (let b = 0; b < state.boards; b++) {
+    const div = document.createElement('div');
+    div.className = 'board';
+    const boardLabel = state.boardLabels?.[b] ?? `Board ${b}`;
+    // Pile boards (b >= 2) get a one-click "set all channels to TEMP / HUMID".
+    const pileToggle = b >= 2
+      ? `<span class="pile-toggle">
+           <button data-b="${b}" data-t="3"  class="pile-set">All TEMP</button>
+           <button data-b="${b}" data-t="1"  class="pile-set">All HUMID</button>
+         </span>` : '';
+    div.innerHTML = `<div class="board-hdr"><h2>${boardLabel}</h2>${pileToggle}</div>`;
+    for (let c = 0; c < state.channelsPerBoard; c++) {
+      const ch = state.channels[b * state.channelsPerBoard + c];
+      const meta = sliderMeta(ch.type);
+      const isNone = ch.type === 15;
+      const chLabel = state.channelLabels?.[b]?.[c] ?? `Ch${c}`;
+      const sliderVal = toSlider(ch.value, ch.type);
+      const row = document.createElement('div');
+      row.className = 'ch' + (isNone ? ' none' : '');
+      row.innerHTML = `
+        <label title="HR ${ch.hr}">${chLabel}</label>
+        <select data-b="${b}" data-c="${c}" class="type">
+          ${TYPES.map(t => `<option value="${t.v}" ${t.v===ch.type?'selected':''}>${t.name}</option>`).join('')}
+        </select>
+        <input type="range" data-b="${b}" data-c="${c}" class="value"
+               min="${meta.min}" max="${meta.max}" step="${meta.step}" value="${sliderVal}"
+               ${isNone?'disabled':''}>
+        <span class="val">${isNone?'—':formatVal(ch.value, ch.type)}</span>`;
+      div.appendChild(row);
+    }
+    $boards.appendChild(div);
+  }
+  $boards.querySelectorAll('select.type').forEach(el => el.addEventListener('change', onTypeChange));
+  $boards.querySelectorAll('input.value').forEach(el => el.addEventListener('input', onValueChange));
+  $boards.querySelectorAll('button.pile-set').forEach(el => el.addEventListener('click', onPileSet));
+}
+
+async function onPileSet(ev) {
+  const b = +ev.target.dataset.b, t = +ev.target.dataset.t;
+  const defaultVal = t === 3 ? 20.0 : (t === 1 ? 55.0 : 0);
+  for (let c = 0; c < state.channelsPerBoard; c++) {
+    const ch = state.channels[b * state.channelsPerBoard + c];
+    ch.type  = t;
+    ch.value = defaultVal;
+    await push(b, c, t, defaultVal);
+  }
+  load();
+}
+
+let pushTimer = null;
+function debounce(fn) {
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(fn, 50);
+}
+
+async function push(board, ch, type, value) {
+  const body = { board, ch };
+  if (type !== undefined) body.type = type;
+  if (value !== undefined) body.value = value;
+  try {
+    const r = await fetch('/api/channel', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'push failed');
+    $last.textContent = `pushed b${board}.c${ch} = ${value ?? '?'} (wire 0x${(j.wire||0).toString(16).toUpperCase()}) @ ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $last.textContent = 'push error: ' + e.message;
+  }
+}
+
+function onTypeChange(ev) {
+  const b = +ev.target.dataset.b, c = +ev.target.dataset.c;
+  const t = +ev.target.value;
+  const ch = state.channels[b * state.channelsPerBoard + c];
+  ch.type = t;
+  push(b, c, t, ch.value).then(load);
+}
+
+function onValueChange(ev) {
+  const b = +ev.target.dataset.b, c = +ev.target.dataset.c;
+  const sliderVal = +ev.target.value;
+  const ch = state.channels[b * state.channelsPerBoard + c];
+  // Slider may be in °F; convert back to canonical °C for wire / state.
+  const vC = fromSlider(sliderVal, ch.type);
+  ch.value = vC;
+  ev.target.parentElement.querySelector('.val').textContent =
+      formatVal(vC, ch.type);
+  debounce(() => push(b, c, undefined, vC));
+}
+
+document.getElementById('readback').addEventListener('click', async () => {
+  const r = await fetch('/api/readback');
+  const j = await r.json();
+  console.table(j.decoded.filter(d => d.raw !== 0x7FFF));
+  $last.textContent = 'read-back logged to console';
+});
+
+/* ── Tab switching + Equipment I/O view ─────────────────────────── */
+
+const $tabs    = document.querySelectorAll('nav.tabs button');
+const $views   = document.querySelectorAll('.view');
+const $doList  = document.getElementById('do-list');
+const $diList  = document.getElementById('di-list');
+const $eqMeta  = document.getElementById('eq-meta');
+let activeTab  = 'sensors';
+let eqTimer    = null;
+
+$tabs.forEach((b) => b.addEventListener('click', () => {
+  activeTab = b.dataset.tab;
+  $tabs.forEach((x) => x.classList.toggle('active', x === b));
+  $views.forEach((v) => v.classList.toggle('active', v.dataset.view === activeTab));
+  if (activeTab === 'equipment') {
+    pollEq();
+    if (!eqTimer) eqTimer = setInterval(pollEq, 1000);
+  } else if (eqTimer) {
+    clearInterval(eqTimer); eqTimer = null;
+  }
+}));
+
+async function pollEq() {
+  try {
+    const r = await fetch('/api/eq/state');
+    if (!r.ok) {
+      $eqMeta.textContent = 'LP unreachable';
+      return;
+    }
+    const j = await r.json();
+    renderDOs(j.do);
+    renderDIs(j.di);
+    $eqMeta.textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $eqMeta.textContent = 'poll error: ' + e.message;
+  }
+}
+
+function renderDOs(list) {
+  // Each row: label · LED · (no toggle — read-only).
+  $doList.innerHTML = list.map((d) => `
+    <div class="io-row">
+      <label>${d.label}</label>
+      <div class="led ${d.on ? 'on' : ''}"></div>
+      <span style="text-align:right; font-family:monospace; color:var(--text2);">${d.on ? 'ON' : 'off'}</span>
+    </div>`).join('');
+}
+
+function renderDIs(list) {
+  // Each row: label · LED · toggle button (POST /api/eq/di).
+  $diList.innerHTML = list.map((d) => `
+    <div class="io-row">
+      <label>${d.label}</label>
+      <div class="led ${d.on ? 'on' : ''}"></div>
+      <button class="toggle ${d.on ? 'on' : ''}" data-idx="${d.idx}" data-on="${d.on ? 0 : 1}">
+        ${d.on ? 'ON' : 'off'}
+      </button>
+    </div>`).join('');
+  $diList.querySelectorAll('button.toggle').forEach((b) =>
+    b.addEventListener('click', onDiToggle));
+}
+
+async function onDiToggle(ev) {
+  const idx = +ev.target.dataset.idx;
+  const on  = ev.target.dataset.on === '1';
+  try {
+    await fetch('/api/eq/di', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idx, on }),
+    });
+    pollEq();
+  } catch (e) {
+    $eqMeta.textContent = 'inject error: ' + e.message;
+  }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+
+</body>
+</html>

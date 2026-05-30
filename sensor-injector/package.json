@@ -1,0 +1,15 @@
+{
+  "name": "sensor-injector",
+  "version": "1.0.0",
+  "description": "Modbus TCP sensor-data injector for the Constellation orbit LP firmware. Replaces the orbit-simulator's sensor-board RTU stand-in with a direct FC16 push into the orbit LP's HR 200..263 sensor block, until real RS-485 sensor boards arrive.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
