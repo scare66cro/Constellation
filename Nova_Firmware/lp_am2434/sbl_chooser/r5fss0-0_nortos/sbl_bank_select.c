@@ -26,6 +26,7 @@
  */
 
 #include "sbl_bank_select.h"
+#include "sbl_hal_flash.h"
 #include <string.h>
 #include <kernel/dpl/DebugP.h>
 #include <kernel/dpl/SystemP.h>
@@ -54,51 +55,76 @@ static int32_t read_boot_meta(Flash_Handle f, SblFwBootMeta *meta)
                       (uint8_t *)meta, sizeof(*meta));
 }
 
-/* ─── Write helper (erase header sector, repack, program back) ───────── */
+/* ─── Atomic metadata block rewrite (bare-metal STIG erase + DAC write) ── */
 /*
- * The 64 KB header sector holds FwBootMeta at offset 0 + Bank A header
- * at offset 0x80 + the rest is reserved for future per-bank metadata.
- * To update FwBootMeta we must:
+ * 2026-05-31 rewrite + iteration 3: bypass SDK Flash_eraseBlk/Flash_write
+ * entirely. Bench evidence: SDK paths silently no-op on Cypress S25HL512T
+ * in the SBL context. Iteration 1 (this commit's port) successfully wrote
+ * boot_count=2 to OSPI but bricked STORAGE because sbl_hal_flash_write left
+ * DAC mode enabled and main.c expects DAC disabled across
+ * Bootloader_parseAndLoadMultiCoreELF. Iteration 2 disables DAC at end of
+ * sbl_hal_flash_write (mirroring hal_flash_read_dac's
+ * save-and-restore pattern). The atomic metadata-block dance is the same
+ * approach as Platform/nova_fw_update.c::write_meta_block_atomic:
  *
- *   1. Read the existing 64 KB sector (or at least the first 256 B —
- *      everything else stays 0xFF after erase).
- *   2. Erase the 64 KB block.
- *   3. Program back the updated FwBootMeta + the existing Bank A header.
+ *   1. Read existing Bank A + Bank B headers.
+ *   2. Build two 4-KB scratch sectors in BSS (sec_a holds FwBootMeta +
+ *      Bank A header at +0x80; sec_b holds Bank B header at +0x00).
+ *   3. Erase the 256-KB block at SBL_FW_HEADER_OFFSET (Cypress S25HL512T
+ *      only honors block-erase 0xDC; sector erase 0x20/0x21 wedges the
+ *      OSPI controller).
+ *   4. DAC-write both sectors via sbl_hal_flash_write — Bank B header at
+ *      0x310000 is preserved across the block erase because step 4
+ *      programs it back.
  *
- * Bank B's header lives in a separate sector (FW_BANK_B_HDR_SECTOR),
- * untouched here. That's the whole point of the dual-sector layout —
- * updating bank A metadata cannot wipe bank B and vice versa.
- *
- * The 0.A.208 SBL-preserve invariant (CLAUDE.md #11): the OSPI DAC bit
- * must NOT be toggled between sub-page programs. The SBL hasn't enabled
- * DAC yet, so this code path is safe — Flash_write goes through
- * indirect mode end-to-end.
- */
+ * See memories/repo/sbl-chooser-wcc-bug-2026-05-31.md for the full
+ * negative rollback test that motivated this. */
+#define SBL_FW_SECTOR_SIZE  4096U
+static uint8_t s_sec_a[SBL_FW_SECTOR_SIZE];   /* sector at SBL_FW_HEADER_OFFSET (0x300000) */
+static uint8_t s_sec_b[SBL_FW_SECTOR_SIZE];   /* sector at SBL_FW_BANK_B_HDR_SECTOR (0x310000) */
+
 static int32_t write_boot_meta(Flash_Handle f, const SblFwBootMeta *meta)
 {
-    /* Read back the existing Bank A header so we can re-program it
-     * alongside the updated meta in the same erased block. */
+    /* Read existing Bank A + Bank B headers so we can repack them
+     * around the new FwBootMeta. */
     SblFwBankHeader hdr_a;
+    SblFwBankHeader hdr_b;
     int32_t status = read_bank_header(f, 0, &hdr_a);
     if (status != SystemP_SUCCESS) return status;
-
-    /* Erase the 64 KB sector at FW_HEADER_OFFSET. Flash_eraseBlk takes
-     * a byte address and snaps to the underlying block size (64 KB on
-     * W25Q128JV). */
-    status = Flash_eraseBlk(f, SBL_FW_HEADER_OFFSET);
+    status = read_bank_header(f, 1, &hdr_b);
     if (status != SystemP_SUCCESS) return status;
 
-    /* Program FwBootMeta at offset 0. */
-    status = Flash_write(f,
-                         SBL_FW_HEADER_OFFSET + SBL_FW_BOOT_META_OFFSET,
-                         (uint8_t *)meta, sizeof(*meta));
-    if (status != SystemP_SUCCESS) return status;
+    /* Build the two 4-KB scratch sectors. Init to 0xFF so the unused
+     * remainder matches post-erase state. */
+    memset(s_sec_a, 0xFF, sizeof(s_sec_a));
+    memcpy(s_sec_a + SBL_FW_BOOT_META_OFFSET,  meta,   sizeof(*meta));
+    memcpy(s_sec_a + SBL_FW_BANK_A_HDR_OFFSET, &hdr_a, sizeof(hdr_a));
 
-    /* Re-program Bank A header at offset +0x80. */
-    status = Flash_write(f,
-                         SBL_FW_HEADER_OFFSET + SBL_FW_BANK_A_HDR_OFFSET,
-                         (uint8_t *)&hdr_a, sizeof(hdr_a));
-    return status;
+    memset(s_sec_b, 0xFF, sizeof(s_sec_b));
+    memcpy(s_sec_b + SBL_FW_BANK_B_HDR_OFFSET, &hdr_b, sizeof(hdr_b));
+
+    /* Erase the 256-KB block via bare-metal STIG (bypasses SDK). */
+    int rce = sbl_hal_flash_erase_block(SBL_FW_HEADER_OFFSET);
+    if (rce != 0) {
+        DebugP_log("[SBL] write_boot_meta: erase failed rc=%d\r\n", rce);
+        return (int32_t)rce;
+    }
+
+    /* Write both sectors via bare-metal DAC. sbl_hal_flash_write
+     * captures+restores DAC state so the SDK's follow-on
+     * Bootloader_parseAndLoadMultiCoreELF sees the OSPI controller in
+     * the mode it expects (DAC disabled until main.c:243). */
+    int rca = sbl_hal_flash_write(SBL_FW_HEADER_OFFSET, s_sec_a, sizeof(s_sec_a));
+    if (rca != 0) {
+        DebugP_log("[SBL] write_boot_meta: sec_a write failed rc=%d\r\n", rca);
+        return (int32_t)rca;
+    }
+    int rcb = sbl_hal_flash_write(SBL_FW_BANK_B_HDR_SECTOR, s_sec_b, sizeof(s_sec_b));
+    if (rcb != 0) {
+        DebugP_log("[SBL] write_boot_meta: sec_b write failed rc=%d\r\n", rcb);
+        return (int32_t)rcb;
+    }
+    return SystemP_SUCCESS;
 }
 
 /* ─── Selection algorithm ────────────────────────────────────────────── */

@@ -39,6 +39,7 @@ endif
 FILES_common := \
 	main.c \
 	sbl_bank_select.c \
+	sbl_hal_flash.c \
 	ti_drivers_config.c \
 	ti_drivers_open_close.c \
 	ti_board_config.c \
