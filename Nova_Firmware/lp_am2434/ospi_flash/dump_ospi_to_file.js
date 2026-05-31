@@ -101,7 +101,37 @@ function go() {
      * Drivers_open-clean within ~2 s; we wait a generous 5 s. */
     java.lang.Thread.sleep(5000);
     dsR5_0.target.halt();
-    print("  Flasher halted in poll loop, OSPI XIP region live.");
+    print("  Flasher halted in poll loop.");
+
+    /* ─── Enable OSPI DAC mode for XIP reads ─────────────────────────
+     * The flasher's Drivers_open puts the controller in indirect mode
+     * (the flasher only uses Flash_read/Flash_write which are STIG/
+     * indirect ops). XIP reads at 0x60000000 require DAC mode bit set
+     * in CONFIG_REG (HAL_OSPI_BASE = 0x0FC40000, bit 7 = ENB_DIR_ACC).
+     * Without this, all XIP reads return 0x00.
+     *
+     * Discovered 2026-05-31 when dump_ospi_to_file.js returned all
+     * zeros from 0x60300000 — same code path that worked yesterday
+     * for OSPI 0x60000000 (the SBL region). Difference: dump was
+     * being attempted DEEPER into the chip, where the auto-flasher's
+     * implicit XIP window must not extend. The fix (enable DAC bit
+     * + write 0x04000000 to IND_AHB_ADDR_TRIGGER) mirrors what
+     * hal_flash_dac_pp_one does on every write call.
+     *
+     * Safe because we're halted — no concurrent ops. */
+    var HAL_OSPI_CONFIG_REG               = 0x0FC40000;
+    var HAL_OSPI_IND_AHB_ADDR_TRIGGER     = 0x0FC4001C;
+    var HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT = 0x80;
+    var cfg_pre = dsR5_0.memory.readData(0, HAL_OSPI_CONFIG_REG, 32) & 0xFFFFFFFF;
+    print("  CONFIG_REG before: 0x" + java.lang.Long.toHexString(cfg_pre & 0xFFFFFFFF));
+    if ((cfg_pre & HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT) == 0) {
+        dsR5_0.memory.writeWord(0, HAL_OSPI_CONFIG_REG, cfg_pre | HAL_OSPI_CFG_ENB_DIR_ACC_CTLR_BIT);
+        dsR5_0.memory.writeWord(0, HAL_OSPI_IND_AHB_ADDR_TRIGGER, 0x04000000);
+        var cfg_post = dsR5_0.memory.readData(0, HAL_OSPI_CONFIG_REG, 32) & 0xFFFFFFFF;
+        print("  CONFIG_REG after enable: 0x" + java.lang.Long.toHexString(cfg_post & 0xFFFFFFFF));
+    } else {
+        print("  DAC already enabled.");
+    }
 
     print("=== Step 3: Read OSPI XIP region (byte-by-byte) ===");
     /* The 4-arg readData(pageId, addr, sizeBits, count) overload returns
@@ -115,6 +145,9 @@ function go() {
     var progressEvery = 0x10000;  // 64 KB
     for (var i = 0; i < dumpSize; i++) {
         var b = dsR5_0.memory.readData(0, xipAddr + i, 8) & 0xff;
+        /* Java byte is signed [-128..127]; values >127 need wrapping
+         * to the negative half so the byte-array assignment is in range. */
+        if (b > 127) b = b - 256;
         buf[bufIdx++] = b;
         if (bufIdx == 4096) {
             fos.write(buf, 0, 4096);
