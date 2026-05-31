@@ -98,6 +98,11 @@ param(
     # -StorageOnly. Added 2026-05-31 during OrbitFinalize integration bench
     # (GDC offline blocked full-fleet round 2).
     [switch]$TritonOnly,
+    # Emit a .cfu with ONLY the gdc component (slot=1, role=2, ip=$GdcIp).
+    # Used to bench round-2 OrbitFinalize on a single orbit. Mirrors
+    # -StorageOnly / -TritonOnly. Added 2026-05-31 after GDC was JTAG-
+    # recovered post-round-1 brick.
+    [switch]$GdcOnly,
     # F2c manufacturing-bundle flag -- also stage the SBL chooser binary into
     # the .cfu zip and add an `sbl_chooser` manifest entry. The runtime
     # OTA installer does NOT auto-flash the SBL today (separate design
@@ -250,6 +255,21 @@ try {
                 }
             }
         }
+    } elseif ($GdcOnly) {
+        $manifestObj = [ordered]@{
+            schema     = 'constellation-firmware/v1'
+            version    = $fwVersion
+            build_date = $buildDate
+            components = [ordered]@{
+                gdc = [ordered]@{
+                    file   = 'nova_lp.release.mcelf.hs_fs'
+                    slot   = 1
+                    role   = 2   # ORBIT_ROLE_GDC
+                    ip     = $GdcIp
+                    sha256 = $sha
+                }
+            }
+        }
     } else {
         $manifestObj = [ordered]@{
             schema     = 'constellation-firmware/v1'
@@ -330,6 +350,7 @@ try {
     $suffix  = if ($StorageOnly) { '-storage-only' }
                elseif ($ControllerOnly) { '-controller-only' }
                elseif ($TritonOnly) { '-triton-only' }
+               elseif ($GdcOnly) { '-gdc-only' }
                else { '' }
     $cfuPath = Join-Path $BundlesDir "constellation-$Version$suffix.cfu"
     if (Test-Path $cfuPath) { Remove-Item $cfuPath -Force }
