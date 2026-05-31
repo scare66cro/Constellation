@@ -92,6 +92,12 @@ param(
     # in isolation from the orbit OTA path (lp_ota_task.c) when orbit boards
     # are wedged or unavailable. Install goes straight to controller-self-update.
     [switch]$ControllerOnly,
+    # Emit a .cfu with ONLY the triton component (slot=2, role=3, ip=$TritonIp).
+    # Used when one of the other orbits is offline and would otherwise abort
+    # the full-fleet install at the broker fleet-probe gate. Mirrors
+    # -StorageOnly. Added 2026-05-31 during OrbitFinalize integration bench
+    # (GDC offline blocked full-fleet round 2).
+    [switch]$TritonOnly,
     # F2c manufacturing-bundle flag -- also stage the SBL chooser binary into
     # the .cfu zip and add an `sbl_chooser` manifest entry. The runtime
     # OTA installer does NOT auto-flash the SBL today (separate design
@@ -229,6 +235,21 @@ try {
                 }
             }
         }
+    } elseif ($TritonOnly) {
+        $manifestObj = [ordered]@{
+            schema     = 'constellation-firmware/v1'
+            version    = $fwVersion
+            build_date = $buildDate
+            components = [ordered]@{
+                triton = [ordered]@{
+                    file   = 'nova_lp.release.mcelf.hs_fs'
+                    slot   = 2
+                    role   = 3   # ORBIT_ROLE_TRITON
+                    ip     = $TritonIp
+                    sha256 = $sha
+                }
+            }
+        }
     } else {
         $manifestObj = [ordered]@{
             schema     = 'constellation-firmware/v1'
@@ -308,6 +329,7 @@ try {
     }
     $suffix  = if ($StorageOnly) { '-storage-only' }
                elseif ($ControllerOnly) { '-controller-only' }
+               elseif ($TritonOnly) { '-triton-only' }
                else { '' }
     $cfuPath = Join-Path $BundlesDir "constellation-$Version$suffix.cfu"
     if (Test-Path $cfuPath) { Remove-Item $cfuPath -Force }
