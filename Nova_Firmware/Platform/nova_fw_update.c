@@ -662,6 +662,60 @@ void NovaFwUpdate_Abort(void)
     s_total_size = 0;
 }
 
+/* ─── Orbit-OTA path metadata helper ─────────────────────────────────────
+ * Used by lp_ota_task.c's FwActivate handler. The orbit OTA path has its
+ * own chunk-tracking state machine separate from NovaFwUpdate's state,
+ * so we can't just call Finalize+Activate (those expect s_target_bank /
+ * s_total_size / etc. to have been set via Begin / WriteChunk). This
+ * helper takes the orbit-OTA-tracked values and writes the F2c metadata.
+ *
+ * See nova_fw_update.h for full contract.
+ *
+ * Added 2026-05-31 after F2c rollback was proven on silicon (the chooser
+ * works; the orbit OTA path just wasn't telling it Bank B was newer). */
+uint32_t NovaFwUpdate_OrbitFinalize(uint32_t image_size,
+                                    uint32_t image_crc,
+                                    const char *version)
+{
+    /* Build the new Bank B header. */
+    FwBankHeader new_b;
+    memset(&new_b, 0, sizeof(new_b));
+    new_b.magic      = FW_BANK_MAGIC;
+    new_b.image_size = image_size;
+    new_b.image_crc  = image_crc;
+    new_b.valid      = 1U;
+    new_b.active     = 1U;
+
+    /* Sequence: strictly higher than both existing banks so the F2c
+     * chooser's pick_bank picks Bank B by sequence on next boot. */
+    uint32_t maxSeq = s_bank_a_hdr.sequence;
+    if (s_bank_b_hdr.sequence > maxSeq) maxSeq = s_bank_b_hdr.sequence;
+    new_b.sequence = maxSeq + 1U;
+
+    if (version != NULL) {
+        strncpy(new_b.version, version, sizeof(new_b.version) - 1U);
+        new_b.version[sizeof(new_b.version) - 1U] = '\0';
+    }
+
+    /* Update in-RAM caches that write_meta_block_atomic flushes. */
+    s_bank_b_hdr = new_b;
+    s_bank_a_hdr.active = 0U;            /* old active bit cleared */
+    s_boot_meta.watchdog_strikes = 0U;   /* fresh strike budget for new image */
+    s_boot_meta.boot_reason = 0U;        /* normal-boot expected */
+    s_active_bank = 1U;                  /* Bank B is the new active bank */
+
+    debug_printf("[FwUpd] OrbitFinalize: seq=%lu valid=1 active=1 size=%lu crc=0x%08lX version='%s'\r\n",
+                 (unsigned long)new_b.sequence,
+                 (unsigned long)image_size,
+                 (unsigned long)image_crc,
+                 version ? version : "(null)");
+
+    /* Persist all three (FwBootMeta, Bank A header, Bank B header) in
+     * one erase-write cycle of the 256-KB block at 0x300000. */
+    write_meta_block_atomic();
+    return 0U;
+}
+
 /* ─── Validate a bank (read back + CRC check) ────────────────────────── */
 
 bool NovaFwUpdate_ValidateBank(uint32_t bank)

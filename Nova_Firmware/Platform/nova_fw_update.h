@@ -185,6 +185,32 @@ void NovaFwUpdate_BootValidation(void);
 /** Called by application after successful boot (clears watchdog strikes) */
 void NovaFwUpdate_ConfirmBoot(void);
 
+/** Orbit-OTA path metadata-write helper. After lp_ota_task.c has
+ *  written + CRC-verified the new image at Bank B (OSPI 0x900000),
+ *  call this to update the FwBankHeader at OSPI 0x310000 + the
+ *  Bank A header's active bit + FwBootMeta strikes so the F2c
+ *  chooser picks Bank B on next boot.
+ *
+ *  - Writes Bank B FwBankHeader with magic=NOVA, valid=1, active=1,
+ *    sequence = max(A.seq, B.seq) + 1, the supplied image_size /
+ *    image_crc / version.
+ *  - Flips s_bank_a_hdr.active = 0.
+ *  - Sets s_boot_meta.watchdog_strikes = 0 (fresh strike budget
+ *    for the new image).
+ *  - Calls write_meta_block_atomic to persist all three to OSPI.
+ *
+ *  Does NOT touch image data at 0x900000 or 0x080000 — caller has
+ *  already written those via the OTA chunk path.
+ *
+ *  Does NOT initiate a SoC warm reset — caller (lp_ota_task.c
+ *  FwActivate handler) does that after this returns and after the
+ *  optional legacy stage-copy.
+ *
+ *  Returns 0 on success.  */
+uint32_t NovaFwUpdate_OrbitFinalize(uint32_t image_size,
+                                    uint32_t image_crc,
+                                    const char *version);
+
 /* ─── Firmware Image Signing ──────────────────────────────────────────── */
 /*
  * Images must include a 256-byte signature trailer:

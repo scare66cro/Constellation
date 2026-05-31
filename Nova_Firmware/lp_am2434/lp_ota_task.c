@@ -1426,6 +1426,45 @@ static bool service_conn(ota_conn_t *c)
                 /* Real activate: close Enet, copy B → A, warm-reset. */
                 DebugP_log("[OTA] reboot=1 — closing Enet for stage-copy + reboot\r\n");
 
+                /* F2c metadata write (added 2026-05-31). All 4 bench boards
+                 * now run the sbl_chooser, so we MUST also write proper
+                 * Bank B FwBankHeader + clear strikes + flip Bank A active=0
+                 * so the chooser picks Bank B on next boot. Without this,
+                 * the chooser would still pick Bank A (per the seed metadata)
+                 * and load 0x080000 — which only works because stage-copy
+                 * below mirrors Bank B's image to 0x080000. That's the
+                 * "TI stock SBL fallback" path. The F2c metadata write
+                 * gives us the proper "boot Bank B from 0x900000" path
+                 * which is what enables rollback if a future OTA fails.
+                 *
+                 * Order matters: do this BEFORE stage-copy so even if the
+                 * stage-copy or its warm-reset wedges, the metadata is on
+                 * flash and the next boot still gets the new image (via
+                 * F2c picking Bank B at 0x900000).
+                 *
+                 * Stage-copy kept as defence-in-depth for boards that
+                 * somehow boot the old TI stock SBL (e.g., if F2c chooser
+                 * is corrupted at 0x000000). Can be removed once we have
+                 * a runtime check "is F2c on the chip?" and confirm yes.
+                 *
+                 * See memories/repo/f2c-rollback-proven-2026-05-31.md
+                 * for the rollback proof; this closes the orbit OTA
+                 * integration gap from
+                 * memories/repo/ota-plus-f2c-integration-gap-2026-05-30.md. */
+                {
+                    extern uint32_t NovaFwUpdate_OrbitFinalize(uint32_t, uint32_t, const char *);
+                    DebugP_log("[OTA] F2c metadata: NovaFwUpdate_OrbitFinalize(size=%lu, crc=0x%08lX, version='%s')\r\n",
+                               (unsigned long)s_image_total_size,
+                               (unsigned long)s_image_expected_crc,
+                               s_image_staged_version);
+                    uint32_t f2c_rc = NovaFwUpdate_OrbitFinalize(
+                        s_image_total_size,
+                        s_image_expected_crc,
+                        s_image_staged_version);
+                    DebugP_log("[OTA] F2c metadata write rc=%lu\r\n",
+                               (unsigned long)f2c_rc);
+                }
+
                 /* Silence PHY-poll task FIRST, then EnetApp_driverClose.
                  * Without this, the polling task fires assertions on the
                  * just-closed handle and wedges CPU at 100 %. */
