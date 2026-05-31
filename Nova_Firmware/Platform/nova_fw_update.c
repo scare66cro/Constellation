@@ -687,10 +687,19 @@ uint32_t NovaFwUpdate_OrbitFinalize(uint32_t image_size,
     new_b.active     = 1U;
 
     /* Sequence: strictly higher than both existing banks so the F2c
-     * chooser's pick_bank picks Bank B by sequence on next boot. */
-    uint32_t maxSeq = s_bank_a_hdr.sequence;
-    if (s_bank_b_hdr.sequence > maxSeq) maxSeq = s_bank_b_hdr.sequence;
-    new_b.sequence = maxSeq + 1U;
+     * chooser's pick_bank picks Bank B by sequence on next boot.
+     *
+     * Guard each bank's sequence on magic validity. A blank OSPI sector
+     * (all 0xFF, as Write-SeedMetaBlock.ps1 leaves the Bank B sector)
+     * loads as sequence=0xFFFFFFFF; using that as `maxSeq` overflows to
+     * 0 on `+1`, producing a Bank B header with seq=0 < Bank A's seq=1
+     * — chooser then picks A and ignores our new bank. Discovered
+     * 2026-05-31: TRITON + GDC hit this because their Bank B sectors
+     * stayed blank from the F2c seeding step; STORAGE escaped because
+     * yesterday's rollback test left magic=NOVA bytes at 0x310000. */
+    uint32_t aSeq = (s_bank_a_hdr.magic == FW_BANK_MAGIC) ? s_bank_a_hdr.sequence : 0U;
+    uint32_t bSeq = (s_bank_b_hdr.magic == FW_BANK_MAGIC) ? s_bank_b_hdr.sequence : 0U;
+    new_b.sequence = ((aSeq > bSeq) ? aSeq : bSeq) + 1U;
 
     if (version != NULL) {
         strncpy(new_b.version, version, sizeof(new_b.version) - 1U);
