@@ -86,6 +86,12 @@ typedef struct NovaFwFleetMember {
     bool     bank_b_valid;                       /* proto field 7 */
     uint32_t boot_count;                         /* proto field 8 */
     char     error[NOVA_OTA_PUSH_ERROR_MAX];     /* proto field 9 — set when !reachable */
+    uint32_t boot_reason;                        /* proto field 10 — SBL chooser writes
+                                                  * 0=normal, 1=watchdog, 2=FALLBACK
+                                                  * (skip-highest fired after strikes>=3).
+                                                  * Added 0.A.213 for probe-side rollback
+                                                  * observability — see memories/repo/
+                                                  * sbl-chooser-wcc-bug-2026-05-31.md. */
 } NovaFwFleetMember;
 
 /* ─── Result codes ────────────────────────────────────────────────────

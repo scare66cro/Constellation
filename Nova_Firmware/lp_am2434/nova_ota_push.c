@@ -316,6 +316,7 @@ typedef struct {
     char     bank_b_version[NOVA_OTA_PUSH_VERSION_MAX];
     bool     bank_b_valid;
     uint32_t boot_count;
+    uint32_t boot_reason;         /* SBL chooser writes 2 (FALLBACK) when skip-highest fires */
     uint32_t current_role;        /* 0 = CONTROLLER (force-emitted by LP) */
     bool     has_current_role;    /* true if LP firmware emitted field 11 */
 } LpBankInfo;
@@ -352,8 +353,9 @@ static void decode_bank_info(const uint8_t *body, size_t len, LpBankInfo *out)
             else if (field == 4u)  out->bank_a_valid     = (v != 0u);
             else if (field == 7u)  out->bank_b_valid     = (v != 0u);
             else if (field == 9u)  out->boot_count       = v;
+            else if (field == 10u) out->boot_reason      = v;
             else if (field == 11u) { out->current_role   = v; out->has_current_role = true; }
-            /* field 6 bank_b_crc, field 10 boot_reason — ignored */
+            /* field 6 bank_b_crc — ignored */
         } else if (wire == 2u && (field == 2u || field == 5u || field == 8u)) {
             uint32_t slen;
             size_t ln = dec_varint(body + pos, len - pos, &slen);
@@ -934,6 +936,7 @@ static void probe_one_host(const char *ipstr, uint32_t timeout_ms,
     out->bank_a_valid = bi.bank_a_valid;
     out->bank_b_valid = bi.bank_b_valid;
     out->boot_count   = bi.boot_count;
+    out->boot_reason  = bi.boot_reason;
     /* active version: pick A or B by active_bank. */
     const char *src = (bi.active_bank == 1u /* BankB */)
                     ? bi.bank_b_version : bi.bank_a_version;

@@ -505,7 +505,7 @@ static size_t emit_install_result(uint32_t    overall,
  *   1 host (string), 2 reachable (bool), 3 current_role (force),
  *   4 active_version (string), 5 active_bank (varint),
  *   6 bank_a_valid (bool), 7 bank_b_valid (bool),
- *   8 boot_count (varint), 9 error (string).
+ *   8 boot_count (varint), 9 error (string), 10 boot_reason (varint).
  * Returns bytes written. */
 static size_t emit_fleet_member(uint8_t *dst, const NovaFwFleetMember *m)
 {
@@ -535,6 +535,12 @@ static size_t emit_fleet_member(uint8_t *dst, const NovaFwFleetMember *m)
     }
     if (!m->reachable && m->error[0]) {
         n += bk_pb_string(dst + n, 9u, m->error);
+    }
+    if (m->boot_reason != 0u) {
+        /* 0=normal, 1=watchdog, 2=FALLBACK (skip-highest fired).
+         * Added 0.A.213 for probe-side rollback observability. */
+        n += bk_encode_tag(dst + n, 10u, 0u);
+        n += bk_encode_varint(dst + n, m->boot_reason);
     }
     return n;
 }

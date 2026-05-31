@@ -401,6 +401,7 @@ app.get('/api/_debug/broker-fleet-probe', async (_req, res) => {
         bank_b_valid:   pbGetVarint(f, 7) !== 0,
         boot_count:     fmtBootCount(pbGetVarint(f, 8)),
         error:          pbGetString(f, 9),
+        boot_reason:    pbGetVarint(f, 10),  // 0=normal, 1=watchdog, 2=FALLBACK (skip-highest fired)
       };
     });
     res.json({ ok: true, members, rawHex: raw.toString('hex'), elapsed_ms: Date.now() - t0 });
