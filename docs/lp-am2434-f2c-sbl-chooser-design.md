@@ -2,9 +2,19 @@
 
 > **Status:** Sessions 1, 2, and 3 COMPLETE 2026-05-30. **F2c SBL
 > chooser is flashed on all 4 bench boards** (.1 CONTROLLER, .2 STORAGE,
-> .3 GDC, .4 TRITON) and end-to-end verified via the bridge's
-> `broker-fleet-probe` showing `active_version="seed"` on the 3 orbits
-> + `bridge.nova.connected:true` on CONTROLLER.
+> .3 GDC, .4 TRITON).
+>
+> **🎯 ROLLBACK PROVEN END-TO-END ON REAL SILICON 2026-05-31.**
+> Both paths verified on STORAGE: higher-sequence-wins AND
+> Bank-A-invalid-fall-back-to-B. Bridge `broker-fleet-probe` confirmed
+> `active_version="0.A.208-bank-b"`, `active_bank=1`. Required a
+> one-line fix to `sbl_chooser/main.c` — the chooser was patching
+> only `Bootloader_FlashArgs::appImageOffset` but `Flash_imgOpen`
+> latches `curOffset = appImageOffset` at Open time, so the very
+> first read used the old value. Fix: also patch `fa->curOffset =
+> sel.flash_off;` after the existing patch. Full investigation +
+> related strikes-accumulation gotcha in
+> [`memories/repo/f2c-rollback-proven-2026-05-31.md`](../memories/repo/f2c-rollback-proven-2026-05-31.md).
 >
 > **Goal achieved:** unattended OTA recovery. A bad Bank-B image cannot
 > permanently brick a customer panel — after three failed boots the

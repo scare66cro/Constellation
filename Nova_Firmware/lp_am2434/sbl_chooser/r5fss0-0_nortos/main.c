@@ -160,8 +160,23 @@ int main(void)
              * to point at that bank's image. The Bootloader_open() call
              * above wired in the SysConfig default (0x080000, matching
              * Bank A for the migration-free first flash). We patch
-             * Bootloader_FlashArgs::appImageOffset before
+             * Bootloader_FlashArgs::appImageOffset AND curOffset before
              * parseAndLoadMultiCoreELF reads the image.
+             *
+             * Why both: Bootloader_open() runs Flash_imgOpen() which
+             * sets `curOffset = appImageOffset` at that moment (see
+             * bootloader_flash.c line 57 in the SDK). The first
+             * Flash_imgRead from parseAndLoadMultiCoreELF reads at
+             * `curOffset`, NOT `appImageOffset`. If we only patch
+             * appImageOffset, the very first read goes to the old
+             * SysConfig offset (0x080000); subsequent Seek-based
+             * reads use the new appImageOffset, but the initial
+             * X.509 cert + image-header parse fails because it
+             * starts from the wrong place. Discovered 2026-06-01
+             * after Bank B boot failure on STORAGE — the chooser
+             * picked Bank B correctly but the bootloader was still
+             * reading the first chunk from 0x080000 because
+             * Flash_imgOpen had latched the old value.
              *
              * Detailed algorithm in docs/lp-am2434-f2c-sbl-chooser-design.md §4.
              * Session 1's heartbeat hook in lp_watchdog_client.c clears
@@ -182,6 +197,12 @@ int main(void)
                     Bootloader_FlashArgs *fa =
                         (Bootloader_FlashArgs *)cfg->args;
                     fa->appImageOffset = sel.flash_off;
+                    /* CRITICAL: also patch curOffset. Flash_imgOpen
+                     * (called inside Bootloader_open above) has
+                     * already set curOffset = (old) appImageOffset,
+                     * so we must re-sync it or the first read goes
+                     * to the wrong place. */
+                    fa->curOffset      = sel.flash_off;
                 }
                 else
                 {

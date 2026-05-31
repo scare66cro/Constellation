@@ -83,10 +83,23 @@ $payload = New-Object byte[] $payloadSize
 for ($i = 0; $i -lt $payloadSize; $i++) { $payload[$i] = 0xFF }
 
 # --- FwBootMeta at offset 0x00 (128 bytes) -------------------------------
-# Preserve seed: boot_count=1, boot_reason=0, watchdog_strikes=1
+# Reset boot_count=1, boot_reason=0, watchdog_strikes=0.
+#
+# IMPORTANT: strikes MUST start at 0. The SBL chooser bumps strikes by 1 on
+# every boot, then write_boot_meta persists it. If the app's ConfirmBoot
+# path isn't clearing strikes back to 0 (see boot_count-stuck-at-1
+# investigation), strikes accumulate. When strikes >= 3, pick_bank's
+# "skip the highest-sequence bank" fallback activates -- if there's no
+# valid second bank to fall to, the chooser returns GOLDEN (no Golden
+# image flashed) and the board goes into SBL FATAL. Discovered 2026-06-01
+# when recovery to "Bank A active, Bank B invalid" repeatedly bricked
+# STORAGE after a few boots: my old payload wrote strikes=1, chooser
+# bumped to 2 on first boot, 3 on second -> skip-highest triggered ->
+# only Bank B available as fallback (and that needed to be valid in
+# this scenario for it to work).
 [System.BitConverter]::GetBytes([uint32]1).CopyTo($payload, 0x00)  # boot_count
 [System.BitConverter]::GetBytes([uint32]0).CopyTo($payload, 0x04)  # boot_reason
-[System.BitConverter]::GetBytes([uint32]1).CopyTo($payload, 0x08)  # watchdog_strikes
+[System.BitConverter]::GetBytes([uint32]0).CopyTo($payload, 0x08)  # watchdog_strikes
 # bytes 0x0C..0x7F stay 0xFF
 
 # --- Bank A FwBankHeader at offset 0x80 (136 bytes) ----------------------
