@@ -1496,24 +1496,39 @@ static bool service_conn(ota_conn_t *c)
                 }
 
                 /* CANCEL any stuck INDIRECT_WRITE_XFER state before the
-                 * Bank A erase loop inside lp_ota_stage_copy_b_to_a. */
+                 * chip soft-reset that follows. */
                 hal_flash_clear_indirect_state();
 
-                /* Stage copy Bank B → Bank A using hal_flash_write_dac.
-                 * Erases Bank A in 4 KB sectors then copies in 256-byte
-                 * pages. Total ~1 s for a 485 KB image. */
-                DebugP_log("[OTA] staging Bank B -> Bank A (%lu B)\r\n",
-                           (unsigned long)s_image_total_size);
-                if (lp_ota_stage_copy_b_to_a(s_image_total_size) != 0) {
-                    DebugP_log("[OTA] stage copy FAILED — Bank A may be partially overwritten. "
-                               "Recovery: re-flash via Flash-LP.ps1.\r\n");
-                    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
-                }
-                DebugP_log("[OTA] stage copy ok — warm-resetting into new firmware\r\n");
-                /* 0.A.162: 5-second pause after verify diagnostic so the
-                 * UART can drain and the bench operator can read the
-                 * A==B / A!=B verdict BEFORE warm-reset wipes the screen. */
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                /* Stage-copy Bank B -> Bank A is DISABLED as of 0.A.212.
+                 *
+                 * Rationale: stage-copy existed as defense-in-depth for
+                 * boards that booted the TI stock SBL (which only ever
+                 * loads from 0x080000 = Bank A). With the F2c SBL chooser
+                 * bench-validated on all 4 boards (commits 0.A.205 for
+                 * forward path, 0.A.211 for write_boot_meta persistence
+                 * — see memories/repo/sbl-chooser-wcc-bug-2026-05-31.md),
+                 * the chooser picks Bank B at 0x900000 by sequence on
+                 * every OTA cycle. Stage-copy never gets exercised in
+                 * the steady state, and worse it actively defeats the
+                 * rollback model — Bank A and Bank B should hold the
+                 * PREVIOUS and CURRENT firmware respectively so that a
+                 * watchdog-strike-triggered fallback to Bank A actually
+                 * recovers to a known-good prior version.
+                 *
+                 * Bench-2026-05-31 negative rollback test confirmed the
+                 * strike-counter persists (boot_count=6 on STORAGE after
+                 * 3 explicit system_resets) but rollback observability
+                 * via the probe was blocked by stage-copy making Bank A
+                 * IMAGE == Bank B IMAGE — disabling stage-copy here lets
+                 * the next OTA cycle leave Bank A on the previous
+                 * version, enabling a probe-side comparison after a
+                 * strike-triggered fallback.
+                 *
+                 * `lp_ota_stage_copy_b_to_a` function definition kept
+                 * intact (line 575) in case we ever need to re-enable
+                 * for a one-off recovery scenario. */
+                DebugP_log("[OTA] stage-copy DISABLED (0.A.212) — Bank A preserved for F2c rollback\r\n");
+                vTaskDelay(pdMS_TO_TICKS(500));
 
                 /* 0.A.163: send Cypress software reset BEFORE the SoC
                  * warm-reset. The chip's volatile config still says
