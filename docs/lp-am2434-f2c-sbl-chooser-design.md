@@ -13,17 +13,29 @@
 > (validated end-to-end 2026-05-29 on the 4-board fleet at 0.A.208),
 > this gives true field-deployable updates with no JTAG service trip.
 >
-> **Outstanding from bringup** (per
-> [`memories/repo/f2c-fleet-bringup-2026-05-30.md`](../memories/repo/f2c-fleet-bringup-2026-05-30.md)):
-> `boot_count` shows "1" on all 4 boards via FwBankInfo instead of the
-> expected "2" after SBL increment. Either `write_boot_meta` in
-> `sbl_bank_select.c` failed silently or the proto decode is off.
-> Verify next session by JTAG-reading raw OSPI `0x300000-0x300100`
-> bytes and comparing against the expected FwBootMeta+FwBankHeader
-> layout. Doesn't block correctness — the rollback path still works
-> (SBL bumps `strikes` in RAM regardless; if the OSPI write fails,
-> worst case is the rollback budget doesn't decrement between boots,
-> so a permabricked Bank B might take more than 3 boots to fall back).
+> **Outstanding from bringup** (per memory notes):
+>
+> 1. `boot_count` shows "1" on all 4 boards via FwBankInfo instead of
+>    the expected "2" after SBL increment. Either `write_boot_meta` in
+>    `sbl_bank_select.c` failed silently or the proto decode is off.
+>    Verify next session by JTAG-reading raw OSPI `0x300000-0x300100`
+>    bytes and comparing against the expected FwBootMeta+FwBankHeader
+>    layout.
+>    [`memories/repo/f2c-fleet-bringup-2026-05-30.md`](../memories/repo/f2c-fleet-bringup-2026-05-30.md).
+>
+> 2. **OTA install + F2c integration gap.** Post-OTA, the bridge
+>    reports `bank_b_valid:false` despite the install reaching
+>    `overallState:"done"`. Root cause: `lp_ota_stage_copy_b_to_a`
+>    in `lp_ota_task.c:559` is the legacy stage-copy path designed
+>    for TI stock SBL (hard-load at 0x080000) and does NOT write a
+>    proper Bank B FwBankHeader for the F2c chooser to find. Two
+>    boot-pick logics now coexist and disagree (sequence-based
+>    chooser pick vs. active-bit + stage-copy semantics). **F2c
+>    rollback to Bank B cannot be tested until this is fixed** —
+>    negative-test path (invalidate Bank A) would brick the board
+>    because no valid Bank B + no Golden = SBL FATAL. Full design
+>    + fix priorities in
+>    [`memories/repo/ota-plus-f2c-integration-gap-2026-05-30.md`](../memories/repo/ota-plus-f2c-integration-gap-2026-05-30.md).
 
 ---
 
