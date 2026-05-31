@@ -23,18 +23,23 @@
 >    layout.
 >    [`memories/repo/f2c-fleet-bringup-2026-05-30.md`](../memories/repo/f2c-fleet-bringup-2026-05-30.md).
 >
-> 2. **OTA install + F2c integration gap.** Post-OTA, the bridge
->    reports `bank_b_valid:false` despite the install reaching
->    `overallState:"done"`. Root cause: `lp_ota_stage_copy_b_to_a`
->    in `lp_ota_task.c:559` is the legacy stage-copy path designed
->    for TI stock SBL (hard-load at 0x080000) and does NOT write a
->    proper Bank B FwBankHeader for the F2c chooser to find. Two
->    boot-pick logics now coexist and disagree (sequence-based
->    chooser pick vs. active-bit + stage-copy semantics). **F2c
->    rollback to Bank B cannot be tested until this is fixed** —
+> 2. **OTA install + F2c integration gap.** Ground-truthed via JTAG-
+>    OSPI dump 2026-05-31. The orbit OTA Activate handler at
+>    `lp_ota_task.c:1468` calls `lp_ota_stage_copy_b_to_a` then warm-
+>    resets — it never calls `NovaFwUpdate_Finalize` or
+>    `NovaFwUpdate_Activate`. Result: stage-copy delivers the new image
+>    bytes to `0x080000` (so the new firmware DOES boot via the F2c
+>    chooser picking Bank A per the seed metadata), but **no bank
+>    headers or FwBootMeta are ever written by the orbit OTA path**.
+>    `boot_count` stays at seed, Bank B header stays `0xFFFFFFFF`, no
+>    `sequence` increment, no `active` swap. F2c rollback infra is
+>    bypassed entirely.
+>
+>    **F2c rollback to Bank B cannot be tested until this is fixed** —
 >    negative-test path (invalidate Bank A) would brick the board
->    because no valid Bank B + no Golden = SBL FATAL. Full design
->    + fix priorities in
+>    because no valid Bank B + no Golden = SBL FATAL.
+>
+>    Fix priorities + full bench investigation in
 >    [`memories/repo/ota-plus-f2c-integration-gap-2026-05-30.md`](../memories/repo/ota-plus-f2c-integration-gap-2026-05-30.md).
 
 ---
