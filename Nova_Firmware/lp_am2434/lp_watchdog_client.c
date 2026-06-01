@@ -37,6 +37,35 @@
 
 #include "lp_watchdog_ipc.h"
 #include "nova_fw_update.h"  /* NovaFwUpdate_ConfirmBoot — F2c Session 1 */
+#include "orbit_server/orbit_role.h"  /* required_mask is role-dependent */
+
+/* Per-role required mask. The compile-time LP_WD_REQUIRED_DEFAULT
+ * (in lp_watchdog_ipc.h) lists EVERY producer bit, but no single role
+ * raises all of them: only CONTROLLER runs lp_engine_task (bit 3) and
+ * only orbits run the Modbus accept loop (bit 0). Using the union mask
+ * makes `(alive & required) == required` permanently false on every
+ * role — strikes accumulate, ConfirmBoot never fires, and the chooser
+ * fires skip-highest every 3 boots forever. Found 2026-06-01 while
+ * chasing the boot_reason=0 puzzle from EOD 5/31. */
+static uint32_t compute_required_for_role(OrbitRole r)
+{
+    /* LWIP_LINK is the only producer auto-set on every role (lwIP netif
+     * flag, no producer hook needed). Every other bit's producer task
+     * is role-gated in main.c — pick the right one. */
+    uint32_t mask = LP_WD_ALIVE_LWIP_LINK;
+    if (r == ORBIT_ROLE_CONTROLLER) {
+        /* CONTROLLER runs `bridge_uart_task` (pings SYSTEMSTATUS — see
+         * main.c:2244) and `lp_engine_task` (pings ENGINE_TICK — see
+         * main.c:2311 and main.c:5207). No orbit Modbus accept loop. */
+        mask |= LP_WD_ALIVE_SYSTEMSTATUS | LP_WD_ALIVE_ENGINE_TICK;
+    } else {
+        /* STORAGE / GDC / TRITON / PULSAR run the orbit Modbus accept
+         * loop in orbit_modbus_tcp.c:295 (pings MODBUS once per select
+         * iteration). No bridge_uart upstream, no equipment engine. */
+        mask |= LP_WD_ALIVE_MODBUS;
+    }
+    return mask;
+}
 
 /* ─── Producer ping store ──────────────────────────────────────────
  * Per-bit "last time this subsystem reported alive" in ms (FreeRTOS
@@ -116,8 +145,14 @@ static void lp_watchdog_heartbeat_task(void *pvParameters)
 
     /* Phase 1: write required_mask BEFORE the magic. Watchdog may
      * read the struct any time but won't enter strict mode until
-     * magic == LP_WD_MAGIC. */
-    LP_WD_SHM_ADDR->required_mask  = LP_WD_REQUIRED_DEFAULT;
+     * magic == LP_WD_MAGIC.
+     *
+     * 2026-06-01: required_mask is now role-aware (see comment on
+     * compute_required_for_role above). Previously used the union
+     * LP_WD_REQUIRED_DEFAULT which no role could satisfy. */
+    const uint32_t required_for_this_role =
+        compute_required_for_role(OrbitRole_Get());
+    LP_WD_SHM_ADDR->required_mask  = required_for_this_role;
     LP_WD_SHM_ADDR->alive_bits     = 0u;
     LP_WD_SHM_ADDR->counter        = 0u;
     LP_WD_SHM_ADDR->main_uptime_ms = 0u;
@@ -129,8 +164,9 @@ static void lp_watchdog_heartbeat_task(void *pvParameters)
     LP_WD_SHM_ADDR->magic          = LP_WD_MAGIC;
     CacheP_wb((void *)LP_WD_SHM_ADDR, sizeof(LpWatchdogShm), CacheP_TYPE_ALL);
 
-    DebugP_log("[WD-CLIENT] heartbeat task started, required=0x%08x\r\n",
-               (unsigned)LP_WD_REQUIRED_DEFAULT);
+    DebugP_log("[WD-CLIENT] heartbeat task started, required=0x%08x (role=%s)\r\n",
+               (unsigned)required_for_this_role,
+               OrbitRole_Name(OrbitRole_Get()));
 
     for (;;) {
         const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -146,7 +182,7 @@ static void lp_watchdog_heartbeat_task(void *pvParameters)
          * all-required-bits-alive and clear OSPI strikes once the
          * threshold is hit. Runs at most once per boot. */
         if (!s_ota_confirmed) {
-            const uint32_t required = LP_WD_REQUIRED_DEFAULT;
+            const uint32_t required = required_for_this_role;
             if ((alive & required) == required) {
                 if (s_healthy_since_ms == 0u) {
                     s_healthy_since_ms = now_ms;
