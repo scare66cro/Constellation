@@ -255,6 +255,18 @@ extern void lwip_phy_fixup_task(void *args);
 static StackType_t  gPhyFixupStack[PHY_FIXUP_TASK_STACK] __attribute__((aligned(32)));
 static StaticTask_t gPhyFixupObj;
 
+/* NET-WATCHDOG task (0.A.216): polls MAC1 rxGoodFrames every 15 s and
+ * re-injects 100M-FD EXTPHY_LINKUP_EVENT if 60 s elapse with zero
+ * incoming frames. Defense in depth on top of the SDK-polling-stop in
+ * lwip_phy_fixup_task / lwip_smoke_task. Spawned for ALL roles —
+ * controller and orbits both vulnerable to the post-Activate
+ * MAC↔PHY rate-mismatch wedge. Long-running, no vTaskDelete. */
+extern void lwip_net_watchdog_task(void *args);
+#define NET_WD_TASK_PRI   (configMAX_PRIORITIES - 6)
+#define NET_WD_TASK_STACK (3072U / sizeof(configSTACK_DEPTH_TYPE))
+static StackType_t  gNetWdStack[NET_WD_TASK_STACK] __attribute__((aligned(32)));
+static StaticTask_t gNetWdObj;
+
 /* Orbit Modbus TCP server task — only spawned when the LP boots in an
  * orbit role (STORAGE / GDC / TRITON). Same priority as the smoke task
  * (well below bridge UART) since orbit polls are not latency critical.
@@ -2278,6 +2290,13 @@ int main(void)
             PHY_FIXUP_TASK_STACK, NULL, PHY_FIXUP_TASK_PRI,
             gPhyFixupStack, &gPhyFixupObj);
     }
+
+    /* NET-WATCHDOG (0.A.216) — defense-in-depth against the post-Activate
+     * MAC half-deaf wedge. Spawned for every role; harmless overhead
+     * (15-s poll cadence, ~3 KB stack). */
+    xTaskCreateStatic(lwip_net_watchdog_task, "net_wd",
+        NET_WD_TASK_STACK, NULL, NET_WD_TASK_PRI,
+        gNetWdStack, &gNetWdObj);
 
     if (role == ORBIT_ROLE_GDC) {
         bb_uart0_puts("[BB] GDC: pre OrbitGdc_Init\r\n");

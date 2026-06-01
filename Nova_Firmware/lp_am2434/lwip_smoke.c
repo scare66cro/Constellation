@@ -31,6 +31,14 @@
 
 #include "orbit_client.h"
 
+/* SDK polling-task control — used by the 0.A.216 post-fixup stop of the
+ * 1-sec polling task that re-injects the cached state->speed=1GBIT and
+ * causes the recurring post-Activate "half-deaf" wedge. See
+ * memories/repo/wd-required-mask-dead-confirmboot-2026-06-01.md and
+ * lp-am2434-cpsw-tx-debug.md update 12. The function lives in
+ * enet/test_enet_cpsw.c. */
+extern void EnetApp_stopPhyRegisterPollingTask(void);
+
 /* CPSW stats â€” diagnose where TX dies (host port? MAC port? PHY?) */
 #include <enet.h>
 #include <enet_cfg.h>
@@ -1041,6 +1049,113 @@ static void try_l2_probe(const char *label, const char *host, uint16_t port)
  * Runs once after lwIP comes up, then exits. Custom Nova hardware with
  * proper RGMII layout will be able to skip step 2 (re-validate via
  * gigabit_diag), but step 1 is harmless on any board. */
+/* ─── NET-WATCHDOG (2026-06-02, 0.A.216) ──────────────────────────────
+ *
+ * Defense-in-depth against the post-Activate "MAC half-deaf" wedge that
+ * survived the polling-task stop. Polls MAC1 rxGoodFrames every 15 s.
+ * If the counter stays unchanged for 4 consecutive checks (60 s with
+ * NO incoming frames at all), re-inject EXTPHY_LINKUP_EVENT with
+ * 100M-FD so the CPSW MAC1 RGMII clock generator gets reprogrammed.
+ *
+ * On a normally-functioning orbit, rxGoodFrames climbs ~once per
+ * controller Modbus poll (1 Hz) = ~60 frames/min minimum, so any 60 s
+ * with zero increment is unambiguously a wedge.
+ *
+ * Rationale: even with the polling task stopped (Fix 1 of this
+ * commit), the wedge could in principle still arise from some other
+ * race we haven't characterised. This watchdog catches it without
+ * needing operator intervention.
+ *
+ * See memories/repo/lp-am2434-storage-phy-wedge.md "Workaround for
+ * now" — this is the [NET-WATCHDOG] task that note flagged but was
+ * never built. */
+
+static uint32_t read_mac1_rxgood(void)
+{
+    Enet_Handle hEnet = Enet_getHandle(ENET_CPSW_3G, 0U);
+    if (hEnet == NULL) return 0u;
+    uint32_t coreId = EnetSoc_getCoreId();
+    CpswStats_MacPort_Ng macStats;
+    memset(&macStats, 0, sizeof(macStats));
+    Enet_MacPort port = ENET_MAC_PORT_1;
+    Enet_IoctlPrms prms;
+    int32_t status;
+    ENET_IOCTL_SET_INOUT_ARGS(&prms, &port, &macStats);
+    ENET_IOCTL(hEnet, coreId, ENET_STATS_IOCTL_GET_MACPORT_STATS, &prms, status);
+    if (status != ENET_SOK) return 0u;
+    return (uint32_t)macStats.rxGoodFrames;
+}
+
+static int32_t reinject_100m_link(void)
+{
+    Enet_Handle hEnet = Enet_getHandle(ENET_CPSW_3G, 0U);
+    if (hEnet == NULL) return -1;
+    uint32_t coreId = EnetSoc_getCoreId();
+    Enet_ExtPhyLinkUpEventInfo info = {
+        .macPort = ENET_MAC_PORT_1,
+        .phyLinkCfg = {
+            .speed     = ENETPHY_SPEED_100MBIT,
+            .duplexity = ENETPHY_DUPLEX_FULL,
+        },
+    };
+    Enet_IoctlPrms prms;
+    int32_t status;
+    ENET_IOCTL_SET_IN_ARGS(&prms, &info);
+    ENET_IOCTL(hEnet, coreId, ENET_PER_IOCTL_HANDLE_EXTPHY_LINKUP_EVENT,
+               &prms, status);
+    return status;
+}
+
+void lwip_net_watchdog_task(void *args)
+{
+    (void)args;
+
+    /* Let the fixup task complete first (it waits ~2.5 s for netif + 3 s
+     * for autoneg + ~3 s for the 10-iter check loop ≈ 9 s worst case).
+     * 15 s baseline gives generous margin. */
+    vTaskDelay(pdMS_TO_TICKS(15000));
+
+    DebugP_log("[NET-WD] task started — polling MAC1 rxGood every 15 s, "
+               "trigger on 4× unchanged (= 60 s no RX)\r\n");
+
+    uint32_t last_rxGood = read_mac1_rxgood();
+    uint32_t stuck_count = 0;
+    uint32_t recoveries = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(15000));
+
+        uint32_t now_rxGood = read_mac1_rxgood();
+        if (now_rxGood == last_rxGood) {
+            stuck_count++;
+            DebugP_log("[NET-WD] rxGood=%u stuck for %u/4 checks "
+                       "(recoveries so far=%u)\r\n",
+                       (unsigned)now_rxGood, (unsigned)stuck_count,
+                       (unsigned)recoveries);
+            if (stuck_count >= 4u) {
+                int32_t rc = reinject_100m_link();
+                recoveries++;
+                DebugP_log("[NET-WD] !!! 60 s no RX → re-injected 100M FD "
+                           "(rc=%d) — total recoveries=%u\r\n",
+                           (int)rc, (unsigned)recoveries);
+                stuck_count = 0;
+                /* Skip one cycle so the freshly-reprogrammed MAC has
+                 * time to actually see frames before we judge again. */
+                vTaskDelay(pdMS_TO_TICKS(15000));
+                last_rxGood = read_mac1_rxgood();
+            }
+        } else {
+            if (stuck_count > 0u) {
+                DebugP_log("[NET-WD] rxGood recovered: %u → %u (was stuck %u)\r\n",
+                           (unsigned)last_rxGood, (unsigned)now_rxGood,
+                           (unsigned)stuck_count);
+            }
+            stuck_count = 0;
+            last_rxGood = now_rxGood;
+        }
+    }
+}
+
 void lwip_phy_fixup_task(void *args)
 {
     (void)args;
@@ -1056,6 +1171,17 @@ void lwip_phy_fixup_task(void *args)
 
     restore_rgmii_ctl();
     downshift_phy_to_100m_aneg();
+
+    /* 0.A.216: stop the SDK polling task that races our 100M re-inject.
+     * Without this, the SDK task fires up to 1 s after our retry loop
+     * exits and reprograms MAC1 to the CACHED state->speed=1GBIT,
+     * leaving the MAC clocking at 125 MHz against a 25 MHz wire (the
+     * recurring post-Activate "half-deaf" wedge). Tradeoff: cable-
+     * unplug/replug is no longer auto-detected — acceptable for fixed
+     * industrial install. See lp-am2434-cpsw-tx-debug.md update 12
+     * for the race details. */
+    EnetApp_stopPhyRegisterPollingTask();
+    DebugP_log("[PHY-FIXUP] SDK polling task stopped (anti-race)\r\n");
 
     DebugP_log("[PHY-FIXUP] done\r\n");
     vTaskDelete(NULL);
@@ -1136,6 +1262,11 @@ void lwip_smoke_task(void *args)
     gigabit_diag();
 #else
     downshift_phy_to_100m_aneg();
+    /* 0.A.216: see comment in lwip_phy_fixup_task. Stops the SDK 1-sec
+     * polling task that races our 100M re-inject and causes the
+     * recurring post-Activate "half-deaf" wedge. */
+    EnetApp_stopPhyRegisterPollingTask();
+    DebugP_log("[SMOKE] SDK polling task stopped (anti-race)\r\n");
 #endif
 
     /* Phase C-ter (2026-04-25): multi-target L2 reachability probe.
