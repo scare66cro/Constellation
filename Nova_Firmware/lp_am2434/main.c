@@ -488,6 +488,7 @@ static size_t pb_skip_field(uint8_t wire, const uint8_t *buf, size_t len)
  *   122 OrbitRoleAssign        (persisted via LpSettings field 78)
  *   123 AoEquipAssign          (persisted via LpSettings field 80)
  *   125 TritonRegWrite         (Modbus passthrough to a remote orbit)
+ *   126 OrbitRegWrite          (role-agnostic FC06/FC16 to a remote orbit)
  *   130..136 Fw{Install,Fleet}* (forwarded to NovaOtaBroker_OnEnvelope)
  *
  * Future downlink commands extend the same switch — keep additions
@@ -745,6 +746,94 @@ static void bridge_rx_callback(const uint8_t *payload, size_t len)
                 DebugP_log("[RX] TritonRegWrite missing field(s) "
                            "(slot=%u addr=%u value=%u)\r\n",
                            have_slot, have_addr, have_value);
+            }
+            needs_ack = true;
+            continue;
+        }
+
+        if (field == 126U && wire == 2U) {
+            /* OrbitRegWrite — role-agnostic Modbus HR write. Phase 4b
+             * Sub-phase 2 (2026-06-01). Dispatches to FC06 for one
+             * value or FC16 for a multi-value block.
+             *
+             * Inner layout: { slot:varint=1, addr:varint=2,
+             *                 values: repeated uint32 (packed OR
+             *                 unpacked — accept both per proto3 spec). } */
+            uint32_t inner_len;
+            size_t ln = pb_decode_varint(payload + pos, len - pos, &inner_len);
+            if (ln == 0U || pos + ln + inner_len > len) return;
+            pos += ln;
+
+            const uint8_t *inner = payload + pos;
+            size_t ipos = 0;
+            uint32_t slot = 0, addr = 0;
+            bool have_slot = false, have_addr = false;
+            /* Worst-case 123 values (FC16 spec cap); accept up to that. */
+            uint16_t values[123];
+            uint16_t count = 0;
+            while (ipos < inner_len) {
+                uint32_t itag;
+                size_t in = pb_decode_varint(inner + ipos, inner_len - ipos, &itag);
+                if (in == 0U) break;
+                ipos += in;
+                const uint32_t ifield = itag >> 3;
+                const uint8_t  iwire  = (uint8_t)(itag & 0x07U);
+                if (iwire == 0U) {
+                    uint32_t v;
+                    size_t vn = pb_decode_varint(inner + ipos, inner_len - ipos, &v);
+                    if (vn == 0U) break;
+                    ipos += vn;
+                    if      (ifield == 1U) { slot = v; have_slot = true; }
+                    else if (ifield == 2U) { addr = v; have_addr = true; }
+                    else if (ifield == 3U) {
+                        /* Unpacked repeated — one varint per tag. */
+                        if (count < (uint16_t)(sizeof(values) / sizeof(values[0]))) {
+                            values[count++] = (uint16_t)v;
+                        }
+                    }
+                } else if (iwire == 2U && ifield == 3U) {
+                    /* Packed repeated — concatenated varints inside one LD. */
+                    uint32_t plen;
+                    size_t pn = pb_decode_varint(inner + ipos, inner_len - ipos, &plen);
+                    if (pn == 0U) break;
+                    ipos += pn;
+                    if (ipos + plen > inner_len) break;
+                    size_t ppos = 0;
+                    while (ppos < plen) {
+                        uint32_t pv;
+                        size_t pvn = pb_decode_varint(inner + ipos + ppos,
+                                                      plen - ppos, &pv);
+                        if (pvn == 0U) break;
+                        ppos += pvn;
+                        if (count < (uint16_t)(sizeof(values) / sizeof(values[0]))) {
+                            values[count++] = (uint16_t)pv;
+                        }
+                    }
+                    ipos += plen;
+                } else {
+                    size_t sk = pb_skip_field(iwire, inner + ipos, inner_len - ipos);
+                    if (sk == 0U) break;
+                    ipos += sk;
+                }
+            }
+            pos += inner_len;
+
+            if (have_slot && have_addr && count > 0U && slot < 256U) {
+                int rc;
+                if (count == 1U) {
+                    rc = OrbitClient_WriteHoldingRegister(
+                        (uint8_t)slot, (uint16_t)addr, values[0]);
+                } else {
+                    rc = OrbitClient_WriteHoldingRegisters(
+                        (uint8_t)slot, (uint16_t)addr, values, count);
+                }
+                DebugP_log("[RX] OrbitRegWrite slot=%u addr=%u count=%u rc=%d\r\n",
+                           (unsigned)slot, (unsigned)addr,
+                           (unsigned)count, rc);
+            } else {
+                DebugP_log("[RX] OrbitRegWrite missing/empty field(s) "
+                           "(slot=%d addr=%d count=%u)\r\n",
+                           have_slot, have_addr, count);
             }
             needs_ack = true;
             continue;

@@ -334,6 +334,7 @@ const MSG_ORBIT_DISCOVERY    = 121;
 const MSG_ORBIT_ROLE_ASSIGN  = 122;
 const MSG_AO_EQUIP_ASSIGN    = 123;
 const MSG_TRITON_REG_WRITE   = 125;
+const MSG_ORBIT_REG_WRITE    = 126;
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Message name map for logging                                           *
@@ -381,6 +382,7 @@ const MSG_NAMES: Record<number, string> = {
   [MSG_ORBIT_DISCOVERY]:    'OrbitDiscovery',
   [MSG_AO_EQUIP_ASSIGN]:    'AoEquipAssign',
   [MSG_TRITON_REG_WRITE]:   'TritonRegWrite',
+  [MSG_ORBIT_REG_WRITE]:    'OrbitRegWrite',
 };
 
 // Export MSG IDs so the firmware update manager can reference them
@@ -388,7 +390,7 @@ export {
   MSG_FW_BEGIN_UPDATE, MSG_FW_DATA_CHUNK, MSG_FW_FINALIZE_UPDATE,
   MSG_FW_ACTIVATE_BANK, MSG_FW_UPDATE_STATUS, MSG_FW_BANK_INFO,
   MSG_ORBIT_STATUS, MSG_ORBIT_DISCOVERY, MSG_ORBIT_ROLE_ASSIGN, MSG_AO_EQUIP_ASSIGN,
-  MSG_TRITON_REG_WRITE,
+  MSG_TRITON_REG_WRITE, MSG_ORBIT_REG_WRITE,
 };
 
 // Re-export PB helpers for use by the firmware update manager
@@ -608,6 +610,34 @@ export class NovaSerialBridge extends EventEmitter {
       .varintForce(3, value & 0xFFFF)
       .encode();
     return this.sendCommand(MSG_TRITON_REG_WRITE, inner);
+  }
+
+  /**
+   * Forward a role-agnostic Modbus HR write to any orbit. Phase 4b
+   * Sub-phase 2 (2026-06-01). For GDC's stage assignment block (5
+   * regs at HR_GDC_STAGE_BASE=325) and similar non-TRITON writes the
+   * Pi5 used to make over direct Modbus TCP. Nova's handler picks
+   * FC06 for `values.length === 1` and FC16 otherwise.
+   *
+   * All fields use varintForce because 0 is meaningful (slot 0, addr 0,
+   * value 0=clear).
+   */
+  async sendOrbitRegWrite(slot: number, addr: number, values: number[]): Promise<number> {
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error('sendOrbitRegWrite: values must be a non-empty array');
+    }
+    if (values.length > 123) {
+      throw new Error(`sendOrbitRegWrite: too many values (${values.length} > 123)`);
+    }
+    const enc = new PbEncoder()
+      .varintForce(1, slot)
+      .varintForce(2, addr);
+    // Unpacked-repeated (one tag-3 varint per value). The LP handler
+    // accepts both unpacked and packed; unpacked is simpler to emit.
+    for (const v of values) {
+      enc.varintForce(3, v & 0xFFFF);
+    }
+    return this.sendCommand(MSG_ORBIT_REG_WRITE, enc.encode());
   }
 
   /**

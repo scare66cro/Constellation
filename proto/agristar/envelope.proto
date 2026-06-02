@@ -146,6 +146,9 @@ message Envelope {
     OrbitSensorBank   orbit_sensor_bank  = 124;
     // Bridge → Firmware (single Triton HR write — UI control surfaces)
     TritonRegWrite    triton_reg_write   = 125;
+    // Bridge → Firmware (role-agnostic orbit HR write — GDC stages,
+    // calibrate, future per-role single + multi writes; Phase 4b Sub-2).
+    OrbitRegWrite     orbit_reg_write    = 126;
 
     // ── Firmware install orchestration — Pi5 ↔ Nova (130-149) ─────
     // The production OTA path: Pi5 has the .cfu, Nova brokers per-LP

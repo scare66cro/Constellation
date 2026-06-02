@@ -709,6 +709,11 @@ const protoForwards = {
   tritonRegWrite: async (slot: number, addr: number, value: number) => {
     await novaBridge!.sendTritonRegWrite(slot, addr, value);
   },
+  /* POST /iot/gdc/{stages,calibrate} → envelope tag 126 OrbitRegWrite.
+   * Nova picks FC06 for 1 value or FC16 for a block. Phase 4b Sub-2. */
+  orbitRegWrite: async (slot: number, addr: number, values: number[]) => {
+    await novaBridge!.sendOrbitRegWrite(slot, addr, values);
+  },
   /* POST /iot/system/reboot → SystemCmd { cmd_type=CMD_REBOOT_SOC=50 }.
    * Firmware acks then warm-resets the SoC via DMSC; the bridge's
    * Nova reconnect logic surfaces the new image automatically. */

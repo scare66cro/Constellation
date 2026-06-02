@@ -700,6 +700,119 @@ int OrbitClient_WriteHoldingRegister(uint8_t index, uint16_t addr,
 }
 
 /* ──────────────────────────────────────────────────────────────────── */
+/*  Multi-register write (FC16) — Phase 4b Sub-phase 2 orbit writes    */
+/* ──────────────────────────────────────────────────────────────────── */
+
+int OrbitClient_WriteHoldingRegisters(uint8_t index, uint16_t addr,
+                                      const uint16_t *values,
+                                      uint16_t count)
+{
+    if (index >= s_workerCount || values == NULL) {
+        return -1;
+    }
+    /* Modbus FC16 max-quantity is 123 (data byte count fits in u8). */
+    if (count == 0U || count > 123U) {
+        return -2;
+    }
+    OrbitWorker *w = &s_workers[index];
+
+    int sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        DebugP_log("[ORBIT %u] writemulti: socket() failed errno=%d\r\n",
+                   (unsigned)index, errno);
+        return -2;
+    }
+
+    struct timeval tv = { .tv_sec = ORBIT_RECV_TIMEOUT_S, .tv_usec = 0 };
+    lwip_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    lwip_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int one = 1;
+    lwip_setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port   = lwip_htons(w->cfg.port);
+    dst.sin_addr.s_addr = ipaddr_addr(w->cfg.ipv4);
+    if (lwip_connect(sock, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
+        int e = errno;
+        lwip_close(sock);
+        DebugP_log("[ORBIT %u] writemulti: connect %s:%u failed errno=%d\r\n",
+                   (unsigned)index, w->cfg.ipv4, (unsigned)w->cfg.port, e);
+        return -3;
+    }
+
+    /* MBAP + FC16 request: 7 B header + 1 FC + 2 addr + 2 qty + 1 bcnt
+     * + 2*count data = 13 + 2*count total. PDU length = 6 + 2*count. */
+    const uint16_t txn = (uint16_t)(0x9000U | (index << 8) | (uint8_t)(addr));
+    const uint8_t  unit = (uint8_t)(index + 1);
+    const uint16_t bcnt = (uint16_t)(2U * count);
+    const uint16_t pdu_len = (uint16_t)(7U + bcnt);   /* unit + 6 PDU hdr + data */
+    /* Worst case at count=123: 13 + 246 = 259 B request. */
+    uint8_t req[13 + 246];
+    req[0]  = (uint8_t)(txn >> 8);
+    req[1]  = (uint8_t)(txn & 0xFF);
+    req[2]  = 0x00; req[3] = 0x00;       /* protocol id */
+    req[4]  = (uint8_t)(pdu_len >> 8);
+    req[5]  = (uint8_t)(pdu_len & 0xFF);
+    req[6]  = unit;
+    req[7]  = 0x10;                      /* FC16 = Write Multiple Registers */
+    req[8]  = (uint8_t)(addr >> 8);
+    req[9]  = (uint8_t)(addr & 0xFF);
+    req[10] = (uint8_t)(count >> 8);
+    req[11] = (uint8_t)(count & 0xFF);
+    req[12] = (uint8_t)bcnt;
+    for (uint16_t i = 0; i < count; i++) {
+        req[13 + i * 2U]     = (uint8_t)(values[i] >> 8);
+        req[13 + i * 2U + 1] = (uint8_t)(values[i] & 0xFF);
+    }
+    const int req_len = 13 + 2 * (int)count;
+
+    if (lwip_send(sock, req, (size_t)req_len, 0) != req_len) {
+        lwip_close(sock);
+        DebugP_log("[ORBIT %u] writemulti: send failed errno=%d\r\n",
+                   (unsigned)index, errno);
+        return -4;
+    }
+
+    /* FC16 response: 7 MBAP + 1 FC + 2 addr + 2 qty = 12 B. */
+    uint8_t resp[12];
+    int got = 0;
+    while (got < (int)sizeof(resp)) {
+        int n = lwip_recv(sock, resp + got, sizeof(resp) - (size_t)got, 0);
+        if (n <= 0) {
+            lwip_close(sock);
+            DebugP_log("[ORBIT %u] writemulti: recv failed errno=%d got=%d\r\n",
+                       (unsigned)index, errno, got);
+            return -5;
+        }
+        got += n;
+    }
+    lwip_close(sock);
+
+    if (resp[0] != req[0] || resp[1] != req[1] || resp[6] != unit) {
+        return -6;
+    }
+    if (resp[7] != 0x10) {
+        /* Modbus exception (FC | 0x80). */
+        DebugP_log("[ORBIT %u] writemulti: Modbus exception fc=0x%02x ec=0x%02x\r\n",
+                   (unsigned)index, resp[7], resp[8]);
+        return -7;
+    }
+    /* Sanity: response echoes addr + qty. */
+    const uint16_t r_addr = (uint16_t)((resp[8] << 8) | resp[9]);
+    const uint16_t r_qty  = (uint16_t)((resp[10] << 8) | resp[11]);
+    if (r_addr != addr || r_qty != count) {
+        DebugP_log("[ORBIT %u] writemulti: echo mismatch (addr=%u qty=%u)\r\n",
+                   (unsigned)index, (unsigned)r_addr, (unsigned)r_qty);
+        return -8;
+    }
+    DebugP_log("[ORBIT %u] writemulti OK addr=%u qty=%u\r\n",
+               (unsigned)index, (unsigned)addr, (unsigned)count);
+    return 0;
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
 /*  Single-coil write (FC05) — used by equipment-output sync loop      */
 /* ──────────────────────────────────────────────────────────────────── */
 

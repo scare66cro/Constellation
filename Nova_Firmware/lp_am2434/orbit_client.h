@@ -177,6 +177,26 @@ const char *OrbitClient_GetIpv4(uint8_t index);
 int OrbitClient_WriteHoldingRegister(uint8_t index, uint16_t addr,
                                      uint16_t value);
 
+/* Write a contiguous block of Modbus holding registers on one orbit
+ * (FC16 — Write Multiple Holding Registers).
+ *
+ * Phase 4b Sub-phase 2 (2026-06-01): used by the bridge's
+ * `OrbitRegWrite` envelope handler when the operator hands down 2+
+ * values (e.g. `/iot/gdc/stages` writes a 5-reg actuator→stage
+ * assignment block in one round-trip). `count` must be 1..123 per
+ * Modbus spec; for `count==1` callers prefer
+ * `OrbitClient_WriteHoldingRegister` (FC06) for the smaller PDU.
+ *
+ * Synchronous: opens a short-lived dedicated TCP socket so the call
+ * does not interfere with the per-orbit polling task's socket.
+ *
+ * Returns 0 on success, negative on error (index out of range,
+ * connect/send/recv failure, Modbus exception). Typical latency on a
+ * healthy LAN is 10-20 ms; cap your caller-side timeout accordingly. */
+int OrbitClient_WriteHoldingRegisters(uint8_t index, uint16_t addr,
+                                      const uint16_t *values,
+                                      uint16_t count);
+
 /* Write a single Modbus coil on one orbit (FC05).
  *
  * Synchronous: opens a short-lived dedicated TCP socket so the call

@@ -218,21 +218,43 @@ beyond letting one slot carry multiple banks.
 
 ### Sub-phase 2 — Orbit writes (small, mostly mechanical)
 
-**Goal:** every `writeHoldingReg` / `writeHoldingRegs` call in `apiRoutes.ts` goes through Nova via the existing `TritonRegWrite` envelope (already wired) plus a new generalised `OrbitRegWrite` envelope (tag 124) for GDC.
+> **LANDED 2026-06-01 (0.A.218).** Three write callsites migrated; bench-verified
+> in one round-trip. See "Verified at the bench" below.
 
-**Order of operations:**
+**Goal:** every `writeHoldingReg` / `writeHoldingRegs` call in `apiRoutes.ts` goes through Nova via the existing `TritonRegWrite` envelope (already wired) plus a new generalised `OrbitRegWrite` envelope (**tag 126**, not 124 — `OrbitSensorBank` already owns 124) for GDC.
 
-1. **Add `OrbitRegWrite` envelope to `proto/agristar/envelope.proto`** (tag 124, mirror `TritonRegWrite` structure with role-agnostic addressing).
-2. **Nova-side handler** in `nova_ota_broker.c` (or split out): receives `OrbitRegWrite`, opens TCP to `OrbitClient_GetIpv4(slot)`, issues FC06 or FC16, returns status (could be fire-and-forget like `TritonRegWrite`).
-3. **Bridge-side `novaSerialBridge.ts`:** add `sendOrbitRegWrite(slot, addr, values[])`.
-4. **`apiRoutes.ts`:** swap each `writeHoldingReg(host, addr, val)` → `serialBridge.orbitRegWrite(slot, addr, [val])`. Swap each `writeHoldingRegs(host, addr, vals)` → `serialBridge.orbitRegWrite(slot, addr, vals)`. The `/iot/triton/:slot/safety/reset` callsite at line 3157 stays on `tritonRegWrite` (already correct).
-5. **Bench:** trigger `/iot/gdc/stages` POST + `/iot/gdc/calibrate` POST + verify HR readback matches.
+**Landed:**
 
-**Acceptance:**
-- ✅ `apiRoutes.ts` no longer imports `writeHoldingReg` / `writeHoldingRegs` from `orbitMbtcp.ts`
-- ✅ `/iot/gdc/stages` + `/iot/gdc/calibrate` POSTs land at the GDC LP (verify via HR readback)
+1. **`proto/agristar/orbit.proto`** — new `OrbitRegWrite { slot, addr, repeated values }` message; tag 126 in `envelope.proto`.
+2. **`Nova_Firmware/lp_am2434/orbit_client.{h,c}`** — new `OrbitClient_WriteHoldingRegisters` FC16 helper (mirrors the FC06 helper, opens a dedicated short-lived socket per write so the polling task's FC03 stream isn't corrupted).
+3. **`Nova_Firmware/lp_am2434/main.c`** dispatch at field 126 — parses `{slot, addr, repeated values}` (accepts both packed and unpacked repeated), picks FC06 when `count == 1` else FC16, forwards via the existing per-orbit Modbus TCP client.
+4. **`constellation-ui/server/src/novaSerialBridge.ts`** — `sendOrbitRegWrite(slot, addr, values[])` + `MSG_ORBIT_REG_WRITE = 126`. CommandBridge interface in `apiRoutes.ts` gains `orbitRegWrite?:` matching the existing `tritonRegWrite?:` shape; `index.ts` wires it through `sendOrbitRegWrite`.
+5. **`apiRoutes.ts`** — three callsites swapped:
+   - `/iot/gdc/stages` → `serialBridge.orbitRegWrite(slot, 325, stageOf)` (5-reg FC16 block)
+   - `/iot/gdc/calibrate` → `serialBridge.orbitRegWrite(slot, 305, [1])` (single FC06)
+   - `/iot/triton/:slot/safety/reset` → reuses the existing `writeTritonReg(slot, 542, 1)` helper (envelope tag 125)
+   With these out, **`apiRoutes.ts` no longer imports any `writeHoldingReg*` from `orbitMbtcp.ts`**, and the previously surviving `findGdcSlotHost()` helper was deleted (no remaining callers).
 
-**Estimated effort:** ~½ session, mostly mechanical (Sub-phase 1's envelope pattern reused).
+**Verified at the bench (2026-06-01, controller on 0.A.218):**
+
+| Action | Pre | Post | Result |
+|---|---|---|---|
+| `POST /iot/gdc/stages` body `{stages:[{stageNum:1, doors:[1,2]},{stageNum:2, doors:[3,4,5]}]}` | HR 325..329 = `[0,0,0,0,0]` | HR 325..329 = `[1,1,2,2,2]` | ✅ exact match |
+| `POST /iot/gdc/calibrate` | HR 303=0, HR 304=0 | HR 303=1 (calibrating), HR 304=1 (phase=opening) | ✅ cal state machine triggered |
+| `POST /iot/triton/2/safety/reset` | n/a | `{ok:true}`, `/health` clean | ✅ tag-125 path live |
+| `/health` after all three | — | `rxCrcErrors:0 rxCobsErrors:0 rxOverflows:0` | ✅ |
+
+**What's NOT covered by Sub-phase 2:**
+
+- `/iot/orbit/ota/version` still opens TCP from the Pi5 to the orbit's
+  `lp_ota_task` at `:5503`. That's a separate Phase 4 surface; Phase 4b
+  Sub-phase 2 only scopes the `writeHoldingReg*` callers.
+- `OrbitRegWrite` is fire-and-(short)-forget per `tritonRegWrite`'s
+  pattern — Nova logs FC06/FC16 success/failure to its debug UART but
+  doesn't echo a per-write ack to the bridge. The bridge returns
+  `{ok:true}` as long as the envelope queued onto the UART without
+  protocol error. If we want guaranteed-ack semantics later, that's a
+  proto extension (response message) — easy add but not in scope.
 
 ### Sub-phase 3 — VFD (new Nova-side task)
 

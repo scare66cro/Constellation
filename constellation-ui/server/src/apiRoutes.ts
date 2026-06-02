@@ -49,6 +49,10 @@ export interface CommandBridge {
   /** Optional: forward a single Modbus HR write to a Triton orbit via
    *  the LP firmware's Modbus TCP client (envelope tag 125). */
   tritonRegWrite?: (slot: number, addr: number, value: number) => Promise<void>;
+  /** Optional: forward a role-agnostic Modbus HR write (FC06 for one
+   *  value or FC16 for a block) to ANY orbit via the LP firmware's
+   *  Modbus TCP client (envelope tag 126). Phase 4b Sub-phase 2. */
+  orbitRegWrite?: (slot: number, addr: number, values: number[]) => Promise<void>;
   /** Optional: trigger a controller-SoC warm reset via DMSC
    *  (CMD_REBOOT_SOC = 50). Used by the OTA Activate primitive and
    *  the operator "Reboot Controller" action. Resolves once the
@@ -69,14 +73,13 @@ import { getProfile } from './vfdRegisterMaps.js';
 import { saveConfig, loadConfig } from './simConfig.js';
 import { getNovaId } from './dataCache.js';
 import {
-  // Phase 4b Sub-phase 1 (2026-06-01): read primitives
-  // (readHoldingRegs / readCoils / readDiscreteInputs) are no longer
-  // imported here — every read path goes through
-  // `novaStore.getOrbitBank(slot, hr_base)`. `writeHoldingReg` +
-  // `writeHoldingRegs` survive on borrowed time until Sub-phase 2's
-  // OrbitRegWrite envelope lands.
-  writeHoldingReg,
-  writeHoldingRegs,
+  // Phase 4b 2026-06-01: read + write primitives are no longer imported.
+  // Sub-phase 1 swapped reads to `novaStore.getOrbitBank(slot, hr_base)`;
+  // Sub-phase 2 swapped writes to `serialBridge.orbitRegWrite()` /
+  // `serialBridge.tritonRegWrite()`. The only surviving import is
+  // `resolveOrbitHost`, used by `/iot/orbit/ota/version` to probe the
+  // remote LP's lp_ota_task at TCP :5503 (which is itself targeted for
+  // Phase 4 / Phase 4b future-work but not in this sub-phase).
   resolveOrbitHost,
   asS16,
 } from './orbitMbtcp.js';
@@ -2566,14 +2569,6 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     return gdc ? gdc.slot : null;
   }
 
-  /** Phase 4b temporary — Sub-phase 2 (writes) still opens Modbus TCP
-   *  from the bridge to the GDC. Sub-phase 1 only migrated reads. Once
-   *  Sub-phase 2 lands, this helper + its callers go away. */
-  function findGdcSlotHost(): { slot: number; host: string } | null {
-    const slot = findGdcSlot();
-    if (slot === null) return null;
-    return { slot, host: resolveOrbitHost(slot) };
-  }
 
   /** GET /iot/gdc — synthesised from HR 300..339, sourced from the
    *  Phase 4b OrbitSensorBank role window (envelope tag 124) cached
@@ -2674,8 +2669,8 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
    *  labels in the request body are ignored — LP has no label region.
    */
   router.post('/gdc/stages', async (req: Request, res: Response) => {
-    const target = findGdcSlotHost();
-    if (!target) {
+    const slot = findGdcSlot();
+    if (slot === null) {
       res.status(404).json({ ok: false, error: 'No GDC board found' });
       return;
     }
@@ -2698,9 +2693,14 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
         }
       }
     }
+    if (!serialBridge.orbitRegWrite) {
+      res.status(503).json({ ok: false, error: 'orbitRegWrite_not_supported' });
+      return;
+    }
     try {
-      // Block write 325..329 in one FC16.
-      await writeHoldingRegs(target.host, 325, stageOf);
+      // Phase 4b Sub-phase 2: Nova picks FC16 for the 5-reg block write
+      // (325..329) and issues it via its existing Modbus TCP client.
+      await serialBridge.orbitRegWrite(slot, 325, stageOf);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(503).json({ ok: false, error: String(err?.message ?? err) });
@@ -2709,13 +2709,19 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
 
   /** POST /iot/gdc/calibrate — kick HR_GDC_CAL_REQUEST=1. */
   router.post('/gdc/calibrate', async (_req: Request, res: Response) => {
-    const target = findGdcSlotHost();
-    if (!target) {
+    const slot = findGdcSlot();
+    if (slot === null) {
       res.status(404).json({ ok: false, error: 'No GDC board found' });
       return;
     }
+    if (!serialBridge.orbitRegWrite) {
+      res.status(503).json({ ok: false, error: 'orbitRegWrite_not_supported' });
+      return;
+    }
     try {
-      await writeHoldingReg(target.host, 305, 1);
+      // Phase 4b Sub-phase 2: Nova picks FC06 (single value) and writes
+      // HR_GDC_CAL_REQUEST=305 ← 1.
+      await serialBridge.orbitRegWrite(slot, 305, [1]);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(503).json({ ok: false, error: String(err?.message ?? err) });
@@ -3241,12 +3247,10 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     if (!Number.isFinite(slot) || slot < 0) {
       return res.status(400).json({ ok: false, error: 'bad slot' });
     }
-    try {
-      await writeHoldingReg(resolveOrbitHost(slot), 542, 1);
-      res.json({ ok: true });
-    } catch (e) {
-      res.status(503).json({ ok: false, error: (e as Error).message });
-    }
+    // Phase 4b Sub-phase 2: route through the existing TritonRegWrite
+    // envelope (tag 125) instead of opening Modbus TCP from the Pi5.
+    const result = await writeTritonReg(slot, 542, 1);
+    res.status(result.ok ? 200 : 503).json(result);
   });
 
   // ─── Orbit module status ─────────────────────────────────────────────

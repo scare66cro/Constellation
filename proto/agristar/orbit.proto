@@ -171,3 +171,20 @@ message TritonRegWrite {
   uint32 addr  = 2;   // Modbus holding register address
   uint32 value = 3;   // Value to write (low 16 bits used)
 }
+
+// ─── Role-agnostic orbit register write (bridge → firmware) ─────────────
+// Phase 4b Sub-phase 2 (2026-06-01): generalises TritonRegWrite for the
+// non-TRITON orbit writes the bridge used to make over direct Modbus TCP
+// from the Pi5 (`/iot/gdc/stages` 5-reg block, `/iot/gdc/calibrate`
+// single-reg kick, etc.). Nova's handler dispatches to FC06 for a single
+// value or FC16 for a multi-value block. `TritonRegWrite` stays
+// untouched — it's still the right shape for `/iot/triton/*` writes.
+//
+// Use pb_uint32_force for `slot`, `addr`, and the repeated `values` on
+// the encoder: 0 is a valid slot, a valid register address, and a valid
+// write value.
+message OrbitRegWrite {
+  uint32 slot           = 1;   // Discovery slot index (0..15)
+  uint32 addr           = 2;   // First Modbus holding-register address
+  repeated uint32 values = 3;  // 1 entry → FC06; ≥2 entries → FC16
+}
