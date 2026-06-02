@@ -249,6 +249,7 @@ export class ProtoStream {
   private encodeNetworkConfig(): Buffer | null {
     const persisted = loadConfig<{
       ipMode?: number;
+      ipAddr?: string;
       ipMask?: string;
       ipGateway?: string;
       httpPort?: number;
@@ -261,8 +262,22 @@ export class ProtoStream {
       .flat()
       .find((i) => i && i.family === 'IPv4' && !i.internal);
 
+    // Loopback mode (kiosk-only, no LAN) is a deliberate persisted state —
+    // the /iot/tcpip handler skips nmcli for 127.x and "localhost" so eth0
+    // keeps whatever address it had. We must report 127.x back to the page
+    // anyway, otherwise reloading would re-hydrate from the real NIC IP
+    // and the user couldn't tell loopback mode "stuck".
+    //
+    // Otherwise prefer the live NIC address — it's the truth on the wire.
+    // Fall back to persisted ipAddr only when NM hasn't brought the link
+    // up yet (e.g. immediately after a reboot from a /iot/tcpip save).
+    const persistedIsLoopback = !!persisted.ipAddr && (
+      persisted.ipAddr === 'localhost' || persisted.ipAddr.startsWith('127.')
+    );
     const cfg: NetworkConfig = {
-      ipAddr:    nic?.address  ?? '127.0.0.1',
+      ipAddr:    persistedIsLoopback
+                   ? persisted.ipAddr!
+                   : (nic?.address ?? persisted.ipAddr ?? '127.0.0.1'),
       ipMask:    persisted.ipMask    ?? nic?.netmask ?? '255.255.255.0',
       ipGateway: persisted.ipGateway ?? '',
       ipMode:    persisted.ipMode    ?? 1,                   // 1=DHCP default

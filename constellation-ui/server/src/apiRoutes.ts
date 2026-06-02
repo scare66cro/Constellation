@@ -1401,20 +1401,51 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     const body = req.body ?? {};
     // Page sends shape: { HttpPort:[port,publicIp], LocalIpAdd:[ip],
     // LocalIpMask:[mask], LocalIpGateway:[gw], LocalIpMode:[mode],
-    // LocalDns:[dns1?, dns2?] }. We only persist user-config fields;
-    // ip_addr + mac come from the host NIC at read time.
+    // LocalDns:[dns1?, dns2?] }.
     const port      = parseInt(body?.HttpPort?.[0] ?? '', 10);
     const publicIp  = String(body?.HttpPort?.[1] ?? '');
-    const ipMask    = String(body?.LocalIpMask?.[0] ?? '');
-    const ipGateway = String(body?.LocalIpGateway?.[0] ?? '');
-    const ipMode    = parseInt(body?.LocalIpMode?.[0] ?? '', 10);
-    const dnsArr    = Array.isArray(body?.LocalDns)
+    const ipAddr    = String(body?.LocalIpAdd?.[0] ?? '');     // Bug fix 2026-06-02:
+    const ipMask    = String(body?.LocalIpMask?.[0] ?? '');    //   previously LocalIpAdd
+    const ipGateway = String(body?.LocalIpGateway?.[0] ?? ''); //   was ignored — IP
+    const ipMode    = parseInt(body?.LocalIpMode?.[0] ?? '', 10); //   change was discarded
+    const dnsArr    = Array.isArray(body?.LocalDns)            //   silently.
       ? (body.LocalDns as unknown[]).map(String).filter((s) => s && s !== '...')
       : [];
+
+    // ── Server-side validation ────────────────────────────────────
+    const validIpv4 = (s: string): boolean =>
+      /^(\d{1,3}\.){3}\d{1,3}$/.test(s) &&
+      s.split('.').every(o => { const n = Number(o); return n >= 0 && n <= 255; });
+    const isStatic = ipMode === 0;
+    if (isStatic) {
+      if (!validIpv4(ipAddr)) {
+        res.status(400).json({ ok: false, error: `invalid LocalIpAdd ${ipAddr}` });
+        return;
+      }
+      if (!validIpv4(ipMask)) {
+        res.status(400).json({ ok: false, error: `invalid LocalIpMask ${ipMask}` });
+        return;
+      }
+      // Gateway may legitimately be empty / absent on isolated subnets.
+      if (ipGateway && !validIpv4(ipGateway)) {
+        res.status(400).json({ ok: false, error: `invalid LocalIpGateway ${ipGateway}` });
+        return;
+      }
+      for (const d of dnsArr) {
+        if (!validIpv4(d)) {
+          res.status(400).json({ ok: false, error: `invalid DNS entry ${d}` });
+          return;
+        }
+      }
+    } else if (ipMode !== 1) {
+      res.status(400).json({ ok: false, error: `invalid LocalIpMode ${body?.LocalIpMode?.[0]}` });
+      return;
+    }
 
     saveConfig('tcpip', {
       httpPort:  Number.isFinite(port) ? port : undefined,
       publicIp:  publicIp || undefined,
+      ipAddr:    ipAddr    || undefined,
       ipMask:    ipMask    || undefined,
       ipGateway: ipGateway || undefined,
       ipMode:    Number.isFinite(ipMode) ? ipMode : undefined,
@@ -1422,8 +1453,73 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
     });
 
     onTcpipSavedHook?.();
-    console.log(`[API] TCP/IP settings persisted (mode=${ipMode}, port=${port}, dns=${dnsArr.length})`);
+    console.log(`[API] TCP/IP settings persisted (mode=${ipMode}, ip=${ipAddr}, port=${port}, dns=${dnsArr.length})`);
+
+    // ── Loopback short-circuit ────────────────────────────────────
+    // Restored from the legacy iotclient handler (2026-06-02). When the
+    // operator sets the static IP to 127.x or "localhost", they're
+    // putting the panel into kiosk-only mode: panel browser running on
+    // the Pi5 itself, talking to the bridge over loopback, NO LAN. This
+    // is the escape hatch for shipping the panel to a site without
+    // internet — without it, the only way out of a working LAN config
+    // is through Level 2 (chicken/egg if you can't reach the page).
+    //
+    // Persist the intent so the page reflects it, then return — do NOT
+    // call nmcli (127.x on eth0 would brick the box: NM would tear down
+    // the current LAN config, leave eth0 with a loopback address,
+    // routing would be broken, and there'd be no way back without a
+    // serial console).
+    const isLoopbackTarget = isStatic && (
+      ipAddr === 'localhost' || ipAddr.startsWith('127.')
+    );
+    if (isLoopbackTarget) {
+      console.log(`[API] /iot/tcpip loopback mode requested (ip=${ipAddr}) — persisted, skipping nmcli + reboot`);
+      res.json({ ok: true, loopback: true });
+      return;
+    }
+
+    // ── Apply to the OS via the privileged helper ─────────────────
+    // Bug fix 2026-06-02: previously the handler returned ok:true here
+    // after persisting tcpip.json but never touched the OS network
+    // stack — eth0 stayed on its boot-time DHCP IP and the page's
+    // "redirect to new IP after 8 s" UX hit a Pi5 that hadn't moved.
+    // Now we invoke /usr/local/sbin/apply-network-config (installed
+    // via deploy/apply-network-config + agristar-network-sudoers) to
+    // nmcli-modify the connection and reboot. Helper validates every
+    // arg before invoking nmcli; sudoers grants the bridge user only
+    // this one script.
+    //
+    // dotted-quad netmask → CIDR prefix (e.g. 255.255.255.0 → 24).
+    const maskToCidr = (m: string): number => {
+      const octs = m.split('.').map(Number);
+      if (octs.length !== 4 || octs.some(o => !Number.isFinite(o) || o < 0 || o > 255)) return 24;
+      let bits = 0;
+      for (const o of octs) {
+        for (let i = 7; i >= 0; i--) {
+          if ((o >> i) & 1) bits++;
+          else return bits;
+        }
+      }
+      return bits;
+    };
+    const args = isStatic
+      ? ['static', ipAddr, String(maskToCidr(ipMask)), ipGateway || '', dnsArr.join(',')]
+      : ['dhcp'];
+    // Respond BEFORE invoking the helper — once nmcli reconfigures eth0
+    // the TCP connection serving this response will drop. The page's
+    // /redirect path already accounts for the bridge appearing to time
+    // out mid-response.
     res.json({ ok: true });
+    setImmediate(() => {
+      const cmd = `sudo /usr/local/sbin/apply-network-config ${args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`;
+      console.log(`[API] /iot/tcpip applying via helper: ${cmd}`);
+      void import('child_process').then(({ exec }) => {
+        exec(cmd, (err, stdout, stderr) => {
+          if (err) console.error(`[API] apply-network-config failed:`, err.message, stderr);
+          else    console.log(`[API] apply-network-config: ${stdout.trim()}`);
+        });
+      });
+    });
   });
 
   // (S9g: POST /network removed — page no longer fires it; composite is

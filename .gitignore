@@ -126,7 +126,15 @@ generated/
 proto/_*
 
 # ─── Deploy / runtime artifacts (large, regenerable) ─────────────────────
-constellation-ui/server/deploy/
+# Pattern `dir/*` (not `dir/`) excludes contents but leaves the directory
+# itself unignored, which is required for the `!` re-include lines below
+# to take effect (git won't re-include children of a fully-ignored dir).
+constellation-ui/server/deploy/*
+# Keep the source-of-truth helper / sudoers / systemd drop-in so a fresh
+# checkout can drive `package_production.sh` end-to-end.
+!constellation-ui/server/deploy/apply-network-config
+!constellation-ui/server/deploy/agristar-network-sudoers
+!constellation-ui/server/deploy/agristar-bridge-allow-net-helper.conf
 constellation-ui/server/data/*.db
 constellation-ui/server/data/*.db-wal
 constellation-ui/server/data/*.db-shm

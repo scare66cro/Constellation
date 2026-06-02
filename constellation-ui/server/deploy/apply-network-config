@@ -1,0 +1,112 @@
+#!/bin/bash
+#
+# apply-network-config — Pi5 network reconfig helper invoked by the bridge.
+#
+# Installed to /usr/local/sbin/apply-network-config (root:root mode 0755).
+# Granted to the `gellert` user via /etc/sudoers.d/agristar-network (see
+# the agristar-network-sudoers file in this directory).
+#
+# Invoked by the bridge's POST /iot/tcpip handler when the operator changes
+# the panel's IP / gateway / DNS / mode from the Level 2 TCP/IP page. The
+# bridge passes the new config as argv; this script applies it via nmcli
+# and triggers a reboot. The bridge has already persisted the values to
+# `tcpip.json` so the post-reboot UI can read them back consistently.
+#
+# Usage:
+#   apply-network-config static <ip> <cidr> <gateway> <dns_comma_sep>
+#   apply-network-config dhcp
+#
+# Examples:
+#   apply-network-config static 10.1.2.208 24 10.1.2.1 8.8.8.8,1.1.1.1
+#   apply-network-config dhcp
+#
+# Why a separate script (and not direct nmcli in sudoers):
+#   nmcli's argument shape is open-ended and granting the bridge user a
+#   wildcard sudo over it would let any compromise reconfigure NM in
+#   arbitrary ways. This script narrows the surface to "set IPv4 method
+#   and a few well-formed values, then reboot" and validates each arg
+#   before invoking nmcli. Standard PolicyKit + privileged helper pattern.
+#
+# Recovery if the new config makes Pi5 unreachable: physical access via
+# USB serial console (115200 baud on the Pi5 UART pins) or HDMI, then
+# `sudo nmcli con modify "Wired connection 1" ipv4.method auto` to fall
+# back to DHCP.
+
+set -e
+set -u
+
+readonly CONN="Wired connection 1"
+readonly MODE="${1:-}"
+
+die() {
+    echo "[apply-network-config] ERROR: $*" >&2
+    exit 2
+}
+
+# Validate dotted-quad IPv4. Returns 0 if valid; non-zero otherwise.
+valid_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local IFS=.
+    # shellcheck disable=SC2206
+    local -a octets=($ip)
+    for o in "${octets[@]}"; do
+        (( o >= 0 && o <= 255 )) || return 1
+    done
+    return 0
+}
+
+case "$MODE" in
+    static)
+        readonly IP="${2:-}"
+        readonly CIDR="${3:-}"
+        readonly GATEWAY="${4:-}"
+        readonly DNS="${5:-}"
+        valid_ipv4 "$IP"      || die "bad ip '$IP'"
+        [[ "$CIDR" =~ ^[0-9]+$ ]] && (( CIDR >= 8 && CIDR <= 32 )) \
+                              || die "bad cidr '$CIDR'"
+        # Gateway may be empty (point-to-point or isolated subnet).
+        if [[ -n "$GATEWAY" ]]; then
+            valid_ipv4 "$GATEWAY" || die "bad gateway '$GATEWAY'"
+        fi
+        # DNS is a comma-separated list, each one must be valid IPv4 (or empty).
+        # NOTE: `local` would be invalid here (we're at top-level, not inside
+        # a function) — split via comma-IFS via subshell and validate.
+        DNS_NMCLI=""
+        if [[ -n "$DNS" ]]; then
+            IFS=',' read -ra dns_list <<< "$DNS"
+            for d in "${dns_list[@]}"; do
+                valid_ipv4 "$d" || die "bad dns entry '$d'"
+            done
+            # Rejoin with spaces — nmcli wants space-separated.
+            DNS_NMCLI="${dns_list[*]}"
+        fi
+
+        echo "[apply-network-config] static ip=$IP/$CIDR gw=$GATEWAY dns=[$DNS]"
+        nmcli con modify "$CONN" ipv4.method manual \
+                                 ipv4.addresses "${IP}/${CIDR}" \
+                                 ipv4.gateway "${GATEWAY:-}" \
+                                 ipv4.dns "${DNS_NMCLI:-}"
+        ;;
+
+    dhcp)
+        echo "[apply-network-config] dhcp"
+        nmcli con modify "$CONN" ipv4.method auto \
+                                 ipv4.addresses "" \
+                                 ipv4.gateway "" \
+                                 ipv4.dns ""
+        ;;
+
+    *)
+        die "usage: $0 {static <ip> <cidr> <gateway> <dns_csv>|dhcp}"
+        ;;
+esac
+
+# Persist NM state to disk before reboot. nmcli con modify writes
+# /etc/NetworkManager/system-connections/<conn>.nmconnection synchronously,
+# but a final sync ensures the disk is flushed in case the reboot races.
+sync
+sleep 1
+
+echo "[apply-network-config] rebooting..."
+/sbin/reboot

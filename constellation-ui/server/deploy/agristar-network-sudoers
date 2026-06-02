@@ -1,0 +1,15 @@
+# agristar-network — sudoers entry for the bridge user to apply NM changes.
+#
+# Installed to /etc/sudoers.d/agristar-network (mode 0440, root:root).
+# Granted permissions are narrowed to the apply-network-config helper, which
+# itself validates every argument before invoking nmcli + reboot.
+#
+# Do NOT grant blanket nmcli sudoers — the script is the security boundary.
+#
+# Install with:
+#   sudo install -m 0440 -o root -g root agristar-network-sudoers /etc/sudoers.d/agristar-network
+#   sudo visudo -c -f /etc/sudoers.d/agristar-network   # validate
+#
+# Verify with:
+#   sudo -n -l -U gellert | grep apply-network-config
+gellert ALL=(root) NOPASSWD: /usr/local/sbin/apply-network-config *

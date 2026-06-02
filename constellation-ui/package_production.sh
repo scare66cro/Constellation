@@ -97,6 +97,17 @@ cp "$SCRIPT_DIR/package.json" "$PKG_DIR/ui-svelte/"
 [ -f "$SCRIPT_DIR/package-lock.json" ] && cp "$SCRIPT_DIR/package-lock.json" "$PKG_DIR/ui-svelte/"
 echo "  ✓ ui-svelte/ staged"
 
+# ─── 3b. Privileged network-config helper + sudoers ───────────────────────
+# Ships /usr/local/sbin/apply-network-config and /etc/sudoers.d/agristar-network
+# so the bridge's POST /iot/tcpip handler can apply NM changes + reboot when
+# the operator updates the Level 2 TCP/IP page. Without these the page silently
+# persists to tcpip.json but never touches eth0.
+mkdir -p "$PKG_DIR/network-helper"
+cp "$DEPLOY_DIR/apply-network-config"        "$PKG_DIR/network-helper/"
+cp "$DEPLOY_DIR/agristar-network-sudoers"    "$PKG_DIR/network-helper/"
+chmod +x "$PKG_DIR/network-helper/apply-network-config"
+echo "  ✓ network-helper/ staged (apply-network-config + sudoers)"
+
 # ─── 4. Systemd unit + install script ─────────────────────────────────────
 # Write a fresh service file (the tracked one in server/deploy/ has the
 # legacy flat-dist ExecStart=node dist/index.js path).
@@ -126,6 +137,19 @@ Environment=SERIAL_BAUD=230400
 Environment=VFD_HOST=127.0.0.1
 Environment=VFD_PORT=502
 Environment=VFD_MAX_SCAN=8
+
+# Sandbox — keep paths/cgroup hardening that doesn't imply NoNewPrivileges.
+# Do NOT add NoNewPrivileges=true, SystemCallArchitectures=, LockPersonality,
+# ProtectKernel{Modules,Tunables}, RestrictSUIDSGID, or RestrictRealtime —
+# each implicitly forces NNP=1 (RestrictRealtime is undocumented but
+# bisect-confirmed on systemd 252), which breaks the apply-network-config
+# sudo path used by POST /iot/tcpip. See deploy/agristar-bridge-allow-net-
+# helper.conf for the full story.
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectControlGroups=true
+ReadWritePaths=/home/gellert/.constellation /home/gellert/Gellert/constellation/constellation-ui/server/.sim-config /home/gellert/Gellert/upgrade /var/run/postgresql
 
 StandardOutput=journal
 StandardError=journal
@@ -191,6 +215,25 @@ mkdir -p "$UI_DIR"
 cp -r "$SCRIPT_DIR/ui-svelte/"* "$UI_DIR/"
 ( cd "$UI_DIR" && su -c "npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -5" gellert )
 chown -R gellert:gellert "$UI_DIR"
+
+# 4b. Privileged network-config helper + sudoers.
+# Required for the Level 2 TCP/IP page to actually change the Pi5's eth0
+# settings (nmcli con modify + reboot). Bridge user has narrow NOPASSWD
+# sudo only over this one helper; the helper validates every arg before
+# touching nmcli.
+echo "[4b/6] Installing apply-network-config + sudoers"
+if [ -d "$SCRIPT_DIR/network-helper" ]; then
+  install -m 0755 -o root -g root \
+    "$SCRIPT_DIR/network-helper/apply-network-config" \
+    /usr/local/sbin/apply-network-config
+  install -m 0440 -o root -g root \
+    "$SCRIPT_DIR/network-helper/agristar-network-sudoers" \
+    /etc/sudoers.d/agristar-network
+  visudo -c -f /etc/sudoers.d/agristar-network
+  echo "  ✓ /usr/local/sbin/apply-network-config + /etc/sudoers.d/agristar-network"
+else
+  echo "  ⚠ network-helper/ not in package — Level 2 TCP/IP page will be no-op"
+fi
 
 # 5. Systemd unit
 echo "[5/6] Installing systemd unit"
