@@ -69,9 +69,12 @@ import { getProfile } from './vfdRegisterMaps.js';
 import { saveConfig, loadConfig } from './simConfig.js';
 import { getNovaId } from './dataCache.js';
 import {
-  readHoldingRegs,
-  readCoils,
-  readDiscreteInputs,
+  // Phase 4b Sub-phase 1 (2026-06-01): read primitives
+  // (readHoldingRegs / readCoils / readDiscreteInputs) are no longer
+  // imported here — every read path goes through
+  // `novaStore.getOrbitBank(slot, hr_base)`. `writeHoldingReg` +
+  // `writeHoldingRegs` survive on borrowed time until Sub-phase 2's
+  // OrbitRegWrite envelope lands.
   writeHoldingReg,
   writeHoldingRegs,
   resolveOrbitHost,
@@ -2557,100 +2560,111 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   //   330..334  actuator[i].open_ms     R/W   uint
   //   335..339  actuator[i].close_ms    R/W   uint
 
-  function findGdcSlotHost(): { slot: number; host: string } | null {
+  function findGdcSlot(): number | null {
     // role 2 = GDC. dataCache is populated from firmware OrbitStatus.
     const gdc = dataCache.getOrbitBoards().find(b => b.role === 2 && b.connected);
-    if (!gdc) return null;
-    return { slot: gdc.slot, host: resolveOrbitHost(gdc.slot) };
+    return gdc ? gdc.slot : null;
   }
 
-  /** GET /iot/gdc — synthesised from HR 300..339. */
+  /** Phase 4b temporary — Sub-phase 2 (writes) still opens Modbus TCP
+   *  from the bridge to the GDC. Sub-phase 1 only migrated reads. Once
+   *  Sub-phase 2 lands, this helper + its callers go away. */
+  function findGdcSlotHost(): { slot: number; host: string } | null {
+    const slot = findGdcSlot();
+    if (slot === null) return null;
+    return { slot, host: resolveOrbitHost(slot) };
+  }
+
+  /** GET /iot/gdc — synthesised from HR 300..339, sourced from the
+   *  Phase 4b OrbitSensorBank role window (envelope tag 124) cached
+   *  in novaStore. Bridge no longer opens Modbus TCP to the GDC
+   *  orbit — Nova polls it; bridge decodes the cached snapshot. */
   router.get('/gdc', async (_req: Request, res: Response) => {
-    const target = findGdcSlotHost();
-    if (!target) { res.json({ present: false }); return; }
-    try {
-      // Single block read covers the whole GDC range (40 regs).
-      const regs = await readHoldingRegs(target.host, 300, 40);
-      // Indexing helper relative to base 300.
-      const r = (a: number) => regs[a - 300];
+    const slot = findGdcSlot();
+    if (slot === null) { res.json({ present: false }); return; }
+    const bank = novaStore?.getOrbitBank(slot, 300);
+    if (!bank) { res.json({ present: false, slot, awaiting: true }); return; }
 
-      const actuators: Array<{
-        index: number;
-        label: string;
-        pos: number;
-        target: number;
-        stageAssignment: number;
-        openTravelTime: number;
-        closeTravelTime: number;
-        moving: boolean;
-        openSwitch: boolean;
-        closeSwitch: boolean;
-        calibrated: boolean;
-      }> = [];
-      const ACT_COUNT = 5;
-      for (let i = 0; i < ACT_COUNT; i++) {
-        const status = r(320 + i);
-        actuators.push({
-          index:        i + 1,
-          // Default label "Door 1".."Door 5" since the LP HR map carries
-          // no per-actuator labels.
-          // LP-MISSING: actuator labels — needs HR string region in firmware
-          label:        `Door ${i + 1}`,
-          pos:          r(310 + i) / 10,           // 0..100.0%
-          target:       r(315 + i) / 10,
-          stageAssignment: r(325 + i),
-          openTravelTime:  r(330 + i),
-          closeTravelTime: r(335 + i),
-          moving:       (status & 0x0001) !== 0,
-          openSwitch:   (status & 0x0002) !== 0,
-          closeSwitch:  (status & 0x0004) !== 0,
-          calibrated:   (status & 0x0008) !== 0,
-        });
-      }
+    // Indexing helper relative to base 300. Bank values are raw uint16.
+    const r = (a: number) => bank.values[a - 300] ?? 0;
 
-      // Synthesise stages[] from actuator.stageAssignment. Stage labels
-      // default to "Stage N" — the LP HR map has no label region.
-      // LP-MISSING: stage labels — needs HR string region in firmware
-      const stageNums = Array.from(
-        new Set(actuators.map(a => a.stageAssignment).filter(s => s > 0)),
-      ).sort((a, b) => a - b);
-      const stages = stageNums.map(stageNum => ({
-        stageNum,
-        label: `Stage ${stageNum}`,
-        doors: actuators
-          .filter(a => a.stageAssignment === stageNum)
-          .map(a => ({ index: a.index, label: a.label })),
-      }));
-
-      // Total system capacity = sum of open_travel_ms over assigned
-      // actuators (uncalibrated → default_travel_ms fallback).
-      const defaultTravel = r(301);
-      let totalCapacity = 0;
-      for (const a of actuators) {
-        if (a.stageAssignment > 0) {
-          totalCapacity += (a.calibrated && a.openTravelTime > 0)
-            ? a.openTravelTime
-            : defaultTravel;
-        }
-      }
-
-      res.json({
-        present: true,
-        slot: target.slot,
-        freshAirDoorPct:    r(300) / 10,
-        actuatorTravelTime: defaultTravel,
-        activeStageCount:   r(302),
-        calibrating:        r(303) !== 0,
-        calibrationPhase:   r(304),
-        totalCapacity,
-        stages,
-        actuators,
-        // LP-MISSING: per-stage runtime totals — needs HR counters in firmware
-        // LP-MISSING: door labels — needs HR string region in firmware
+    const actuators: Array<{
+      index: number;
+      label: string;
+      position: number;
+      target: number;
+      stageAssignment: number;
+      openTravelTime: number;
+      closeTravelTime: number;
+      moving: boolean;
+      openSwitch: boolean;
+      closeSwitch: boolean;
+      calibrated: boolean;
+    }> = [];
+    const ACT_COUNT = 5;
+    for (let i = 0; i < ACT_COUNT; i++) {
+      const status = r(320 + i);
+      actuators.push({
+        index:        i + 1,
+        // Default label "Door 1".."Door 5" since the LP HR map carries
+        // no per-actuator labels.
+        // LP-MISSING: actuator labels — needs HR string region in firmware
+        label:        `Door ${i + 1}`,
+        // Phase 4b contract fix: was `pos` in the legacy mbtcp path; UI
+        // always read `actuator.position`, so the field rename lands here.
+        position:        r(310 + i) / 10,           // 0..100.0%
+        target:          r(315 + i) / 10,
+        stageAssignment: r(325 + i),
+        openTravelTime:  r(330 + i),
+        closeTravelTime: r(335 + i),
+        moving:       (status & 0x0001) !== 0,
+        openSwitch:   (status & 0x0002) !== 0,
+        closeSwitch:  (status & 0x0004) !== 0,
+        calibrated:   (status & 0x0008) !== 0,
       });
-    } catch (err: any) {
-      res.status(503).json({ present: false, error: String(err?.message ?? err) });
     }
+
+    // Synthesise stages[] from actuator.stageAssignment. Stage labels
+    // default to "Stage N" — the LP HR map has no label region.
+    // LP-MISSING: stage labels — needs HR string region in firmware
+    const stageNums = Array.from(
+      new Set(actuators.map(a => a.stageAssignment).filter(s => s > 0)),
+    ).sort((a, b) => a - b);
+    const stages = stageNums.map(stageNum => ({
+      stageNum,
+      label: `Stage ${stageNum}`,
+      doors: actuators
+        .filter(a => a.stageAssignment === stageNum)
+        .map(a => ({ index: a.index, label: a.label })),
+    }));
+
+    // Total system capacity = sum of open_travel_ms over assigned
+    // actuators (uncalibrated → default_travel_ms fallback).
+    const defaultTravel = r(301);
+    let totalCapacity = 0;
+    for (const a of actuators) {
+      if (a.stageAssignment > 0) {
+        totalCapacity += (a.calibrated && a.openTravelTime > 0)
+          ? a.openTravelTime
+          : defaultTravel;
+      }
+    }
+
+    res.json({
+      present: true,
+      slot,
+      freshAirDoorPct:    r(300) / 10,
+      actuatorTravelTime: defaultTravel,
+      activeStageCount:   r(302),
+      calibrating:        r(303) !== 0,
+      calibrationPhase:   r(304),
+      totalCapacity,
+      stages,
+      actuators,
+      ageMs: Date.now() - bank.ts,
+      // LP-MISSING: per-stage runtime totals — needs HR counters in firmware
+      // LP-MISSING: door labels — needs HR string region in firmware
+    });
   });
 
   /** POST /iot/gdc/stages — reassign actuators to stages.
@@ -2772,142 +2786,216 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
       b => b.slot === slot && b.role === 3 && b.connected,
     );
     if (!board) { res.json({ ok: true, present: false }); return; }
-    const host = resolveOrbitHost(board.slot);
-    try {
-      const [sp, fail, sens, equip, alarms] = await Promise.all([
-        readHoldingRegs(host, 400, 40),
-        readHoldingRegs(host, 440, 14),
-        readHoldingRegs(host, 460, 14),
-        readHoldingRegs(host, 480, 14),
-        readHoldingRegs(host, 530, 13),
-      ]);
 
-      // Setpoints decode (HR 400-base offsets, see orbit_triton.h).
-      const setpoints: Record<string, number> = {
-        enabled:                   sp[0],
-        refrigerantType:           sp[1],
-        cutInP:                    asS16(sp[2])  / 10,
-        cutOutP:                   asS16(sp[3])  / 10,
-        minOffTimeSec:             sp[4],
-        minRuntime:                sp[5],
-        warmUpSec:                 sp[6],
-        powerFailMinutes:          sp[7],
-        lowAmbientCutoutF:         asS16(sp[8])  / 10,
-        pumpDownMode:              sp[9],
-        discHighUnloadP:           asS16(sp[10]) / 10,
-        sucLowUnloadP:             asS16(sp[11]) / 10,
-        superheatTarget:           asS16(sp[12]) / 10,
-        superheatLowF:             asS16(sp[13]) / 10,
-        unloaderOnPct0:            sp[14],
-        unloaderOnPct1:            sp[15],
-        unloaderOffPct0:           sp[16],
-        unloaderOffPct1:           sp[17],
-        unloaderHpUnloadPsi0:      asS16(sp[18]) / 10,
-        unloaderHpUnloadPsi1:      asS16(sp[19]) / 10,
-        unloaderHpLoadPsi0:        asS16(sp[20]) / 10,
-        unloaderHpLoadPsi1:        asS16(sp[21]) / 10,
-        unloaderLpUnloadPsi0:      asS16(sp[22]) / 10,
-        unloaderLpUnloadPsi1:      asS16(sp[23]) / 10,
-        unloaderLpLoadPsi0:        asS16(sp[24]) / 10,
-        unloaderLpLoadPsi1:        asS16(sp[25]) / 10,
-        unloaderNormal:            sp[26],
+    // Phase 4b: the entire TRITON HR window (400..655) rides in a
+    // single OrbitSensorBank push at hr_base=400. Bridge no longer
+    // opens Modbus TCP to the orbit — Nova polls, bridge decodes the
+    // cached snapshot.
+    const bank = novaStore?.getOrbitBank(slot, 400);
+    if (!bank) { res.json({ ok: true, present: false, awaiting: true }); return; }
+
+    // Indexing helper relative to base 400 (single block read). Each
+    // block from orbit_triton.h has its own offset within the window:
+    //   400..439 setpoints           → values[0..39]
+    //   440..453 failure modes       → values[40..53]
+    //   460..473 live sensor values  → values[60..73]
+    //   480..493 live equipment      → values[80..93]
+    //   530..542 alarms + ack cmd    → values[130..142]
+    const r = (a: number) => bank.values[a - 400] ?? 0;
+    const sp    = (off: number) => r(400 + off);
+    const fail  = (off: number) => r(440 + off);
+    const sens  = (off: number) => r(460 + off);
+    const equip = (off: number) => r(480 + off);
+    const alarmReg = (off: number) => r(530 + off);
+
+    // Setpoints decode.
+    const minOffTimeSec = sp(4);
+    const setpoints: Record<string, number> = {
+      enabled:                   sp(0),
+      refrigerantType:           sp(1),
+      cutInP:                    asS16(sp(2))  / 10,
+      cutOutP:                   asS16(sp(3))  / 10,
+      minOffTimeSec,
+      // Phase 4b contract fix: TritonHotspotPopup binds `minOffTime`
+      // (no `Sec` suffix); preserve both so neither path drifts.
+      minOffTime:                minOffTimeSec,
+      minRuntime:                sp(5),
+      warmUpSec:                 sp(6),
+      powerFailMinutes:          sp(7),
+      lowAmbientCutoutF:         asS16(sp(8))  / 10,
+      pumpDownMode:              sp(9),
+      discHighUnloadP:           asS16(sp(10)) / 10,
+      sucLowUnloadP:             asS16(sp(11)) / 10,
+      superheatTarget:           asS16(sp(12)) / 10,
+      superheatLowF:             asS16(sp(13)) / 10,
+      unloaderOnPct0:            sp(14),
+      unloaderOnPct1:            sp(15),
+      unloaderOffPct0:           sp(16),
+      unloaderOffPct1:           sp(17),
+      unloaderHpUnloadPsi0:      asS16(sp(18)) / 10,
+      unloaderHpUnloadPsi1:      asS16(sp(19)) / 10,
+      unloaderHpLoadPsi0:        asS16(sp(20)) / 10,
+      unloaderHpLoadPsi1:        asS16(sp(21)) / 10,
+      unloaderLpUnloadPsi0:      asS16(sp(22)) / 10,
+      unloaderLpUnloadPsi1:      asS16(sp(23)) / 10,
+      unloaderLpLoadPsi0:        asS16(sp(24)) / 10,
+      unloaderLpLoadPsi1:        asS16(sp(25)) / 10,
+      unloaderNormal:            sp(26),
+    };
+
+    // Failure modes — pair {mode, delaySec} per sensor. Order MUST
+    // match the sensor index in orbit_triton.h.
+    const sensorKeys = ['suctionP','dischargeP','oilP','suctionT','dischargeT','llsT','ambientT'] as const;
+    const failures: Record<string, { mode: number; delaySec: number }> = {};
+    for (let i = 0; i < sensorKeys.length; i++) {
+      failures[sensorKeys[i]] = {
+        mode:     fail(i * 2),
+        delaySec: fail(i * 2 + 1),
       };
-
-      // Failure modes — pair {mode, delaySec} per sensor. Order MUST
-      // match the sensor index in orbit_triton.h.
-      const sensorKeys = ['suctionP','dischargeP','oilP','suctionT','dischargeT','llsT','ambientT'] as const;
-      const failures: Record<string, { mode: number; delaySec: number }> = {};
-      for (let i = 0; i < sensorKeys.length; i++) {
-        failures[sensorKeys[i]] = {
-          mode:     fail[i * 2],
-          delaySec: fail[i * 2 + 1],
-        };
-      }
-
-      // Live sensor values — pair {value_x10 (signed), valid 0/1}.
-      // Pressure channels (suctionP..oilP) are PSI×10; temperature
-      // channels are °F×10 (Triton convention — do NOT convert to °C
-      // bridge-side; the UI consumes the raw °F).
-      const sensors: Record<string, { value: number; valid: boolean }> = {};
-      for (let i = 0; i < sensorKeys.length; i++) {
-        sensors[sensorKeys[i]] = {
-          value: asS16(sens[i * 2]) / 10,
-          valid: sens[i * 2 + 1] !== 0,
-        };
-      }
-
-      // Live equipment (HR 480..493 → indices 0..13 of `equip`).
-      const compressorRuntimeSec = (equip[7] << 16) | equip[6];   // _hi << 16 | _lo
-      const safeOffMask = (equip[13] << 16) | equip[12];          // hi<<16 | lo
-      const compressor = {
-        on:          equip[0] !== 0,
-        status:      equip[1],
-        runtimeSec:  compressorRuntimeSec,
-      };
-      const unloaders = {
-        on: [
-          (equip[3] & 0x01) !== 0,
-          (equip[3] & 0x02) !== 0,
-        ],
-        hpForced: [
-          (equip[4] & 0x01) !== 0,
-          (equip[4] & 0x02) !== 0,
-        ],
-        lpForced: [
-          (equip[5] & 0x01) !== 0,
-          (equip[5] & 0x02) !== 0,
-        ],
-        normal: setpoints.unloaderNormal,
-      };
-
-      // Alarms — 6 regs active + 6 regs acked + 1 ack-cmd.
-      const activeBits: number[] = alarms.slice(0, 6);
-      const ackedBits:  number[] = alarms.slice(6, 12);
-
-      res.json({
-        ok: true,
-        present: true,
-        orbitId: board.slot + 2,            // dipswitch id from slot
-        // LP-MISSING: orbit role string — synthesise from dataCache role
-        role: 'TRITON',
-        // LP-MISSING: enabled / label / manualMode — needs HR string + flag regs
-        enabled: setpoints.enabled !== 0,
-        compressor,
-        // LP-MISSING: condenserFans.{stage,count,targetP,leadIndex,vfdPct,pid,fans} — needs HR regs
-        capacity: {
-          stage: equip[2],
-          unloaderBits: equip[3],
-          hpForcedBits: equip[4],
-          lpForcedBits: equip[5],
-        },
-        // LP-MISSING: evapFanOn / oilPumpOn / exvOpenPct — needs HR live regs
-        unloaders,
-        // LP-MISSING: defrost.* — needs HR defrost SM regs
-        demand: equip[9],                   // 0..100
-        sensors,
-        derived: {
-          suctionSatTempF: asS16(equip[10]) / 10,
-          superheatF:      asS16(equip[11]) / 10,
-          // LP-MISSING: leakDetect — needs HR leak-detector regs
-        },
-        setpoints,
-        failures,
-        // LP-MISSING: ioConfig.{aoMode,doRole} — needs HR I/O config regs
-        // LP-MISSING: safeties.{lockoutMask,...} — needs HR safety regs
-        safeOffMask,
-        // LP-MISSING: failureStates per-channel timer — not in HR map
-        // LP-MISSING: safePolicy — needs HR safe-policy regs
-        alarms: {
-          // Raw bitmap (UI can decode bit positions per TRITON_ALARM_BITS).
-          activeBits,
-          ackedBits,
-        },
-        // LP-MISSING: logs.{pid,user,sys} — needs proto log channel
-        // LP-MISSING: physical.{digitalOutputs,analogOutputs,outputLabels} — needs HR I/O state regs
-      });
-    } catch (err: any) {
-      res.status(503).json({ ok: false, error: String(err?.message ?? err) });
     }
+
+    // Live sensor values — pair {value_x10 (signed), valid 0/1}.
+    // Pressure channels (suctionP..oilP) are PSI×10; temperature
+    // channels are °F×10 (Triton convention — do NOT convert to °C
+    // bridge-side; the UI consumes the raw °F).
+    const sensors: Record<string, { value: number; valid: boolean }> = {};
+    for (let i = 0; i < sensorKeys.length; i++) {
+      sensors[sensorKeys[i]] = {
+        value: asS16(sens(i * 2)) / 10,
+        valid: sens(i * 2 + 1) !== 0,
+      };
+    }
+
+    // Live equipment (HR 480..493 → offsets 0..13 within the block).
+    const compressorRuntimeSec = (equip(7) << 16) | equip(6);   // _hi << 16 | _lo
+    const safeOffMask = (equip(13) << 16) | equip(12);          // hi<<16 | lo
+    const compressor = {
+      on:          equip(0) !== 0,
+      status:      equip(1),
+      runtimeSec:  compressorRuntimeSec,
+    };
+    const unloaders = {
+      on: [
+        (equip(3) & 0x01) !== 0,
+        (equip(3) & 0x02) !== 0,
+      ],
+      hpForced: [
+        (equip(4) & 0x01) !== 0,
+        (equip(4) & 0x02) !== 0,
+      ],
+      lpForced: [
+        (equip(5) & 0x01) !== 0,
+        (equip(5) & 0x02) !== 0,
+      ],
+      normal: setpoints.unloaderNormal,
+    };
+
+    // Alarms — 6 regs active + 6 regs acked + 1 ack-cmd at HR 530..542.
+    const activeBits: number[] = [];
+    const ackedBits:  number[] = [];
+    for (let i = 0; i < 6; i++) {
+      activeBits.push(alarmReg(i));
+      ackedBits.push(alarmReg(6 + i));
+    }
+
+    // Phase 4b contract fix: the UI's TritonScadaSection/Hotspot popup
+    // consumes `state.alarms` as an array of {label, active, acked}
+    // objects (see TritonScadaSection.svelte:59 `.filter(a => a.active)`
+    // and HotspotPopup line 951 `each state.alarms as a`). The legacy
+    // mbtcp path returned `{activeBits, ackedBits}` bitmaps, leaving
+    // those consumers permanently broken. Decode the bits here into
+    // the array shape the UI already expects. The bitmap is still
+    // exposed under `alarms.bitmaps` for the debug-view consumers.
+    const TRITON_ALARM_LABELS: Record<number, string> = {
+      0: 'Suction low pressure',
+      1: 'Suction high pressure',
+      2: 'Discharge high pressure',
+      3: 'Discharge high temp',
+      4: 'Oil low pressure',
+      6: 'Phase fault',
+      7: 'HP safety',
+      8: 'LP safety',
+      9: 'Compressor overload',
+      10: 'Condenser overload',
+      11: 'Permit fault',
+      13: 'Superheat fault',
+      14: 'Superheat low',
+      15: 'Discharge sensor fault',
+      16: 'Suction sensor fault',
+      17: 'Oil sensor fault',
+      18: 'Outside air sensor fault',
+      20: 'Suction-P sensor fault',
+      21: 'Discharge-P sensor fault',
+      22: 'Oil-P sensor fault',
+      23: 'Suction-T sensor fault',
+      24: 'Discharge-T sensor fault',
+      25: 'LLS-T sensor fault',
+      26: 'Ambient-T sensor fault',
+    };
+    const alarmObjects: Array<{ code: number; label: string; active: boolean; acked: boolean }> = [];
+    const totalBits = 6 * 16;
+    for (let code = 0; code < totalBits; code++) {
+      const wordIdx = code >> 4;
+      const bit = 1 << (code & 0x0F);
+      const active = (activeBits[wordIdx] & bit) !== 0;
+      const acked  = (ackedBits[wordIdx]  & bit) !== 0;
+      if (!active && !acked) continue;
+      alarmObjects.push({
+        code,
+        label: TRITON_ALARM_LABELS[code] ?? `Alarm ${code}`,
+        active,
+        acked,
+      });
+    }
+
+    const superheatF = asS16(equip(11)) / 10;
+    res.json({
+      ok: true,
+      present: true,
+      orbitId: board.slot + 2,            // dipswitch id from slot
+      // LP-MISSING: orbit role string — synthesise from dataCache role
+      role: 'TRITON',
+      // LP-MISSING: enabled / label / manualMode — needs HR string + flag regs
+      enabled: setpoints.enabled !== 0,
+      // Default label until LP exposes a string region — UI's
+      // TritonScadaSection header reads `state.label`.
+      label: `Triton ${board.slot + 1}`,
+      compressor,
+      // LP-MISSING: condenserFans.{stage,count,targetP,leadIndex,vfdPct,pid,fans} — needs HR regs
+      capacity: {
+        stage: equip(2),
+        unloaderBits: equip(3),
+        hpForcedBits: equip(4),
+        lpForcedBits: equip(5),
+      },
+      // LP-MISSING: evapFanOn / oilPumpOn / exvOpenPct — needs HR live regs
+      unloaders,
+      // LP-MISSING: defrost.* — needs HR defrost SM regs
+      demand: equip(9),                   // 0..100
+      sensors,
+      derived: {
+        suctionSatTempF: asS16(equip(10)) / 10,
+        superheatF,
+        // Phase 4b contract fix: TritonMimic reads `state.derived.superheat`;
+        // legacy path only exposed `superheatF` so the gauge never updated.
+        superheat:       superheatF,
+        // LP-MISSING: leakDetect — needs HR leak-detector regs
+      },
+      setpoints,
+      failures,
+      // LP-MISSING: ioConfig.{aoMode,doRole} — needs HR I/O config regs
+      // LP-MISSING: safeties.{lockoutMask,...} — needs HR safety regs
+      safeOffMask,
+      // LP-MISSING: failureStates per-channel timer — not in HR map
+      // LP-MISSING: safePolicy — needs HR safe-policy regs
+      // Phase 4b contract: alarms is now array-of-objects (UI shape),
+      // with raw bitmaps preserved under `.bitmaps` for debug consumers.
+      alarms: alarmObjects,
+      alarmBitmaps: { activeBits, ackedBits },
+      ageMs: Date.now() - bank.ts,
+      // LP-MISSING: logs.{pid,user,sys} — needs proto log channel
+      // LP-MISSING: physical.{digitalOutputs,analogOutputs,outputLabels} — needs HR I/O state regs
+    });
   });
 
   /**
@@ -3167,92 +3255,13 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   // (envelope tags 120 / 121 via novaAdapter). The bridge no longer
   // probes orbit-simulator REST `/api/status`.
 
-  /** GET /iot/orbit/status — per-board status snapshot for the UI orbit
-   *  page. Schema mirrors firmware `OrbitBoardStatus` field-for-field
-   *  (proto3, ts-proto camelCase). Fields the firmware hasn't pushed
-   *  yet are simply omitted (no `null` placeholders) — the UI uses
-   *  optional-chaining and only renders rows it has data for.
-   *
-   *  Live I/O state (DI/DO/AO/DC24V/eStop) is NOT pushed by the
-   *  CONTROLLER LP yet — the proto fields exist but the encoder
-   *  source (`OrbitSample`) has no DI/DO polling. Until that lands,
-   *  this handler probes each connected board directly via Modbus TCP
-   *  (FC01/FC02/FC03) at request time. Per-board sub-probes run in
-   *  parallel with `Promise.allSettled`; a failed probe omits its
-   *  field set but the rest of the row still ships, and the whole
-   *  handler is bounded by orbitMbtcp's 1.5 s per-call timeout.
-   *  See `/memories/repo/bridge-mbtcp-migration.md`. */
-  router.get('/orbit/status', async (_req: Request, res: Response) => {
-    const cached = dataCache.getOrbitBoards();
-    const boards = await Promise.all(cached.map(async b => {
-      const row: Record<string, unknown> = {
-        slot: b.slot,
-        // dipswitch_id retained as snake_case for legacy UI consumers;
-        // prefer firmware-reported value, fall back to the historical
-        // `slot+2` synthesis used pre-mbtcp-migration.
-        dipswitch_id: b.dipswitchId ?? (b.slot + 2),
-        connected: b.connected,
-        role: b.role,
-        aoEquip: b.aoEquip ?? [0, 0],
-      };
-      if (b.commErrors  !== undefined) row.commErrors  = b.commErrors;
-      if (b.estopActive !== undefined) row.estopActive = b.estopActive;
-      if (b.safeMode    !== undefined) row.safeMode    = b.safeMode;
-      if (b.cpuTemp     !== undefined) row.cpuTemp     = b.cpuTemp;
-      if (b.uptimeSecs  !== undefined) row.uptimeSecs  = b.uptimeSecs;
-      if (b.firmwareVer !== undefined) row.firmwareVer = b.firmwareVer;
-      if (b.zoneId      !== undefined) row.zoneId      = b.zoneId;
-      if (b.legacySlot  !== undefined) row.legacySlot  = b.legacySlot;
-      if (b.refrigStage !== undefined) row.refrigStage = b.refrigStage;
-      if (b.ipAddress)                 row.ipAddress   = b.ipAddress;
-
-      // Live mbtcp probe — only when firmware says the slot is up.
-      // Coil map (orbit_storage.h):
-      //   discrete inputs 0..9  → DI[0..9]
-      //                       10 → eStop
-      //                  11..14 → DC24V monitors[0..3]
-      //   coils           0..9  → DO[0..9]
-      //   HR              0..1  → AO percent×10 (int16)
-      if (b.connected) {
-        const host = resolveOrbitHost(b.slot);
-        const [diRes, doRes, aoRes] = await Promise.allSettled([
-          readDiscreteInputs(host, 0, 15),
-          readCoils(host, 0, 10),
-          readHoldingRegs(host, 0, 2),
-        ]);
-        if (diRes.status === 'fulfilled') {
-          const di = diRes.value;
-          row.digitalInputs = di.slice(0, 10);
-          row.eStop         = di[10];
-          row.dc24vInputs   = di.slice(11, 15);
-        }
-        if (doRes.status === 'fulfilled') {
-          row.digitalOutputs = doRes.value;
-        }
-        if (aoRes.status === 'fulfilled') {
-          // Reported as int16 ×10, transparent passthrough — UI divides.
-          row.analogOutputs = aoRes.value.map(asS16);
-        }
-      }
-
-      return row;
-    }));
-
-    // LP-MISSING (after mbtcp probe pass):
-    //   • dc24vOutputs       — open-collector outs without sense-back; LP
-    //     has no live coil region for these. Add a sense path or LP-side
-    //     readback register before re-exposing.
-    //   • vfdActivitySecs    — would need a polling proxy in the bridge;
-    //     LP doesn't expose a single HR address for it today.
-    //   • sensorActivitySecs — same; no LP HR field yet.
-    //   • outputLabels / inputLabels — no HR string region on the LP.
-    //     Will be sourced from UI IoDefinition metadata, not the LP.
-    res.json({
-      max_slots: NOVA_MAX_ORBITS,
-      boards_found: boards.length,
-      boards,
-    });
-  });
+  // (Phase 4b 2026-06-01) GET /iot/orbit/status REMOVED. The route had
+  // ZERO consumers in `constellation-ui/src/` (audited 2026-06-01) and
+  // its FC01/FC02/FC03 probes were the last reads needing the bridge
+  // to open Modbus TCP from the Pi5. DI/DO/AO live state is carried
+  // by `OrbitBoardStatus` fields 16-23 today — the LP emits them
+  // ([Nova_Firmware/lp_am2434/main.c:4328-4353]); future consumers
+  // should subscribe to the `OrbitStatus` proto stream instead.
 
   /** GET /iot/orbit/boards — lightweight list. Includes `connected`
    *  and (when known) firmware health hints (`commErrors`, `estopActive`,
@@ -3295,28 +3304,27 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   });
 
   // GET /iot/orbits/sensor-banks → raw HR[hr_base..hr_base+N-1] per orbit.
-  // Mirrors firmware OrbitSensorBank pushes (envelope tag 123); no scaling
+  // Mirrors firmware OrbitSensorBank pushes (envelope tag 124); no scaling
   // or unit conversion. Bridge is a transparent gateway here — UI applies
   // any sensor-channel decoding via IoDefinition metadata.
+  //
+  // Phase 4b 2026-06-01: one orbit may now publish multiple banks
+  // (sensor block at hr_base=200 + role window at 300/400). The
+  // response flattens to one entry per (slot, hrBase) tuple.
   router.get('/orbits/sensor-banks', (_req: Request, res: Response) => {
-    const banks = novaStore?.orbitSensorBanks;
-    if (!banks || banks.size === 0) {
-      res.json({ banks: [] });
-      return;
-    }
-    const out: Array<{slot:number; hrBase:number; values:number[]; seq:number; ageMs:number}> = [];
+    if (!novaStore) { res.json({ banks: [] }); return; }
+    const all = novaStore.getAllOrbitBanks();
+    if (all.length === 0) { res.json({ banks: [] }); return; }
     const now = Date.now();
-    for (const [, b] of banks) {
-      out.push({
+    res.json({
+      banks: all.map(b => ({
         slot:   b.slot,
         hrBase: b.hrBase,
         values: b.values,
         seq:    b.seq,
         ageMs:  now - b.ts,
-      });
-    }
-    out.sort((a, b) => a.slot - b.slot);
-    res.json({ banks: out });
+      })),
+    });
   });
 
   // POST /iot/orbits/role  body: { slot:number, role:number, zoneId?:number, refrigStage?:number }

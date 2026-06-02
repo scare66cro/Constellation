@@ -4487,51 +4487,59 @@ static size_t build_orbit_status_envelope(uint8_t *buf, size_t bufsize,
 
 /*
  * Build: Envelope { protocol_version=1, seq=N,
- *                   orbit_sensor_bank={slot, hr_base=200, values[64], seq} }
+ *                   orbit_sensor_bank={slot, hr_base, values[count], seq} }
  *
  * Wire layout:
  *   Field 1   (protocol_version): tag=0x08, varint=1
  *   Field 2   (seq):              tag=0x10, varint=env_seq
  *   Field 124 (orbit_sensor_bank): tag=(124<<3)|2=994 → 0xE2 0x07
  *     OrbitSensorBank.slot     (field 1, varint, ALWAYS — slot 0 valid)
- *     OrbitSensorBank.hr_base  (field 2, varint, ALWAYS)
- *     OrbitSensorBank.values   (field 3, repeated uint32 packed) — emit
- *                                packed for compactness; 64×3B max ≈ 192B.
- *     OrbitSensorBank.seq      (field 4, varint, per-board seq)
+ *     OrbitSensorBank.hr_base  (field 2, varint, ALWAYS — hr_base 0 valid)
+ *     OrbitSensorBank.values   (field 3, repeated uint32 packed)
+ *     OrbitSensorBank.seq      (field 4, varint, per-bank seq)
  *
- * Returns 0 if the requested orbit has never produced a sample.
+ * Phase 4b 2026-06-01: parameterised on (hr_base, values, count) so
+ * the same emitter handles the STORAGE sensor bank (200..327, 128
+ * regs) AND the per-role secondary windows (GDC 300..395, TRITON
+ * 400..655). `values` is the source u16 array; caller provides
+ * `count` and the matching `hr_base` so the bridge can route the
+ * decode by (slot, hr_base) pair.
+ *
+ * Returns 0 if count==0 or the envelope wouldn't fit in `bufsize`.
  */
 static size_t build_orbit_sensor_bank_envelope(uint8_t *buf, size_t bufsize,
                                                uint32_t env_seq,
                                                uint8_t orbit_index,
+                                               uint16_t hr_base,
+                                               const uint16_t *values,
+                                               uint16_t count,
                                                uint32_t board_seq)
 {
-    OrbitSample sample;
-    if (!OrbitClient_GetSample(orbit_index, &sample)) {
+    if (count == 0U || values == NULL) {
         return 0;
     }
-    ss_apply_remote_outside_override(&sample, orbit_index);
 
-    /* Build OrbitSensorBank inner first. */
-    uint8_t inner[280];   /* 4B hdr + 64×~3B packed + slack */
+    /* Build OrbitSensorBank inner first. Inner buffer sized for the
+     * worst case: 256 regs × 3 B max varint + ~16 B hdr/seq overhead. */
+    uint8_t inner[ORBIT_ROLE_HR_MAX * 3 + 32];
     size_t ilen = 0;
 
     /* slot (field 1, varint) — always emit, slot 0 is valid */
     inner[ilen++] = 0x08;
     ilen += pb_encode_varint(&inner[ilen], (uint32_t)orbit_index);
 
-    /* hr_base (field 2, varint) — always emit */
+    /* hr_base (field 2, varint) — always emit, hr_base 0 is valid */
     inner[ilen++] = 0x10;
-    ilen += pb_encode_varint(&inner[ilen], ORBIT_SENSOR_HR_BASE);
+    ilen += pb_encode_varint(&inner[ilen], (uint32_t)hr_base);
 
     /* values (field 3, repeated uint32 PACKED). Tag = (3<<3)|2 = 0x1A.
      * Packed encoding: tag, length, concatenated varints. */
     inner[ilen++] = 0x1A;
     /* Pre-encode the values into a scratch to learn the byte length. */
-    uint8_t vbuf[ORBIT_SENSOR_HR_COUNT * 3];   /* uint16 → ≤3B varint */
+    uint8_t vbuf[ORBIT_ROLE_HR_MAX * 3];   /* uint16 → ≤3B varint */
     size_t vlen = 0;
-    for (size_t k = 0; k < ORBIT_SENSOR_HR_COUNT; k++) {
-        vlen += pb_encode_varint(&vbuf[vlen], (uint32_t)sample.sensorHr[k]);
+    for (uint16_t k = 0; k < count; k++) {
+        vlen += pb_encode_varint(&vbuf[vlen], (uint32_t)values[k]);
     }
     ilen += pb_encode_varint(&inner[ilen], (uint32_t)vlen);
     if (ilen + vlen > sizeof(inner)) return 0;
@@ -5265,22 +5273,53 @@ static void bridge_uart_task(void *args)
             }
         }
 
-        /* Send one OrbitSensorBank per 100ms tick, cycling through all
+        /* Send OrbitSensorBank(s) per 100ms tick, cycling through all
          * configured orbits. With 5 orbits this covers every board every
          * 500ms (~2 Hz per board, well under the 1 Hz orbit polling rate
-         * so the bridge never sees stale duplicates). build_orbit_sensor_
-         * bank_envelope() returns 0 for never-polled slots so the slot
-         * gap is silently skipped. Gated on broker install-mode per
-         * Phase 3. */
+         * so the bridge never sees stale duplicates).
+         *
+         * Phase 4b 2026-06-01: each cycle emits up to TWO banks for the
+         * selected orbit — the always-present STORAGE-style sensor bank
+         * (hr_base=ORBIT_SENSOR_HR_BASE) PLUS the per-role secondary
+         * window (hr_base=ORBIT_ROLE_HR_GDC/TRITON_BASE) when populated.
+         * Bridge routes by (slot, hr_base) so it can hold both banks
+         * concurrently. Gated on broker install-mode per Phase 3. */
         if (!NovaOtaBroker_IsInInstallMode()) {
             uint8_t orbit_count = (uint8_t)OrbitClient_Count();
             if (orbit_count > 0) {
                 uint8_t idx = (uint8_t)(tick % orbit_count);
-                size_t pb_len = build_orbit_sensor_bank_envelope(
-                    envelope_buf, sizeof(envelope_buf),
-                    ++bank_env_seq, idx, ++bank_board_seq[idx]);
-                if (pb_len > 0) {
-                    NovaProto_SendRaw(envelope_buf, pb_len);
+                OrbitSample sample;
+                if (OrbitClient_GetSample(idx, &sample)) {
+                    ss_apply_remote_outside_override(&sample, idx);
+                    uint32_t this_seq = ++bank_board_seq[idx];
+
+                    /* Bank 1: STORAGE-style sensor bank (always emit). */
+                    size_t pb_len = build_orbit_sensor_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf),
+                        ++bank_env_seq, idx,
+                        ORBIT_SENSOR_HR_BASE,
+                        sample.sensorHr, ORBIT_SENSOR_HR_COUNT,
+                        this_seq);
+                    if (pb_len > 0) {
+                        NovaProto_SendRaw(envelope_buf, pb_len);
+                    }
+
+                    /* Bank 2: per-role secondary window (GDC/TRITON
+                     * only; STORAGE / UNASSIGNED leave roleHrCount=0).
+                     * Skip when the role read has never succeeded so
+                     * the bridge doesn't see all-zero placeholder
+                     * data on first boot. */
+                    if (sample.roleHrValid && sample.roleHrCount > 0U) {
+                        pb_len = build_orbit_sensor_bank_envelope(
+                            envelope_buf, sizeof(envelope_buf),
+                            ++bank_env_seq, idx,
+                            sample.roleHrBase,
+                            sample.roleHr, sample.roleHrCount,
+                            this_seq);
+                        if (pb_len > 0) {
+                            NovaProto_SendRaw(envelope_buf, pb_len);
+                        }
+                    }
                 }
             }
         }

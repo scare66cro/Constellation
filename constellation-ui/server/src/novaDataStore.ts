@@ -646,8 +646,15 @@ export class NovaDataStore extends EventEmitter {
   climacellTimes: ClimacellTimes | null = null;
   orbitStatus: OrbitStatus | null = null;
   orbitDiscovery: OrbitDiscovery | null = null;
-  /** Latest sensor-HR bank per orbit slot. Slot index = key. */
-  orbitSensorBanks: Map<number, OrbitSensorBank> = new Map();
+  /** Latest HR banks per orbit, keyed by `(slot, hrBase)`.
+   *
+   * Phase 4b 2026-06-01: one orbit may now publish multiple banks per
+   * cycle (the always-present STORAGE-style sensor bank at hr_base=200
+   * plus a per-role secondary window at hr_base=300 for GDC or
+   * hr_base=400 for TRITON). Keying by inner `hr_base` lets the
+   * bridge hold both banks concurrently and lets `/iot/gdc` +
+   * `/iot/triton/:slot` look up the right bank without scanning. */
+  orbitSensorBanks: Map<number, Map<number, OrbitSensorBank>> = new Map();
 
   // Raw storage of every inner-message bytes received, keyed by Envelope
   // field tag (msgId). Used both for "messages we don't decode yet" passthrough
@@ -1532,9 +1539,12 @@ export class NovaDataStore extends EventEmitter {
     this.emit('orbitDiscovery', this.orbitDiscovery);
   }
 
-  /** Decode OrbitSensorBank (envelope tag 123). Field 3 (`values`) is
+  /** Decode OrbitSensorBank (envelope tag 124). Field 3 (`values`) is
    *  PACKED repeated uint32 per the firmware encoder, so we receive a
-   *  single PB_LEN field and must split the buffer back into varints. */
+   *  single PB_LEN field and must split the buffer back into varints.
+   *
+   *  Phase 4b 2026-06-01: stored in `Map<slot, Map<hrBase, bank>>` so
+   *  one orbit can publish multiple banks per cycle (sensor + role). */
   private decodeOrbitSensorBank(data: Buffer): void {
     const f = pbDecode(data);
     const slot   = gv(f, 1);
@@ -1563,7 +1573,31 @@ export class NovaDataStore extends EventEmitter {
     const bank: OrbitSensorBank = {
       slot, hrBase, values, seq, ts: Date.now(),
     };
-    this.orbitSensorBanks.set(slot, bank);
+    let perSlot = this.orbitSensorBanks.get(slot);
+    if (!perSlot) {
+      perSlot = new Map();
+      this.orbitSensorBanks.set(slot, perSlot);
+    }
+    perSlot.set(hrBase, bank);
     this.emit('orbitSensorBank', bank);
+  }
+
+  /** Look up a single bank for a given (slot, hrBase). Used by the
+   *  Phase 4b `/iot/gdc` and `/iot/triton/:slot` handlers — they
+   *  know which hr_base they want and don't need to scan all banks. */
+  getOrbitBank(slot: number, hrBase: number): OrbitSensorBank | undefined {
+    return this.orbitSensorBanks.get(slot)?.get(hrBase);
+  }
+
+  /** Flatten all (slot, hrBase) banks into a single array.  Used by
+   *  the `/iot/orbits/sensor-banks` debug endpoint. Stable sort by
+   *  slot then hrBase so the operator UI doesn't shuffle on poll. */
+  getAllOrbitBanks(): OrbitSensorBank[] {
+    const out: OrbitSensorBank[] = [];
+    for (const perSlot of this.orbitSensorBanks.values()) {
+      for (const bank of perSlot.values()) out.push(bank);
+    }
+    out.sort((a, b) => a.slot - b.slot || a.hrBase - b.hrBase);
+    return out;
   }
 }

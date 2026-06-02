@@ -17,9 +17,11 @@
   const title = "Orbit Sensor Banks (debug)";
   $: ready = $orbitSensorBanks.size > 0;
 
-  // Sort by slot for stable display.
+  // Sort by slot then hr_base for stable display. Phase 4b 2026-06-01:
+  // one orbit may have multiple banks (sensor + role window), so the
+  // tiebreaker shows them in ascending HR-address order.
   $: sortedBanks = Array.from($orbitSensorBanks.values()).sort(
-    (a, b) => a.slot - b.slot
+    (a, b) => a.slot - b.slot || a.hrBase - b.hrBase
   );
 
   // Helper: lookup connected/role from OrbitStatus for context.

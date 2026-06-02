@@ -23,6 +23,8 @@
  *   - per-task stack stays small (~3 KB) so 5 tasks cost ~15 KB total
  */
 #include "orbit_client.h"
+#include "lp_settings.h"
+#include "orbit_server/orbit_role.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -104,9 +106,19 @@ static int orbit_read_hr(OrbitWorker *w, uint8_t unit, uint16_t startAddr,
         return -3;
     }
 
-    /* Reply: 7 B MBAP + 1 B byte-count + qty*2 B data = 8 + qty*2. */
-    const int expected = 8 + (int)qty * 2;
-    uint8_t resp[8 + 250];
+    /* Reply: 7 B MBAP + 1 B FC + 1 B byte-count + qty*2 B data = 9 + qty*2.
+     * Pre-Phase-4b code had `expected = 8 + qty*2` and `resp[8+250]` —
+     * off-by-one that worked for sensor (64-reg, 137 B fits in 258) and
+     * AO/ident (small) reads but stranded the 259th byte of any 125-reg
+     * read in the kernel socket buffer, corrupting the next read on the
+     * same socket. Hit Phase 4b's TRITON 256-reg role window (chunked
+     * 125+125+6 → 256-reg over-sized variant) and again the 143-reg
+     * variant which chunks to 125+18: the first chunk's stranded byte
+     * broke the second chunk's MBAP echo check. Fix: size `resp[]` to
+     * the actual max-FC03 response (9 + 250 = 259) and account for the
+     * FC byte in `expected`. */
+    const int expected = 9 + (int)qty * 2;
+    uint8_t resp[9 + 250];
     int got = 0;
     while (got < expected) {
         int n = lwip_recv(w->sock, resp + got, sizeof(resp) - (size_t)got, 0);
@@ -132,6 +144,34 @@ static int orbit_read_hr(OrbitWorker *w, uint8_t unit, uint16_t startAddr,
     }
     for (uint16_t i = 0; i < qty; i++) {
         out[i] = ((uint16_t)resp[9 + i * 2] << 8) | resp[10 + i * 2];
+    }
+    return 0;
+}
+
+/* Read `qty` consecutive holding registers using one or more FC03
+ * PDUs. Splits at the Modbus 125-reg-per-PDU limit transparently and
+ * stitches the result back into `out[0..qty-1]`. Returns 0 only when
+ * EVERY sub-read succeeded; first failure returns its rc and the rest
+ * of `out` is left untouched.
+ *
+ * Used by Phase 4b's expanded sensor + role HR windows where a single
+ * orbit poll covers >125 regs (e.g. TRITON role window 400..655 =
+ * 256 regs → 3 sub-reads of 125 + 125 + 6). */
+static int orbit_read_hr_window(OrbitWorker *w, uint8_t unit,
+                                uint16_t startAddr, uint16_t qty,
+                                uint16_t *out)
+{
+    if (qty == 0U) return -2;
+    uint16_t remaining = qty;
+    uint16_t offset    = 0U;
+    while (remaining > 0U) {
+        uint16_t chunk = remaining > 125U ? 125U : remaining;
+        int rc = orbit_read_hr(w, unit,
+                               (uint16_t)(startAddr + offset),
+                               chunk, &out[offset]);
+        if (rc != 0) return rc;
+        offset    += chunk;
+        remaining -= chunk;
     }
     return 0;
 }
@@ -294,6 +334,75 @@ static void orbit_mark_offline(OrbitWorker *w)
     xSemaphoreGive(s_lock);
 }
 
+/* Resolve the per-role HR window for an orbit slot. Writes 0/0 when
+ * the role doesn't need a secondary window (STORAGE / UNASSIGNED /
+ * unpopulated). Reads from LpSettings which is updated by the
+ * controller's OrbitRoleAssign envelope handler. */
+static void orbit_resolve_role_window(uint8_t slot,
+                                      uint16_t *out_base,
+                                      uint16_t *out_count)
+{
+    *out_base  = 0U;
+    *out_count = 0U;
+    const LpOrbitRoleEntry *e = LpSettings_GetOrbitRole(slot);
+    if (e == NULL || !e->populated) return;
+    switch ((OrbitRole)e->role) {
+        case ORBIT_ROLE_GDC:
+            *out_base  = ORBIT_ROLE_HR_GDC_BASE;
+            *out_count = ORBIT_ROLE_HR_GDC_COUNT;
+            return;
+        case ORBIT_ROLE_TRITON:
+            *out_base  = ORBIT_ROLE_HR_TRITON_BASE;
+            *out_count = ORBIT_ROLE_HR_TRITON_COUNT;
+            return;
+        default:
+            return;
+    }
+}
+
+/* Publish the role HR window. Caller passes `count=0` (no role
+ * window for this orbit) or `count>0` with a freshly-read buffer.
+ * Cache zero-clear is done only on role *change* (base differs)
+ * so a transient role-read failure keeps last-known values, mirroring
+ * the sensor-block keep-last-on-error policy.
+ *
+ * Phase 4b 2026-06-01. */
+static void orbit_publish_role(OrbitWorker *w,
+                               uint16_t base, uint16_t count,
+                               const uint16_t *vals, bool readOk)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (count == 0U) {
+        /* Role no longer needs a secondary window (e.g. operator
+         * re-assigned a TRITON slot to STORAGE). Drop the cache so
+         * the bridge doesn't keep emitting stale bank envelopes. */
+        if (w->sample.roleHrCount != 0U) {
+            w->sample.roleHrBase  = 0U;
+            w->sample.roleHrCount = 0U;
+            w->sample.roleHrValid = false;
+        }
+    } else {
+        /* Role-change wipe: if the operator switched roles, last
+         * cycle's role buffer is now garbage. */
+        if (w->sample.roleHrBase != base) {
+            w->sample.roleHrBase  = base;
+            w->sample.roleHrCount = count;
+            w->sample.roleHrValid = false;
+            memset(w->sample.roleHr, 0, sizeof(w->sample.roleHr));
+        } else {
+            /* Bank size may grow if we ever bump the constants.
+             * Keep count in sync. */
+            w->sample.roleHrCount = count;
+        }
+        if (readOk && vals != NULL) {
+            memcpy(w->sample.roleHr, vals,
+                   (size_t)count * sizeof(uint16_t));
+            w->sample.roleHrValid = true;
+        }
+    }
+    xSemaphoreGive(s_lock);
+}
+
 static void orbit_task(void *arg)
 {
     OrbitWorker *w = (OrbitWorker *)arg;
@@ -314,8 +423,10 @@ static void orbit_task(void *arg)
         uint16_t ident   [ORBIT_IDENT_HR_COUNT];
         const uint8_t unit = (uint8_t)(w->cfg.index + 1);
 
-        int rc = orbit_read_hr(w, unit, ORBIT_SENSOR_HR_BASE,
-                               ORBIT_SENSOR_HR_COUNT, sensorHr);
+        /* Sensor block: now 128 regs (Phase 4b growth), split into
+         * 2× FC03 sub-reads by orbit_read_hr_window. */
+        int rc = orbit_read_hr_window(w, unit, ORBIT_SENSOR_HR_BASE,
+                                      ORBIT_SENSOR_HR_COUNT, sensorHr);
         if (rc != 0) {
             DebugP_log("[ORBIT %u] sensor read failed rc=%d\r\n",
                        (unsigned)w->cfg.index, rc);
@@ -334,6 +445,37 @@ static void orbit_task(void *arg)
             orbit_disconnect(w);
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
+        }
+
+        /* Role secondary HR window (Phase 4b 2026-06-01).
+         * GDC: 96 regs @ 300 (1× FC03). TRITON: 256 regs @ 400
+         * (3× FC03 split internally by orbit_read_hr_window).
+         * STORAGE / UNASSIGNED → roleCount=0, skipped.
+         *
+         * Treat as soft-fail like DI/DO above: a transient role-read
+         * failure must NOT drop the sensor cadence or disconnect.
+         * Keep-last-on-error policy via orbit_publish_role(readOk=false). */
+        uint16_t roleBase = 0U, roleCount = 0U;
+        orbit_resolve_role_window(w->cfg.index, &roleBase, &roleCount);
+        if (roleCount > 0U) {
+            uint16_t roleHr[ORBIT_ROLE_HR_MAX];
+            int rc_role = orbit_read_hr_window(w, unit, roleBase,
+                                               roleCount, roleHr);
+            if (rc_role == 0) {
+                orbit_publish_role(w, roleBase, roleCount, roleHr, true);
+            } else {
+                DebugP_log("[ORBIT %u] role HR window @%u..%u soft-fail "
+                           "rc=%d (keeping last-known)\r\n",
+                           (unsigned)w->cfg.index,
+                           (unsigned)roleBase,
+                           (unsigned)(roleBase + roleCount - 1U),
+                           rc_role);
+                orbit_publish_role(w, roleBase, roleCount, NULL, false);
+            }
+        } else {
+            /* No role window today — drops the cache if the operator
+             * re-assigned a TRITON/GDC orbit back to STORAGE. */
+            orbit_publish_role(w, 0U, 0U, NULL, false);
         }
 
         /* Discrete I/O: 2 extra PDUs per cycle (FC01 coils 0..9 = DO,

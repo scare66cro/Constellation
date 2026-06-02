@@ -89,28 +89,31 @@ export const networkNodes = createTagStore(TAG.NetworkNodeSettings);
 export const orbitStatus = createTagStore(TAG.OrbitStatus);
 
 /**
- * `orbitSensorBanks` — per-slot aggregating store for `OrbitSensorBank`
- * frames (envelope tag 124). Each frame carries one slot's HR bank, and
- * firmware cycles slots round-robin, so a plain "last frame wins" store
- * would only ever expose one slot at a time. This store keeps a Map by
- * slot and emits a fresh snapshot whenever any slot updates.
+ * `orbitSensorBanks` — aggregating store for `OrbitSensorBank` frames
+ * (envelope tag 124). Each frame carries one bank for one slot, keyed
+ * by `(slot, hr_base)`; firmware cycles slots round-robin and may
+ * emit multiple banks per orbit (Phase 4b 2026-06-01 — sensor bank
+ * at hr_base=200 plus a per-role secondary window for GDC/TRITON).
+ * A plain "last frame wins" store would only expose one bank at a
+ * time, so this store keeps a Map keyed by `${slot}:${hrBase}` and
+ * emits a fresh snapshot whenever any bank updates.
  *
  * Bridge is a transparent gateway — values are raw uint16 holding-
  * register readings (no scaling, no unit conversion). Engineering-unit
  * conversion belongs in the consumer page using IoDefinition metadata.
  */
 export const orbitSensorBanks: Readable<
-	ReadonlyMap<number, TagPayload[typeof TAG.OrbitSensorBank]>
-> = readable<ReadonlyMap<number, TagPayload[typeof TAG.OrbitSensorBank]>>(
+	ReadonlyMap<string, TagPayload[typeof TAG.OrbitSensorBank]>
+> = readable<ReadonlyMap<string, TagPayload[typeof TAG.OrbitSensorBank]>>(
 	new Map(),
 	(set) => {
-		const banks = new Map<number, TagPayload[typeof TAG.OrbitSensorBank]>();
+		const banks = new Map<string, TagPayload[typeof TAG.OrbitSensorBank]>();
 		const releaseTag = protoStream.acquireTag(TAG.OrbitSensorBank);
 		const releaseListener = protoStream.addListener((t, bytes) => {
 			if (t !== TAG.OrbitSensorBank) return;
 			try {
 				const bank = decodeTag(TAG.OrbitSensorBank, bytes);
-				banks.set(bank.slot, bank);
+				banks.set(`${bank.slot}:${bank.hrBase}`, bank);
 				set(new Map(banks));
 			} catch (err) {
 				console.error('[protoStores] decode failed for OrbitSensorBank:', err);

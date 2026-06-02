@@ -37,11 +37,37 @@
 
 #define ORBIT_CLIENT_MAX_ORBITS    5U   /* matches orbit-sim default 5-orbit deployment */
 #define ORBIT_SENSOR_HR_BASE       200U
-#define ORBIT_SENSOR_HR_COUNT      64U  /* 200..263 */
+#define ORBIT_SENSOR_HR_COUNT      64U  /* 200..263 — bounded by orbit's HR_SENSOR_END.
+                                         * Growing the bank requires bumping the orbit
+                                         * server's HR_SENSOR_END *and* the firmware on
+                                         * every orbit board, or extending the orbit
+                                         * server to return 0 for reserved gaps the way
+                                         * orbit_triton.c already does. */
 #define ORBIT_AO_HR_BASE           0U
 #define ORBIT_AO_HR_COUNT          4U   /* 0..3 */
 #define ORBIT_IDENT_HR_BASE        40000U
 #define ORBIT_IDENT_HR_COUNT       7U   /* 40000..40006 */
+
+/* Per-role secondary HR window (Phase 4b 2026-06-01).
+ *
+ * STORAGE orbits leave this window empty — the sensor block above
+ * already covers everything the UI consumes. GDC and TRITON orbits
+ * advertise a windowed view of their role-specific HR region so the
+ * controller LP can mirror it into an `OrbitSensorBank` envelope
+ * and the bridge can stop opening Modbus TCP sockets from the Pi5
+ * (production UART airgap, see `docs/uart-airgap-architecture.md`).
+ *
+ * Bank sizes match what the orbit server actually serves today.
+ * Growth requires extending the orbit server's HR maps (TRITON has
+ * a reserved-gap pattern that returns 0 — extending the bank just
+ * means bumping HR_TRITON_END). The buffer `roleHr[ORBIT_ROLE_HR_MAX]`
+ * is sized to 256 so the per-role count can grow without a struct
+ * resize. */
+#define ORBIT_ROLE_HR_MAX          256U /* upper bound — sizes the cache buffer */
+#define ORBIT_ROLE_HR_TRITON_BASE  400U
+#define ORBIT_ROLE_HR_TRITON_COUNT 143U /* 400..542, matches HR_TRITON_END=543 */
+#define ORBIT_ROLE_HR_GDC_BASE     300U
+#define ORBIT_ROLE_HR_GDC_COUNT    40U  /* 300..339, matches HR_GDC_END=340 */
 
 /* Discrete I/O windows polled from each remote orbit (Apr 2026).
  * See orbit_server/orbit_storage.h for the canonical bit map:
@@ -63,9 +89,28 @@ typedef struct OrbitSample {
     uint32_t errorCount;         /* failed polls since boot */
     bool     online;             /* true while last poll succeeded */
 
-    uint16_t sensorHr[ORBIT_SENSOR_HR_COUNT]; /* HR[200..263] */
+    uint16_t sensorHr[ORBIT_SENSOR_HR_COUNT]; /* HR[200..263] (Phase 4b: stays at 64 until orbit server's HR_SENSOR_END is bumped in lockstep) */
     uint16_t aoHr    [ORBIT_AO_HR_COUNT];     /* HR[0..3] */
     uint16_t ident   [ORBIT_IDENT_HR_COUNT];  /* HR[40000..40006] */
+
+    /* Per-role secondary HR window (Phase 4b 2026-06-01).
+     *
+     * Populated based on `LpSettings_GetOrbitRole(slot)` at the start
+     * of each poll cycle:
+     *   STORAGE / UNASSIGNED → roleHrCount = 0  (no secondary read)
+     *   GDC                  → roleHrBase = 300, roleHrCount = 96
+     *   TRITON               → roleHrBase = 400, roleHrCount = 256
+     *
+     * `roleHr[]` is sized to `ORBIT_ROLE_HR_MAX` so the same buffer
+     * holds whichever role's data is active. The encoder reads only
+     * `[0..roleHrCount)` and emits an `OrbitSensorBank` keyed by
+     * `roleHrBase`. `roleHrValid` distinguishes "never polled" from
+     * "really zeros"; cleared on role change so the bridge can drop
+     * stale role data when an orbit gets re-assigned. */
+    uint16_t roleHr[ORBIT_ROLE_HR_MAX];
+    uint16_t roleHrBase;
+    uint16_t roleHrCount;
+    bool     roleHrValid;
 
     /* Discrete I/O bitmaps (Apr 2026 LP-I/O extension).
      *  - do_bitmap : bits 0..9 = remote DO 0..9 (FC01 read coils 0..9).

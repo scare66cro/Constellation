@@ -109,24 +109,112 @@
 
 ### Sub-phase 1 — Orbit reads (largest, lowest risk)
 
-**Goal:** every `readHoldingRegs` / `readCoils` / `readDiscreteInputs` call in `apiRoutes.ts` reads from `dataCache` instead.
+> **Audit landed 2026-06-01 (PM).** Findings + design decisions below
+> supersede the original sketched plan; the "Goal/Order/Acceptance"
+> sub-headings reflect the post-audit shape. Original three-step
+> sketch retained at the end of this section in a strike-through
+> block for context.
 
-**Order of operations:**
+**Goal:** every `readHoldingRegs` / `readCoils` / `readDiscreteInputs`
+call in `apiRoutes.ts` reads from `dataCache` instead. The transport
+mechanism reuses the **existing** `OrbitSensorBank` envelope (tag 124)
+— no new proto messages, no new envelope tags, no UI-side store changes
+beyond letting one slot carry multiple banks.
 
-1. **Audit which TRITON HR 400..542 fields the UI actually consumes** vs which are "we read them because we could". Skinny down the migration target if some bytes can simply be dropped.
-2. **Decide envelope shape per-orbit-role.** Recommendation: extend `SystemStatus` with optional submsgs `OrbitGdcExtra`, `OrbitTritonExtra` rather than two new top-level envelopes — keeps the UI proto-store list short.
-3. **Nova-side:** extend `lp_am2434/main.c::build_system_status_envelope` (already at `main.c:3015`) to include the new fields per role. The data is already polled by `orbit_client.c` on the controller; just plumb it into the envelope.
-4. **Bridge-side:** `dataCache` gains getters for the new fields. `apiRoutes.ts` `/iot/gdc`, `/iot/triton/:slot`, `/iot/orbit/status` handlers swap from Modbus calls to `dataCache.getOrbitGdc(slot)` etc.
-5. **Bench:** verify `/iot/gdc` + `/iot/triton/:slot` responses are unchanged before/after for the same orbit. Diff JSON.
-6. **Once green, delete the orbit-read imports** from `apiRoutes.ts`.
+#### Headline audit findings
+
+1. **`/iot/orbit/status` has zero UI consumers.** Endpoint defined
+   in `apiRoutes.ts:3185-3255` is dead code. Sub-phase 1's "DI/DO/AO
+   live state" target row collapses to **delete the endpoint** + the
+   `readDiscreteInputs` / `readCoils` imports. No envelope work needed.
+2. **OrbitBoardStatus fields 16-23 (DI/DO/AO/labels) are emitted by
+   the LP today** ([`Nova_Firmware/lp_am2434/main.c:4328-4353`](../Nova_Firmware/lp_am2434/main.c#L4328-L4353))
+   but **dropped by the bridge decoder** at
+   [`constellation-ui/server/src/novaDataStore.ts:1472-1514`](../constellation-ui/server/src/novaDataStore.ts#L1472-L1514).
+   Decoder gap fix (read fields 16-23 into the cache) is a free
+   side-quest — no proto / firmware work needed, and lets the bridge
+   drop the LP-MISSING placeholders the comments mention.
+3. **GDC HR 300..339 and TRITON HR 400..542 are NOT carried by any
+   existing envelope.** SystemStatus is global panel state (wrong
+   fit). OrbitSensorBank's existing hr_base=200 covers STORAGE only.
+   This is the real Sub-phase 1 work.
+4. **Pre-existing UI/bridge contract mismatches** worth fixing in
+   the same diff (none introduced by Phase 4b, but the new
+   decode-from-dataCache path touches the same shapes):
+   - Door page reads `actuator.position`; bridge sends `pos`
+     ([`door/+page.svelte:264`](../constellation-ui/src/routes/level2/door/+page.svelte#L264) vs [`apiRoutes.ts:2599`](../constellation-ui/server/src/apiRoutes.ts#L2599))
+   - TritonMimic reads `state.derived.superheat`; bridge sends `superheatF`
+     ([`TritonMimic.svelte:65`](../constellation-ui/src/routes/level2/refrigeration/TritonMimic.svelte#L65) vs [`apiRoutes.ts:2890`](../constellation-ui/server/src/apiRoutes.ts#L2890))
+   - TritonScada reads `state.alarms.filter()` as object-array;
+     bridge sends `{activeBits, ackedBits}` bitmaps
+     ([`TritonScadaSection.svelte:59`](../constellation-ui/src/routes/level2/refrigeration/TritonScadaSection.svelte#L59) vs [`apiRoutes.ts:2902-2903`](../constellation-ui/server/src/apiRoutes.ts#L2902-L2903))
+   - TritonHotspotPopup expects `sp.minOffTime`; bridge sends `minOffTimeSec`
+
+#### Design decisions (2026-06-01)
+
+| Decision | Choice | Why |
+|---|---|---|
+| Envelope shape | **Reuse `OrbitSensorBank` (tag 124)** with multiple `hr_base` per orbit | Zero proto change. LP already emits one bank per orbit per 100 ms ([`main.c:5268`](../Nova_Firmware/lp_am2434/main.c#L5268)). Bridge / UI store already plumbed. Raw HR pass-through means placeholder regs cost nothing today and grow free tomorrow. |
+| Per-orbit bank shape | **One big bank per role** (atomic snapshot) — not multiple sub-banks | Simpler LP poller, atomic JSON snapshot bridge-side, matches existing STORAGE poller pattern. |
+| Bank sizing | **Match what the orbit server actually serves today.** STORAGE 64 (200..263). TRITON 143 (400..542). GDC 40 (300..339). | First attempted 2× headroom but bench validation 2026-06-01 showed the orbit Modbus server returns `ILLEGAL_DATA_ADDRESS` past `HR_*_END`. Growing the bank window therefore requires bumping `HR_SENSOR_END` / `HR_TRITON_END` / `HR_GDC_END` in the orbit server *and* re-flashing every orbit board. Kept the `roleHr[ORBIT_ROLE_HR_MAX=256]` buffer size unchanged so the bank count can grow with a header bump only when the orbit firmware catches up. |
+| Map shape bridge-side | `orbitSensorBanks: Map<slot, Map<hr_base, OrbitSensorBank>>` | Per-orbit, per-bank addressing. Same slot can hold STORAGE sensor bank + TRITON role bank concurrently if the LP ever multi-roles a board. |
+| Bridge field decoding | **Transcribed 1:1** from current `apiRoutes.ts` Modbus path | Zero contract drift risk for the 4 bugs above; fix them in the same diff once shapes are co-located. |
+
+#### Order of operations (post-audit)
+
+1. **LP firmware: bump `ORBIT_SENSOR_HR_COUNT` 64 → 128** in
+   `orbit_client.h`. STORAGE bank grows; `OrbitSample.sensorHr[]`
+   sizes accordingly.
+2. **LP firmware: add per-role secondary HR window to `OrbitSample`**
+   — `uint16_t roleHr[256]; uint16_t roleHrBase; uint16_t roleHrCount;`.
+   STORAGE leaves `roleHrCount=0`; TRITON sets `base=400, count=256`;
+   GDC sets `base=300, count=96`. Resolved per-orbit via existing
+   `LpSettings_GetOrbitRole(slot)` lookup.
+3. **LP firmware: extend `orbit_task` polling loop** in
+   `orbit_client.c` to issue a second FC03 for the role window when
+   `roleHrCount > 0`. Cache it in `OrbitSample.roleHr[]` via the same
+   keep-last-on-error policy used for the sensor block.
+4. **LP firmware: generalise `build_orbit_sensor_bank_envelope`** in
+   `main.c` to take `(hr_base, count, source_buffer)` parameters.
+5. **LP firmware: extend cycling poller** in `bridge_uart_task` to
+   emit two banks per orbit per cycle (sensor + role), or interleave
+   in round-robin so each gets 0.5 Hz minimum.
+6. **Bridge: extend `decodeOrbitSensorBank`** to populate
+   `Map<slot, Map<hr_base, bank>>` instead of `Map<slot, bank>`.
+   `dataCache` gains `getOrbitBank(slot, hr_base)` getter.
+7. **Bridge: rewrite `/iot/gdc` + `/iot/triton/:slot` handlers**
+   to read from dataCache. Decode logic transcribed verbatim from
+   the current Modbus path. Fix the four UI/bridge contract
+   mismatches (position/pos, superheat/superheatF, alarms array/bitmap,
+   minOffTime/minOffTimeSec) here.
+8. **Bridge: delete `/iot/orbit/status` route + the
+   `readDiscreteInputs/readCoils` imports** (dead code per audit).
+9. **Bridge: extend `decodeOrbitBoardStatus`** to read fields
+   16-23 from the LP-emitted OrbitBoardStatus (free side-quest).
+10. **Bench verification:** diff `/iot/gdc` + `/iot/triton/:slot`
+    JSON responses pre-/post-migration on the same orbit. `/health`
+    must show `rxCrcErrors:0`, `rxCobsErrors:0`.
 
 **Acceptance:**
 - ✅ `apiRoutes.ts` no longer imports `readHoldingRegs` / `readCoils` / `readDiscreteInputs` from `orbitMbtcp.ts`
-- ✅ All `/iot/gdc`, `/iot/triton/*`, `/iot/orbit/status` GET responses byte-identical to pre-migration
+- ✅ All `/iot/gdc` + `/iot/triton/:slot` GET responses semantically identical to pre-migration (one drive-by fix to the 4 UI/bridge mismatches noted above, called out in the commit message)
+- ✅ `/iot/orbit/status` returns 404 (route deleted)
 - ✅ Bench fleet probe + UI Refrigeration page + UI Door page still work end-to-end
 - ✅ With Pi5 firewall blocking outbound to `10.47.27.0/24:5502`, the UI still loads (proves migration is complete)
+- ✅ `/health` reports `rxCrcErrors:0`, `rxCobsErrors:0` after a full bench cycle
 
-**Estimated effort:** 1 full session.
+**Estimated effort:** 1 full session (LP firmware ~70%, bridge ~30%).
+
+<details><summary>Original pre-audit sketch (kept for context)</summary>
+
+> ~~Decide envelope shape per-orbit-role. Recommendation: extend
+> `SystemStatus` with optional submsgs `OrbitGdcExtra`, `OrbitTritonExtra`
+> rather than two new top-level envelopes — keeps the UI proto-store
+> list short.~~ Wrong fit — `SystemStatus` is global panel state, not
+> per-orbit. Replaced with the OrbitSensorBank-reuse decision above
+> (2026-06-01 audit).
+
+</details>
 
 ### Sub-phase 2 — Orbit writes (small, mostly mechanical)
 
