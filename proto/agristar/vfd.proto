@@ -70,3 +70,65 @@ message VfdStatus {
   repeated VfdDrive drives = 1;
   uint32 any_fault         = 2;   // 1 if any drive has fault_active
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Phase 4b Sub-phase 3 (2026-06-01): Nova owns the Modbus TCP master for
+// VFD comms. Production UART airgap means the Pi5 can't reach the
+// equipment-LAN VFD adapter (FENA-01) any more; Nova polls and writes,
+// bridge consumes raw HR banks + sends raw HR writes. The bridge keeps
+// the manufacturer-aware decode (vfdRegisterMaps.ts) — the wire stays
+// register-level so growth in the manufacturer table costs zero firmware
+// work. VfdStatus (above) is still bridge-emitted onto the WS, sourced
+// from the decoded VfdRegBank cache.
+// ═════════════════════════════════════════════════════════════════════════
+
+// ─── VfdConfig — Bridge → Nova (envelope tag 127) ─────────────────────────
+// Sent at bridge startup (and on every operator-config change) to tell
+// Nova which VFD endpoint to talk to and which unit IDs to scan. Nova
+// persists to OSPI in `LpSettings.vfd_*` so the config survives the
+// next boot without a bridge round-trip.
+//
+// Use pb_uint32_force for every field on the encoder side: an empty IP
+// (vfd_host_ipv4 = 0) is a meaningful "disable VFD polling" command,
+// and `max_scan_unit_id = 0` means "disable auto-scan".
+message VfdConfig {
+  uint32 vfd_host_ipv4   = 1;  // Packed IPv4 (big-endian: a.b.c.d → 0xAABBCCDD).
+                                // 0 → disabled (Nova tears down the task).
+  uint32 vfd_port        = 2;  // Modbus TCP port (502 for FENA-01, 5020 for sim).
+  uint32 max_scan_unit_id = 3; // Auto-scan unit IDs 1..N (default 8, max 247).
+  uint32 poll_interval_ms = 4; // Per-drive poll cadence in ms (default 1000).
+}
+
+// ─── VfdRegBank — Nova → Bridge (envelope tag 128) ─────────────────────────
+// Mirror of OrbitSensorBank for VFDs: raw HR pass-through, keyed by
+// `(unit_id, hr_base)`. Nova emits one bank per (unit, register group)
+// per poll cycle when the drive is online. The bridge decodes via
+// `vfdRegisterMaps.ts` per the cached manufacturer profile.
+//
+// Use pb_uint32_force for `unit_id`, `hr_base`, and the repeated `values`
+// on the encoder side: 0 is a valid unit ID, a valid register address,
+// and a valid HR reading.
+message VfdRegBank {
+  uint32 unit_id  = 1;   // Modbus unit address (1..247)
+  uint32 hr_base  = 2;   // First HR address in this bank
+  // Raw uint16 readings; the bridge applies manufacturer-specific decode.
+  // Use pb_uint32_force — 0 is a valid reading.
+  repeated uint32 values = 3;
+  uint32 seq      = 4;   // Per-bank monotonic sequence (rolls at 2^32)
+  uint32 online   = 5;   // 1 if this bank was just freshly read, 0 if cached
+                          // (use pb_uint32_force — 0 is meaningful)
+}
+
+// ─── VfdRawWrite — Bridge → Nova (envelope tag 129) ────────────────────────
+// Generalised Modbus HR write for VFDs. Nova picks FC06 when
+// `values.length == 1` else FC16. Bridge composes the manufacturer-
+// specific value (e.g. ACS310 start CW = 0x047F) before sending; Nova
+// stays manufacturer-agnostic and just relays bytes.
+//
+// Same force-encoding rules as `OrbitRegWrite`: 0 is a valid unit_id,
+// addr, and value.
+message VfdRawWrite {
+  uint32 unit_id        = 1;
+  uint32 addr           = 2;   // First Modbus HR address
+  repeated uint32 values = 3;  // 1 entry → FC06; ≥2 entries → FC16
+}

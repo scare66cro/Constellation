@@ -149,6 +149,12 @@ message Envelope {
     // Bridge → Firmware (role-agnostic orbit HR write — GDC stages,
     // calibrate, future per-role single + multi writes; Phase 4b Sub-2).
     OrbitRegWrite     orbit_reg_write    = 126;
+    // ─── VFD subsystem (127-129) ─────────────────────────────────
+    // Phase 4b Sub-phase 3: Nova owns the Modbus TCP master for VFD
+    // comms; bridge sends config + writes, consumes raw HR banks.
+    VfdConfig         vfd_config         = 127;  // Bridge → Nova
+    VfdRegBank        vfd_reg_bank       = 128;  // Nova → Bridge
+    VfdRawWrite       vfd_raw_write      = 129;  // Bridge → Nova
 
     // ── Firmware install orchestration — Pi5 ↔ Nova (130-149) ─────
     // The production OTA path: Pi5 has the .cfu, Nova brokers per-LP

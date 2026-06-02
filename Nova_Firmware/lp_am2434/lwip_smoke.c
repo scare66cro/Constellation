@@ -30,6 +30,7 @@
 #include "lwip/tcpip.h"
 
 #include "orbit_client.h"
+#include "nova_vfd_client.h"
 
 /* SDK polling-task control — used by the 0.A.216 post-fixup stop of the
  * 1-sec polling task that re-injects the cached state->speed=1GBIT and
@@ -1301,6 +1302,13 @@ void lwip_smoke_task(void *args)
     int rc = OrbitClient_Init(kOrbits, sizeof(kOrbits) / sizeof(kOrbits[0]));
     DebugP_log("[ORBIT] OrbitClient_Init rc=%d (%u workers)\r\n",
                rc, (unsigned)OrbitClient_Count());
+
+    /* Phase 4b Sub-phase 3 (2026-06-01): bring up the VFD Modbus TCP
+     * master. Spawns a single task that idles until the bridge sends
+     * a `VfdConfig` envelope (tag 127). Coexists with OrbitClient on
+     * the equipment LAN. */
+    int vfd_rc = NovaVfdClient_Init();
+    DebugP_log("[VFD] NovaVfdClient_Init rc=%d\r\n", vfd_rc);
 
     /* Roll-up status every 10 s so we can see at a glance which orbits
      * are alive and how many polls have completed each. The detailed

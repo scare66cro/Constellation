@@ -38,6 +38,7 @@
 
 /* Multi-orbit Modbus TCP poller (Phase D-A) */
 #include "orbit_client.h"
+#include "nova_vfd_client.h"
 
 /* Firmware version strings (sent in VersionInfo envelope, tag 22) */
 #include "lp_version.h"
@@ -489,6 +490,8 @@ static size_t pb_skip_field(uint8_t wire, const uint8_t *buf, size_t len)
  *   123 AoEquipAssign          (persisted via LpSettings field 80)
  *   125 TritonRegWrite         (Modbus passthrough to a remote orbit)
  *   126 OrbitRegWrite          (role-agnostic FC06/FC16 to a remote orbit)
+ *   127 VfdConfig              (VFD Modbus TCP endpoint + scan config)
+ *   129 VfdRawWrite            (FC06/FC16 to a VFD unit; bridge composes CW)
  *   130..136 Fw{Install,Fleet}* (forwarded to NovaOtaBroker_OnEnvelope)
  *
  * Future downlink commands extend the same switch — keep additions
@@ -834,6 +837,133 @@ static void bridge_rx_callback(const uint8_t *payload, size_t len)
                 DebugP_log("[RX] OrbitRegWrite missing/empty field(s) "
                            "(slot=%d addr=%d count=%u)\r\n",
                            have_slot, have_addr, count);
+            }
+            needs_ack = true;
+            continue;
+        }
+
+        if (field == 127U && wire == 2U) {
+            /* VfdConfig — bridge tells Nova which VFD endpoint to poll.
+             * Phase 4b Sub-phase 3 (2026-06-01). Inner shape:
+             *   { vfd_host_ipv4:varint=1, vfd_port:varint=2,
+             *     max_scan_unit_id:varint=3, poll_interval_ms:varint=4 } */
+            uint32_t inner_len;
+            size_t ln = pb_decode_varint(payload + pos, len - pos, &inner_len);
+            if (ln == 0U || pos + ln + inner_len > len) return;
+            pos += ln;
+
+            const uint8_t *inner = payload + pos;
+            size_t ipos = 0;
+            uint32_t host = 0, port = 0, max_scan = 0, poll_ms = 0;
+            while (ipos < inner_len) {
+                uint32_t itag;
+                size_t in = pb_decode_varint(inner + ipos, inner_len - ipos, &itag);
+                if (in == 0U) break;
+                ipos += in;
+                const uint32_t ifield = itag >> 3;
+                const uint8_t  iwire  = (uint8_t)(itag & 0x07U);
+                if (iwire == 0U) {
+                    uint32_t v;
+                    size_t vn = pb_decode_varint(inner + ipos, inner_len - ipos, &v);
+                    if (vn == 0U) break;
+                    ipos += vn;
+                    if      (ifield == 1U) host     = v;
+                    else if (ifield == 2U) port     = v;
+                    else if (ifield == 3U) max_scan = v;
+                    else if (ifield == 4U) poll_ms  = v;
+                } else {
+                    size_t sk = pb_skip_field(iwire, inner + ipos, inner_len - ipos);
+                    if (sk == 0U) break;
+                    ipos += sk;
+                }
+            }
+            pos += inner_len;
+
+            if (LpSettings_SetVfdConfig(host,
+                                        (uint16_t)(port      & 0xFFFFU),
+                                        (uint8_t) (max_scan  & 0xFFU),
+                                        (uint16_t)(poll_ms   & 0xFFFFU))) {
+                NovaVfdClient_ConfigChanged();
+            }
+            DebugP_log("[RX] VfdConfig host=0x%08X port=%u scan=%u poll=%u\r\n",
+                       (unsigned)host, (unsigned)port,
+                       (unsigned)max_scan, (unsigned)poll_ms);
+            needs_ack = true;
+            continue;
+        }
+
+        if (field == 129U && wire == 2U) {
+            /* VfdRawWrite — bridge-issued FC06 / FC16 to a VFD unit.
+             * Phase 4b Sub-phase 3 (2026-06-01). Inner shape mirrors
+             * `OrbitRegWrite` exactly:
+             *   { unit_id:varint=1, addr:varint=2,
+             *     values: repeated uint32 (packed OR unpacked). } */
+            uint32_t inner_len;
+            size_t ln = pb_decode_varint(payload + pos, len - pos, &inner_len);
+            if (ln == 0U || pos + ln + inner_len > len) return;
+            pos += ln;
+
+            const uint8_t *inner = payload + pos;
+            size_t ipos = 0;
+            uint32_t unit_id = 0, addr = 0;
+            bool have_unit = false, have_addr = false;
+            uint16_t values[123];
+            uint16_t count = 0;
+            while (ipos < inner_len) {
+                uint32_t itag;
+                size_t in = pb_decode_varint(inner + ipos, inner_len - ipos, &itag);
+                if (in == 0U) break;
+                ipos += in;
+                const uint32_t ifield = itag >> 3;
+                const uint8_t  iwire  = (uint8_t)(itag & 0x07U);
+                if (iwire == 0U) {
+                    uint32_t v;
+                    size_t vn = pb_decode_varint(inner + ipos, inner_len - ipos, &v);
+                    if (vn == 0U) break;
+                    ipos += vn;
+                    if      (ifield == 1U) { unit_id = v; have_unit = true; }
+                    else if (ifield == 2U) { addr    = v; have_addr = true; }
+                    else if (ifield == 3U) {
+                        if (count < (uint16_t)(sizeof(values) / sizeof(values[0]))) {
+                            values[count++] = (uint16_t)v;
+                        }
+                    }
+                } else if (iwire == 2U && ifield == 3U) {
+                    uint32_t plen;
+                    size_t pn = pb_decode_varint(inner + ipos, inner_len - ipos, &plen);
+                    if (pn == 0U) break;
+                    ipos += pn;
+                    if (ipos + plen > inner_len) break;
+                    size_t ppos = 0;
+                    while (ppos < plen) {
+                        uint32_t pv;
+                        size_t pvn = pb_decode_varint(inner + ipos + ppos,
+                                                      plen - ppos, &pv);
+                        if (pvn == 0U) break;
+                        ppos += pvn;
+                        if (count < (uint16_t)(sizeof(values) / sizeof(values[0]))) {
+                            values[count++] = (uint16_t)pv;
+                        }
+                    }
+                    ipos += plen;
+                } else {
+                    size_t sk = pb_skip_field(iwire, inner + ipos, inner_len - ipos);
+                    if (sk == 0U) break;
+                    ipos += sk;
+                }
+            }
+            pos += inner_len;
+
+            if (have_unit && have_addr && count > 0U && unit_id < 256U) {
+                int rc = NovaVfdClient_WriteRegisters(
+                    (uint8_t)unit_id, (uint16_t)addr, values, count);
+                DebugP_log("[RX] VfdRawWrite unit=%u addr=%u count=%u rc=%d\r\n",
+                           (unsigned)unit_id, (unsigned)addr,
+                           (unsigned)count, rc);
+            } else {
+                DebugP_log("[RX] VfdRawWrite missing/empty field(s) "
+                           "(unit=%d addr=%d count=%u)\r\n",
+                           have_unit, have_addr, count);
             }
             needs_ack = true;
             continue;
@@ -4664,6 +4794,75 @@ static size_t build_orbit_sensor_bank_envelope(uint8_t *buf, size_t bufsize,
 }
 
 /*
+ * Build: Envelope { protocol_version=1, seq=N,
+ *                   vfd_reg_bank={ unit_id, hr_base, values[], seq, online } }
+ *
+ * Phase 4b Sub-phase 3 (2026-06-01). Mirrors the orbit_sensor_bank
+ * builder but at envelope tag 128 and with an `online` field. All
+ * varint fields use FORCE-encoding because 0 is a meaningful value
+ * (unit_id 0 valid, hr_base 0 valid, value 0 valid, online=0 means
+ * "cached but stale"). Returns 0 when count==0 or the inner won't
+ * fit.
+ */
+static size_t build_vfd_reg_bank_envelope(uint8_t *buf, size_t bufsize,
+                                          uint32_t env_seq,
+                                          uint8_t unit_id, uint16_t hr_base,
+                                          const uint16_t *values, uint16_t count,
+                                          uint32_t bank_seq, bool online)
+{
+    if (count == 0U || values == NULL) return 0;
+
+    /* Worst case: 16-reg group × 3 B varint + ~24 B overhead. */
+    uint8_t inner[NOVA_VFD_MAX_REGS_PER_BANK * 3 + 32];
+    size_t  ilen = 0;
+
+    /* unit_id (field 1, varint, force-encoded) */
+    inner[ilen++] = 0x08;
+    ilen += pb_encode_varint(&inner[ilen], (uint32_t)unit_id);
+
+    /* hr_base (field 2, varint, force-encoded) */
+    inner[ilen++] = 0x10;
+    ilen += pb_encode_varint(&inner[ilen], (uint32_t)hr_base);
+
+    /* values (field 3, repeated uint32 PACKED). Tag = (3<<3)|2 = 0x1A. */
+    inner[ilen++] = 0x1A;
+    uint8_t vbuf[NOVA_VFD_MAX_REGS_PER_BANK * 3];
+    size_t  vlen = 0;
+    for (uint16_t k = 0; k < count; k++) {
+        vlen += pb_encode_varint(&vbuf[vlen], (uint32_t)values[k]);
+    }
+    ilen += pb_encode_varint(&inner[ilen], (uint32_t)vlen);
+    if (ilen + vlen > sizeof(inner)) return 0;
+    memcpy(&inner[ilen], vbuf, vlen);
+    ilen += vlen;
+
+    /* seq (field 4, varint) */
+    inner[ilen++] = 0x20;
+    ilen += pb_encode_varint(&inner[ilen], bank_seq);
+
+    /* online (field 5, varint, force-encoded — 0 means "cached, stale") */
+    inner[ilen++] = 0x28;
+    ilen += pb_encode_varint(&inner[ilen], online ? 1U : 0U);
+
+    /* Envelope wrap. */
+    size_t pos = 0;
+    buf[pos++] = 0x08;
+    pos += pb_encode_varint(&buf[pos], NOVA_PROTOCOL_VERSION);
+    buf[pos++] = 0x10;
+    pos += pb_encode_varint(&buf[pos], env_seq);
+
+    /* Envelope.vfd_reg_bank — field 128, length-delimited.
+     * Tag = (128 << 3) | 2 = 1026 → varint 0x82 0x08. */
+    buf[pos++] = 0x82;
+    buf[pos++] = 0x08;
+    pos += pb_encode_varint(&buf[pos], (uint32_t)ilen);
+    if (pos + ilen > bufsize) return 0;
+    memcpy(&buf[pos], inner, ilen);
+    pos += ilen;
+    return pos;
+}
+
+/*
  * bridge_uart_task — drives all firmware → bridge UART2 traffic.
  *
  * RX is interrupt-driven: uart2_rx_isr pushes bytes into s_rx_ring as
@@ -5409,6 +5608,73 @@ static void bridge_uart_task(void *args)
                             NovaProto_SendRaw(envelope_buf, pb_len);
                         }
                     }
+                }
+            }
+        }
+
+        /* Phase 4b Sub-phase 3 (2026-06-01): emit VfdRegBank envelopes
+         * for one drive's full snapshot per 100 ms tick, cycling through
+         * all discovered drives. With up to 8 drives, each gets visited
+         * every 800 ms — plenty fresh for the Level 2 Fans page (which
+         * polls /iot/fans at ~5 s today). Each drive emits up to 6
+         * banks (process / live / fault / limits / ramp / nameplate);
+         * banks for register groups the polling task hasn't seen yet
+         * are silently skipped (count==0 path inside the builder).
+         *
+         * Gated on broker install-mode to avoid contending with the OTA
+         * UART burst — matches the OrbitSensorBank cadence above. */
+        if (!NovaOtaBroker_IsInInstallMode()) {
+            const size_t drv_count = NovaVfdClient_DriveCount();
+            if (drv_count > 0U) {
+                const uint8_t drv_idx =
+                    (uint8_t)((tick / 1U) % drv_count);  /* one drive per tick */
+                NovaVfdSnapshot vsnap;
+                /* Find the Nth `known` drive by index. */
+                uint8_t cur = 0;
+                NovaVfdSnapshot pick;
+                bool have_pick = false;
+                for (uint8_t i = 0; i < 8U; i++) {  /* NOVA_VFD_MAX_DRIVES */
+                    if (NovaVfdClient_GetSnapshot(i, &vsnap)) {
+                        if (cur == drv_idx) { pick = vsnap; have_pick = true; break; }
+                        cur++;
+                    }
+                }
+                if (have_pick) {
+                    static uint32_t s_vfd_bank_seq = 0;
+                    const uint8_t  uid = pick.unit_id;
+                    const uint32_t this_seq = ++s_vfd_bank_seq;
+                    const bool online = pick.online;
+                    size_t pb_len;
+                    /* Process data (0..3) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 0U, pick.process, 4U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
+                    /* Live (100..108) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 100U, pick.live, 9U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
+                    /* Fault (400) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 400U, pick.fault, 1U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
+                    /* Limits (2001..2002) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 2001U, pick.limits, 2U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
+                    /* Ramp (2202..2203) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 2202U, pick.ramp, 2U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
+                    /* Nameplate (9901..9905) */
+                    pb_len = build_vfd_reg_bank_envelope(
+                        envelope_buf, sizeof(envelope_buf), ++bank_env_seq,
+                        uid, 9901U, pick.nameplate, 5U, this_seq, online);
+                    if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
                 }
             }
         }

@@ -656,6 +656,23 @@ typedef struct {
     LpOrbitRoleEntry slots[LP_ORBIT_ROLE_MAX];
 } LpOrbitRoleSet;
 
+/* VFD subsystem config (Phase 4b Sub-phase 3, 2026-06-01).
+ *
+ * Bridge sends `VfdConfig` envelope (tag 127) at startup; Nova caches
+ * here and `nova_vfd_client` uses it to bring up its Modbus TCP master
+ * task. Not yet OSPI-persisted — the bridge replays the config on every
+ * boot, which is fine while the bridge is the only source of truth. A
+ * future commit can add this to the save-blob if customer sites want
+ * Nova to survive a bridge outage with VFD polling intact. */
+typedef struct {
+    uint32_t host_ipv4;        /* Packed big-endian (a.b.c.d → 0xAABBCCDD).
+                                * 0 disables VFD polling. */
+    uint16_t port;             /* Modbus TCP port (502 / 5020 sim) */
+    uint8_t  max_scan_unit_id; /* Auto-scan 1..N (0 disables scan) */
+    uint16_t poll_interval_ms; /* Per-drive cadence (default 1000) */
+    bool     configured;       /* True once the bridge has sent VfdConfig */
+} LpVfdConfig;
+
 /* Per-AO equipment program — operator picks (Level 2 PWM page) which
  * equipment a given orbit AO drives. Persisted in OSPI as field 80 of
  * the LpSettings save blob. Up to 16 slots × 2 channels — every slot
@@ -718,6 +735,7 @@ typedef struct {
     LpOrbitRoleSet   orbit_role;
     LpAoEquipSet     ao_equip;
     LpRemoteOff      remote_off;
+    LpVfdConfig      vfd;
 } LpSettingsData;
 
 /* Initialize the struct to factory defaults. Called from main() at
@@ -976,6 +994,19 @@ uint8_t        LpSettings_GetAoEquip(uint32_t slot, uint32_t channel);
 /* Save-blob (de)serialization for top-level field 80. */
 size_t         LpSettings_BuildAoEquipBody(uint8_t *buf, size_t bufsize);
 bool           LpSettings_ApplyAoEquipBlob(const uint8_t *buf, size_t len);
+
+/* ─── VFD subsystem (Phase 4b Sub-phase 3) ────────────────────────────
+ *
+ * Bridge sends `VfdConfig` envelope (tag 127) at startup; main.c's
+ * bridge_rx_callback decodes and calls `LpSettings_SetVfdConfig`.
+ * Returns true on actual change so `nova_vfd_client` can be (re)started
+ * with the new endpoint. Reads via `LpSettings_GetVfdConfig` (a thin
+ * accessor on `s_data.vfd`). Not yet OSPI-persisted. */
+bool           LpSettings_SetVfdConfig(uint32_t host_ipv4,
+                                       uint16_t port,
+                                       uint8_t  max_scan_unit_id,
+                                       uint16_t poll_interval_ms);
+const LpVfdConfig *LpSettings_GetVfdConfig(void);
 
 /* RemoteOff (Phase E1) — equipment manual-override table.
  *

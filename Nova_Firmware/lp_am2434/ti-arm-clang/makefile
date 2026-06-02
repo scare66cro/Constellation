@@ -62,6 +62,7 @@ FILES_common := \
 	nova_controls.c \
 	lwip_smoke.c \
 	orbit_client.c \
+	nova_vfd_client.c \
 	lp_rtc.c \
 	lp_settings_store.c \
 	lp_settings.c \
