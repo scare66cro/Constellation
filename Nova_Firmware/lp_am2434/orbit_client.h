@@ -68,6 +68,17 @@
 #define ORBIT_ROLE_HR_TRITON_COUNT 143U /* 400..542, matches HR_TRITON_END=543 */
 #define ORBIT_ROLE_HR_GDC_BASE     300U
 #define ORBIT_ROLE_HR_GDC_COUNT    40U  /* 300..339, matches HR_GDC_END=340 */
+#define ORBIT_ROLE_HR_STORAGE_BASE 100U
+#define ORBIT_ROLE_HR_STORAGE_COUNT 48U /* 100..147 — VFD RTU passthrough.
+                                         * 3 drives × 16 regs, per the orbit_storage.h
+                                         * HR_VFD_BASE..HR_VFD_END layout. STORAGE
+                                         * orbit's role window publishes whatever its
+                                         * vfd_regs[] cache currently holds; the bridge
+                                         * decodes per-unit slices via vfdRegisterMaps.
+                                         * Bench note (2026-06-02): orbit_storage.c
+                                         * stubs writes to this region locally —
+                                         * Phase 4b plumbs the wire; orbit-side RS485
+                                         * RTU master comes later. */
 
 /* Discrete I/O windows polled from each remote orbit (Apr 2026).
  * See orbit_server/orbit_storage.h for the canonical bit map:

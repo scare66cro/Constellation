@@ -335,9 +335,16 @@ static void orbit_mark_offline(OrbitWorker *w)
 }
 
 /* Resolve the per-role HR window for an orbit slot. Writes 0/0 when
- * the role doesn't need a secondary window (STORAGE / UNASSIGNED /
- * unpopulated). Reads from LpSettings which is updated by the
- * controller's OrbitRoleAssign envelope handler. */
+ * the role doesn't need a secondary window (UNASSIGNED / unpopulated).
+ * Reads from LpSettings which is updated by the controller's
+ * OrbitRoleAssign envelope handler.
+ *
+ * Phase 4b Sub-3 (2026-06-02): STORAGE gains a role window at
+ * HR 100..147 (orbit's VFD RTU passthrough region). The bridge
+ * subscribes to this bank to drive the Level 2 Fans page — writes
+ * back via OrbitRegWrite, which the orbit will forward over RS485
+ * to the VFDs once the RTU master is wired (orbit firmware
+ * follow-up, not in this commit). */
 static void orbit_resolve_role_window(uint8_t slot,
                                       uint16_t *out_base,
                                       uint16_t *out_count)
@@ -347,6 +354,10 @@ static void orbit_resolve_role_window(uint8_t slot,
     const LpOrbitRoleEntry *e = LpSettings_GetOrbitRole(slot);
     if (e == NULL || !e->populated) return;
     switch ((OrbitRole)e->role) {
+        case ORBIT_ROLE_STORAGE:
+            *out_base  = ORBIT_ROLE_HR_STORAGE_BASE;
+            *out_count = ORBIT_ROLE_HR_STORAGE_COUNT;
+            return;
         case ORBIT_ROLE_GDC:
             *out_base  = ORBIT_ROLE_HR_GDC_BASE;
             *out_count = ORBIT_ROLE_HR_GDC_COUNT;
