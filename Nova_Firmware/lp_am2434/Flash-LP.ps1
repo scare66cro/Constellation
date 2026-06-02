@@ -107,7 +107,27 @@ param(
     # One-shot commissioning step for recovered/virgin chips — see param
     # help above. Mutually exclusive with the normal flash flow (exits
     # after the writer reports success).
-    [switch]$FlashPhyTuning
+    [switch]$FlashPhyTuning,
+    # 2026-06-02: bench parity with OTA. Flash-LP writes the new image to
+    # Bank A bytes (OSPI 0x080000) but does NOT touch the metadata block
+    # at 0x300000 — so on next boot the F2c SBL chooser still picks
+    # whichever bank has the higher `sequence`. If a previous OTA cycle
+    # left Bank B at sequence=N+1, Bank B's OLD firmware wins and the
+    # board boots the OLD code (we tripped over this on 0.A.222 — fleet
+    # was still reporting 0.A.216 after Flash-LP "succeeded").
+    #
+    # Production OTA doesn't have this problem because the install path
+    # calls `NovaFwUpdate_OrbitFinalize` which writes a new Bank header
+    # with `sequence = max(A,B) + 1` before the warm reset. The bench
+    # parallel is `Write-SeedMetaBlock.ps1`, which writes Bank A with
+    # sequence=1 and wipes Bank B's header (chooser picks A as the only
+    # candidate). This switch chains that call automatically so a single
+    # `Flash-LP.ps1` invocation reliably ends with the LP running the
+    # firmware we just wrote.
+    #
+    # Pass `-NoSeed` to skip the seed step (e.g. when iterating between
+    # bench flash + manual rollback test).
+    [switch]$NoSeed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -696,9 +716,47 @@ if ($flashExitCode -eq 0) {
         Write-Host "[log] appended to $deployedDoc" -ForegroundColor Yellow
     }
 
+    # --- Seed F2c metadata so SBL chooser picks the bank we just flashed --
+    # See the -NoSeed param help for the rationale. Skips when -NoSeed is
+    # set (e.g. rollback negative-tests where we want the chooser to fall
+    # back to the OTHER bank). Also skipped if the seed script is missing
+    # — older checkouts predate the F2c work.
+    if (-not $NoSeed) {
+        $seedScript = "$PSScriptRoot\sbl_chooser\Write-SeedMetaBlock.ps1"
+        if (Test-Path $seedScript) {
+            Write-Host ""
+            Write-Host "[seed] F2c metadata seed (so chooser picks the just-flashed Bank A)" -ForegroundColor Yellow
+            try {
+                # Write-SeedMetaBlock asserts only one probe is enumerated
+                # (matches Flash-LP's xdsdfu -e precheck). The finally{}
+                # above already re-enabled every probe, so re-solo the
+                # target before invoking, then re-enable everything after.
+                & $setProbe -Probe $Probe -Action Solo -ErrorAction Stop | Out-Host
+                & $seedScript -Probe $Probe | Out-Host
+                Write-Host "[seed] F2c metadata seeded; LP will boot the new firmware on this warm reset." -ForegroundColor Green
+            } catch {
+                Write-Warning "[seed] Write-SeedMetaBlock failed: $_"
+                Write-Warning "[seed] The new firmware is on Bank A but the chooser may still boot Bank B."
+                Write-Warning "[seed] Run sbl_chooser\Write-SeedMetaBlock.ps1 -Probe $Probe manually to fix."
+            } finally {
+                foreach ($p in @('N','A','B','P','T')) {
+                    try { & $setProbe -Probe $p -Action Enable -ErrorAction SilentlyContinue | Out-Null } catch { }
+                }
+            }
+        } else {
+            Write-Host "[seed] (skipped — $seedScript not found)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "[seed] (skipped — -NoSeed)" -ForegroundColor DarkGray
+    }
+
     Write-Host ""
     Write-Host "DONE.  Probe $Probe now holds $Role @ $Ip ($fwVersion) in OSPI." -ForegroundColor Green
-    Write-Host "Auto-flasher triggered SoC warm reset; ROM→SBL→new image in ~5 s." -ForegroundColor Green
+    if (-not $NoSeed) {
+        Write-Host "Bank A seeded; SBL chooser will boot the new firmware in ~5 s." -ForegroundColor Green
+    } else {
+        Write-Host "Auto-flasher triggered SoC warm reset; chooser picks whichever bank has higher sequence." -ForegroundColor Yellow
+    }
     Write-Host "UART banner on $($probeCfg.Com); bridge connection on UART2." -ForegroundColor DarkGray
 } else {
     Write-Host ""

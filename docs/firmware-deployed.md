@@ -298,3 +298,7 @@ from a clean tree before doing serious work.
 | 2026-06-01T19:18:27-06:00 | N | CONTROLLER | 10.47.27.1 | 0.A.218+87bbab24-dirty | YES |
 | 2026-06-02T07:45:58-06:00 | N | CONTROLLER | 10.47.27.1 | 0.A.220+c44a8ed0-dirty | YES |
 | 2026-06-02T09:00:26-06:00 | N | CONTROLLER | 10.47.27.1 | 0.A.221+af2709ce-dirty | YES |
+| 2026-06-02T13:40:27-06:00 | A | STORAGE | 10.47.27.2 | 0.A.222+3d8a7583-dirty | YES |
+| 2026-06-02T14:56:30-06:00 | N | CONTROLLER | 10.47.27.1 | 0.A.222+3d8a7583-dirty | YES |
+| 2026-06-02T14:59:57-06:00 | A | STORAGE | 10.47.27.2 | 0.A.222+3d8a7583-dirty | YES |
+| 2026-06-02T15:35:07-06:00 | A | STORAGE | 10.47.27.2 | 0.A.222+3d8a7583-dirty | YES |
