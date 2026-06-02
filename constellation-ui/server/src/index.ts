@@ -770,13 +770,18 @@ const protoForwards = {
 const apiSerialBridge = { ...commandDispatcher, ...protoForwards };
 
 // Phase 4b Sub-3 (2026-06-02): wire the VFD client's bridge dependencies
-// now that novaStore + apiSerialBridge + dataCache all exist. The old
-// vfdClient opened a Modbus TCP socket directly; the new transport rides
-// Nova UART → STORAGE orbit → RS485 to the VFD, so vfdClient subscribes
-// to OrbitSensorBank pushes at hr_base=100 and dispatches writes through
-// serialBridge.orbitRegWrite. See vfdClient.ts file header.
+// now that novaStore + apiSerialBridge + dataCache all exist. The
+// vfdClient subscribes to OrbitSensorBank pushes at hr_base=100 (writes
+// dispatched via serialBridge.orbitRegWrite), and sends a per-vendor
+// VfdPollConfig schedule to the orbit via novaBridge.sendVfdPollConfig.
+// See vfdClient.ts file header.
 if (vfdClient) {
-  vfdClient.setBridgeContext({ novaStore, serialBridge: apiSerialBridge, dataCache });
+  vfdClient.setBridgeContext({
+    novaStore,
+    serialBridge: apiSerialBridge,
+    dataCache,
+    novaBridge,
+  });
 }
 
 app.use('/iot', createApiRoutes(dataCache, apiSerialBridge, upgradeManager, novaLogStore ?? undefined, vfdClient ?? undefined, novaFwManager ?? undefined, undefined, novaStore, masterSlaveSync, remoteSystemsSync));
@@ -1088,15 +1093,17 @@ async function start() {
   // Start VFD Modbus TCP client (non-blocking, will retry connection)
   if (vfdClient) {
     vfdClient.start().then(async () => {
-      // Load labels & manufacturers from sim config into client snapshots
+      // Phase 4b Sub-3: feed the operator's drive assignments into the
+      // client so it can compose + send the VfdPollConfig schedule. The
+      // `vfd-drives` config file is the source of truth for which
+      // unit IDs belong to which manufacturer profile.
       const { loadConfig } = await import('./simConfig.js');
       const saved = loadConfig('vfd-drives');
       if (Array.isArray(saved)) {
-        for (const d of saved as any[]) {
-          if (d.unitId && (d.label || d.manufacturer)) {
-            vfdClient.setDriveMeta(d.unitId, { label: d.label, manufacturer: d.manufacturer });
-          }
-        }
+        const rows = (saved as any[])
+          .filter(d => typeof d.unitId === 'number' && typeof d.manufacturer === 'string')
+          .map(d => ({ unitId: d.unitId, manufacturer: d.manufacturer, label: d.label }));
+        vfdClient.applyAssignments(rows);
       }
     }).catch(err => {
       log.error('VFD client start error', { error: err.message });

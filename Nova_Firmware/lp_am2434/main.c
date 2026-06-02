@@ -489,6 +489,7 @@ static size_t pb_skip_field(uint8_t wire, const uint8_t *buf, size_t len)
  *   123 AoEquipAssign          (persisted via LpSettings field 80)
  *   125 TritonRegWrite         (Modbus passthrough to a remote orbit)
  *   126 OrbitRegWrite          (role-agnostic FC06/FC16 to a remote orbit)
+ *   127 VfdPollConfig          (vendor-agnostic RTU poll schedule; ack-stub until orbit RTU lands)
  *   130..136 Fw{Install,Fleet}* (forwarded to NovaOtaBroker_OnEnvelope)
  *
  * Future downlink commands extend the same switch — keep additions
@@ -835,6 +836,32 @@ static void bridge_rx_callback(const uint8_t *payload, size_t len)
                            "(slot=%d addr=%d count=%u)\r\n",
                            have_slot, have_addr, count);
             }
+            needs_ack = true;
+            continue;
+        }
+
+        if (field == 127U && wire == 2U) {
+            /* VfdPollConfig — bridge tells the STORAGE orbit how to drive
+             * its RS485 RTU master. Phase 4b Sub-3 architecture pivot
+             * (2026-06-02): vendor knowledge lives bridge-side; the
+             * orbit is a thin configurable scheduler. Nova's job here is
+             * to forward the config to the STORAGE orbit; until the
+             * orbit firmware gains the scheduler + RS485 master, this
+             * is an ack-only stub. The bridge replays VfdPollConfig on
+             * every connect so missed forwarding self-heals when the
+             * orbit support lands.
+             *
+             * Wire detail TBD with the orbit firmware author: most
+             * likely the config rides a designated HR window in the
+             * orbit's TCP slave (so the orbit reuses its existing
+             * Modbus path with no new endpoint). For now: log the
+             * inner length, drain the envelope, ack. */
+            uint32_t inner_len;
+            size_t ln = pb_decode_varint(payload + pos, len - pos, &inner_len);
+            if (ln == 0U || pos + ln + inner_len > len) return;
+            pos += ln + inner_len;
+            DebugP_log("[RX] VfdPollConfig %u B — orbit-forward pending Sub-3 RTU firmware\r\n",
+                       (unsigned)inner_len);
             needs_ack = true;
             continue;
         }

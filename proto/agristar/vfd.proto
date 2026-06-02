@@ -70,3 +70,62 @@ message VfdStatus {
   repeated VfdDrive drives = 1;
   uint32 any_fault         = 2;   // 1 if any drive has fault_active
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4b Sub-3 architecture pivot (2026-06-02): vendor knowledge stays on
+// the bridge (TypeScript profiles, free to grow); the orbit becomes a
+// configurable poll scheduler + write router with no vendor awareness.
+//
+// At startup the bridge composes a `VfdPollConfig` from the operator's
+// drive list + their per-drive vendor profile and sends it to Nova, which
+// forwards to the STORAGE orbit. The orbit then:
+//   - Polls each entry at the requested rate via Modbus RTU
+//   - Stashes results in its 48-reg HR cache (HR 100..147)
+//   - Forwards bridge HR writes to the right RS485 destination
+//
+// Adding a new VFD vendor or a Modbus-driven contactor = add a TypeScript
+// profile entry; the orbit binary doesn't grow.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── VfdPollConfig — Bridge → Nova → Orbit (envelope tag 127) ────────────
+// One per STORAGE orbit. Replaces the previous VfdConfig (which was
+// retired with the wrong-direction nova_vfd_client.c). The orbit consumes
+// this verbatim — no per-vendor parsing on the firmware side.
+//
+// Bridge replays this on every Nova reconnect so the orbit doesn't need
+// to OSPI-persist the config (matches existing patterns for OrbitRoleAssign,
+// AoEquipAssign, etc.).
+message VfdPollConfig {
+  uint32 slot = 1;                       // STORAGE orbit slot (0..15)
+  repeated VfdPollEntry entries = 2;     // up to 48 (one per HR 100..147 slot)
+}
+
+// Single entry telling the orbit "for this cache slot, poll the VFD at
+// (unit_id, native_addr) using this Modbus FC at this cadence; if
+// `writable` is true, bridge writes here forward to RS485 as well".
+//
+// All fields are force-encoded because 0 is meaningful for several of
+// them (cache_slot 0, unit_id 0 for broadcast scenarios, native_addr 0
+// for ABB process-data registers, fc 0 reserved-as-disabled).
+message VfdPollEntry {
+  uint32 cache_slot   = 1;   // 0..47 — index into the orbit's HR 100..147 window
+  uint32 unit_id      = 2;   // Modbus RTU unit ID (1..247)
+  uint32 native_addr  = 3;   // Modbus-standard register address (1, 10001, 30001, 40001, ...)
+
+  // Read FC (low byte) + optional sub-FC (high byte). Standard FCs:
+  //   0x01 Read Coils,        0x02 Read Discrete Inputs,
+  //   0x03 Read Holding Regs, 0x04 Read Input Registers.
+  // Write FCs (when `writable` = true):
+  //   0x05 Write Single Coil, 0x06 Write Single HR,
+  //   0x0F Write Multi Coils, 0x10 Write Multi HRs.
+  // Vendor-custom (e.g. Phase Tech LH AquaPhase):
+  //   0x4201 = FC 66 sub 1 (Set HOA Mode)
+  //   0x4202 = FC 66 sub 2 (Set Run State)
+  //   0x4203 = FC 66 sub 3 (Reset System Status)
+  // The orbit's RTU master decodes (fc & 0xFF) as the primary FC and
+  // (fc >> 8) as the sub-function when relevant.
+  uint32 fc           = 4;
+
+  uint32 poll_rate_ms = 5;   // 0 = on-demand only (no periodic read); else periodic
+  uint32 writable     = 6;   // 1 = bridge HR writes to this cache_slot fan out to RS485
+}

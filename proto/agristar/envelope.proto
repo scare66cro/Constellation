@@ -150,6 +150,11 @@ message Envelope {
     // calibrate, future per-role single + multi writes; Phase 4b Sub-2).
     OrbitRegWrite     orbit_reg_write    = 126;
 
+    // Bridge → Firmware (configurable VFD/Modbus-RTU poll scheduler for
+    // STORAGE orbits — vendor knowledge stays bridge-side; Phase 4b
+    // Sub-3 architecture pivot 2026-06-02).
+    VfdPollConfig     vfd_poll_config    = 127;
+
     // ── Firmware install orchestration — Pi5 ↔ Nova (130-149) ─────
     // The production OTA path: Pi5 has the .cfu, Nova brokers per-LP
     // pushes over CPSW. See firmware.proto §"Pi5 ↔ Nova install-

@@ -138,6 +138,19 @@ function pbGetAllSubmsg(fields: PbField[], fieldNum: number): Buffer[] {
  *  Minimal protobuf encoder                                                *
  * ──────────────────────────────────────────────────────────────────────── */
 
+/** Wire-side shape of a single VfdPollEntry (mirrors proto/agristar/vfd.proto).
+ *  Defined here to keep novaSerialBridge.ts free of cross-imports — the
+ *  bridge-side semantic shape (VfdPollEntry) lives in vfdRegisterMaps.ts
+ *  and is widened to this on the way to the wire. */
+export interface VfdPollEntryWire {
+  cacheSlot: number;
+  unitId: number;
+  nativeAddr: number;
+  fc: number;
+  pollRateMs: number;
+  writable: boolean;
+}
+
 class PbEncoder {
   private parts: Buffer[] = [];
 
@@ -335,6 +348,7 @@ const MSG_ORBIT_ROLE_ASSIGN  = 122;
 const MSG_AO_EQUIP_ASSIGN    = 123;
 const MSG_TRITON_REG_WRITE   = 125;
 const MSG_ORBIT_REG_WRITE    = 126;
+const MSG_VFD_POLL_CONFIG    = 127;
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Message name map for logging                                           *
@@ -383,6 +397,7 @@ const MSG_NAMES: Record<number, string> = {
   [MSG_AO_EQUIP_ASSIGN]:    'AoEquipAssign',
   [MSG_TRITON_REG_WRITE]:   'TritonRegWrite',
   [MSG_ORBIT_REG_WRITE]:    'OrbitRegWrite',
+  [MSG_VFD_POLL_CONFIG]:    'VfdPollConfig',
 };
 
 // Export MSG IDs so the firmware update manager can reference them
@@ -390,7 +405,7 @@ export {
   MSG_FW_BEGIN_UPDATE, MSG_FW_DATA_CHUNK, MSG_FW_FINALIZE_UPDATE,
   MSG_FW_ACTIVATE_BANK, MSG_FW_UPDATE_STATUS, MSG_FW_BANK_INFO,
   MSG_ORBIT_STATUS, MSG_ORBIT_DISCOVERY, MSG_ORBIT_ROLE_ASSIGN, MSG_AO_EQUIP_ASSIGN,
-  MSG_TRITON_REG_WRITE, MSG_ORBIT_REG_WRITE,
+  MSG_TRITON_REG_WRITE, MSG_ORBIT_REG_WRITE, MSG_VFD_POLL_CONFIG,
 };
 
 // Re-export PB helpers for use by the firmware update manager
@@ -638,6 +653,43 @@ export class NovaSerialBridge extends EventEmitter {
       enc.varintForce(3, v & 0xFFFF);
     }
     return this.sendCommand(MSG_ORBIT_REG_WRITE, enc.encode());
+  }
+
+  /**
+   * Phase 4b Sub-3 (2026-06-02): vendor-agnostic VFD poll schedule.
+   *
+   * Bridge composes one VfdPollConfig per STORAGE orbit from
+   * `vfdRegisterMaps.ts` profiles + operator-configured drive list
+   * (unit_id ↔ manufacturer). Replays on every Nova reconnect so the
+   * orbit doesn't need to OSPI-persist. Until the orbit firmware grows
+   * the scheduler + RS485 master, Nova's handler is an ack-only stub
+   * (logs the byte count, drops the body) — so this send round-trips
+   * cleanly today and lights up the moment orbit-side support lands.
+   */
+  async sendVfdPollConfig(slot: number, entries: VfdPollEntryWire[]): Promise<number> {
+    if (!Number.isInteger(slot) || slot < 0) {
+      throw new Error('sendVfdPollConfig: slot must be a non-negative integer');
+    }
+    if (!Array.isArray(entries)) {
+      throw new Error('sendVfdPollConfig: entries must be an array');
+    }
+    if (entries.length > 48) {
+      throw new Error(`sendVfdPollConfig: too many entries (${entries.length} > 48 — one per HR 100..147 cache slot)`);
+    }
+    const outer = new PbEncoder()
+      .varintForce(1, slot);
+    for (const e of entries) {
+      const inner = new PbEncoder()
+        .varintForce(1, e.cacheSlot  & 0xFFFF)
+        .varintForce(2, e.unitId     & 0xFF)
+        .varintForce(3, e.nativeAddr & 0xFFFF)
+        .varintForce(4, e.fc         & 0xFFFF)
+        .varintForce(5, e.pollRateMs & 0xFFFF)
+        .varintForce(6, e.writable ? 1 : 0)
+        .encode();
+      outer.submsg(2, inner);
+    }
+    return this.sendCommand(MSG_VFD_POLL_CONFIG, outer.encode());
   }
 
   /**

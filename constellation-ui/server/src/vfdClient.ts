@@ -1,88 +1,54 @@
 /**
- * VFD client — subscribes to OrbitSensorBank pushes from Nova, slices
- * per-drive snapshots, and routes operator actions through OrbitRegWrite.
+ * VFD client — vendor-agnostic via the profile registry in
+ * `vfdRegisterMaps.ts`.
  *
- * Phase 4b Sub-3 (2026-06-02) rewrite. The previous implementation
- * opened a Modbus TCP socket directly to a VFD adapter (FENA-01 / ABB
- * ACS310 sim) on the Pi5's network. That breaks the production
- * airgap: in production the Pi5 has no IP route to the equipment LAN.
+ * Phase 4b Sub-3 architecture (2026-06-02): at bridge startup the
+ * client reads the operator's drive list (unit_id ↔ manufacturer
+ * pairs, persisted via `simConfig` under key `vfd-drives`) and:
  *
- * New transport path:
- *   bridge → UART → Nova → Modbus TCP → STORAGE orbit → RS485 → VFD
+ *   1. Looks up each drive's profile, builds a `VfdPollConfig` from
+ *      `profile.pollEntries` × `unitId`, and ships it to Nova via the
+ *      new envelope (tag 127). Nova forwards to the STORAGE orbit.
+ *   2. Subscribes to `OrbitSensorBank` pushes at `(STORAGE_slot,
+ *      hr_base=100)` — the same wire the firmware already publishes
+ *      (Phase 4b Sub-1) — and decodes each drive's 16-slot slice
+ *      through its profile's `slots` map.
+ *   3. For operator actions (start/stop/reset), composes the
+ *      action's `VfdActionStep[]` sequence into `OrbitRegWrite` calls
+ *      at the right cache slots — the orbit forwards over RS485 per
+ *      each slot's `nativeAddr` + `fc`.
  *
- * Nova polls each STORAGE orbit's HR 100..147 region (the "VFD
- * passthrough" window per orbit_storage.h: 3 drives × 16 regs) as a
- * `OrbitSensorBank` envelope at `hr_base=100`. This module subscribes,
- * decodes per-unit slices via the canonical 16-reg layout below, and
- * exposes the same `getDrives()` / `sendAction()` / `writeDrive()`
- * surface as the old client so `apiRoutes.ts` doesn't need to change.
+ * Vendor knowledge stays bridge-side (TypeScript files, free to grow).
+ * The STORAGE orbit's binary footprint stays constant regardless of
+ * how many vendors / drive models we support.
  *
- * Canonical 16-reg layout per drive (orbit-side RS485 RTU maps the
- * manufacturer's native register addresses into these slots):
- *
- *   Offset  Field                       Source on ABB ACS310
- *   ──────  ─────────                   ──────────────────────
- *   0       controlWord            R/W  reg 0 (process data)
- *   1       speedRefPercent×100    R/W  reg 1 (process data)  0..10000
- *   2       statusWord              R   reg 2 (process data)
- *   3       actualSpeedPercent      R   reg 3 (process data)  0..10000
- *   4       outputFreqHz×10         R   reg 100 (01.01)
- *   5       motorCurrentA×100       R   reg 103 (01.04)
- *   6       motorPowerKw×100        R   reg 105 (01.06)
- *   7       dcBusVoltage            R   reg 106 (01.07)
- *   8       driveTemp×10            R   reg 108 (01.09)
- *   9       faultCode               R   reg 400 (04.01)
- *   10      maxFreqHz×10            R   reg 2002 (20.02)
- *   11      rampUpTime×10           R   reg 2202 (22.02)
- *   12      rampDownTime×10         R   reg 2203 (22.03)
- *   13      ratedCurrentA×100       R   reg 9906 (99.06)
- *   14      ratedPowerKw×100        R   reg 9909 (99.09)
- *   15      ratedFreqHz×10          R   reg 9907 (99.07)
- *
- * Writes flow as raw register addresses inside the orbit's 100..147
- * window (drive_offset = 100 + (unitId - 1) × 16). The orbit's RTU
- * master then translates back to the manufacturer's native address
- * for the RS485 push.
- *
- * Layout is not finalized — the orbit firmware author may pick a
- * different shape based on what's efficient to scan via RS485 and
- * what other VFD families (Phase Tech DXL) need. When that decision
- * is made, the constants below + the `applySlice()` decoder update;
- * the wire stays as 16 raw u16 per drive either way.
+ * Same external API (`getDrives`, `getDrive`, `sendAction`, `writeDrive`,
+ * `setDriveMeta`) as the previous client so `apiRoutes.ts` doesn't
+ * change. `writeParam` remains stubbed — needs orbit-side support to
+ * forward arbitrary native-address writes (separate envelope path or
+ * extended cache region; future work).
  */
 
 import { EventEmitter } from 'events';
 import type { NovaDataStore, OrbitSensorBank } from './novaDataStore.js';
 import type { CommandBridge } from './apiRoutes.js';
 import type { DataCache } from './dataCache.js';
+import type { NovaSerialBridge } from './novaSerialBridge.js';
+import {
+  type VFDManufacturer,
+  type VfdProfile,
+  getProfile,
+  buildPollEntries,
+} from './vfdRegisterMaps.js';
 
-export type VFDManufacturer = 'abb-acs310' | 'abb-acs380' | 'phase-tech-dxl' | 'generic';
+export type { VFDManufacturer } from './vfdRegisterMaps.js';
 
 // ── Wire constants matching firmware (orbit_client.h) ──
 const STORAGE_HR_VFD_BASE   = 100;     // ORBIT_ROLE_HR_STORAGE_BASE
-const STORAGE_HR_VFD_COUNT  = 48;      // ORBIT_ROLE_HR_STORAGE_COUNT
 const REGS_PER_DRIVE        = 16;
-const DRIVES_PER_ORBIT      = STORAGE_HR_VFD_COUNT / REGS_PER_DRIVE;  // 3
+const DRIVES_PER_ORBIT      = 3;       // STORAGE_HR_VFD_COUNT (48) / 16
 
-// ── Canonical 16-reg layout offsets (see file header) ──
-const F_CONTROL_WORD       = 0;
-const F_SPEED_REF_X100     = 1;
-const F_STATUS_WORD        = 2;
-const F_ACTUAL_SPEED_X100  = 3;
-const F_OUTPUT_FREQ_X10    = 4;
-const F_CURRENT_A_X100     = 5;
-const F_POWER_KW_X100      = 6;
-const F_DC_BUS_V           = 7;
-const F_TEMP_X10           = 8;
-const F_FAULT_CODE         = 9;
-const F_MAX_FREQ_X10       = 10;
-const F_RAMP_UP_X10        = 11;
-const F_RAMP_DOWN_X10      = 12;
-const F_RATED_CUR_X100     = 13;
-const F_RATED_POWER_X100   = 14;
-const F_RATED_FREQ_X10     = 15;
-
-// ── Snapshot shape (kept compatible with the previous client) ──
+// ── Snapshot shape (kept API-compatible with the previous client) ──
 export interface VFDDriveSnapshot {
   unitId: number;
   online: boolean;
@@ -90,38 +56,41 @@ export interface VFDDriveSnapshot {
   manufacturer: VFDManufacturer;
   // Process data
   controlWord: number;
-  speedRefPercent: number;   // 0..10000 (0..100.00 %)
+  speedRefPercent: number;
   statusWord: number;
   actualSpeedPercent: number;
-  // Group 01 actual signals
-  outputFreqHz: number;      // 0.1 Hz
-  freqRefHz: number;         // 0.1 Hz — not in the canonical layout; kept for API compat (always 0)
-  motorSpeedRpm: number;     // rpm — not in canonical layout; kept for API compat (always 0)
-  motorCurrentA: number;     // 0.1 A
-  motorTorquePercent: number;// not in canonical layout; kept for API compat (always 0)
-  motorPowerkW: number;      // 0.1 kW (canonical is ×100 — exposed as 0.1 for API compat by dividing)
-  dcBusVoltage: number;      // V
-  outputVoltage: number;     // not in canonical layout; kept for API compat (always 0)
-  driveTemp: number;         // °C
-  // Group 04
+  // Live signals (units documented per-field; scale applied by decoder)
+  outputFreqHz: number;
+  freqRefHz: number;
+  motorSpeedRpm: number;
+  motorCurrentA: number;
+  motorTorquePercent: number;
+  motorPowerkW: number;
+  dcBusVoltage: number;
+  inputVoltage: number;
+  outputVoltage: number;
+  driveTemp: number;
+  // Diagnostics
   faultCode: number;
-  // Group 20
-  minFreqHz: number;         // not in canonical layout; kept for API compat (always 0)
-  maxFreqHz: number;         // 0.1 Hz
-  // Group 22
-  rampUpTime: number;        // 0.1 s
-  rampDownTime: number;      // 0.1 s
-  // Group 99
-  ratedCurrentA: number;     // 0.1 A
-  ratedVoltage: number;      // not in canonical layout; kept for API compat (always 0)
-  ratedFreqHz: number;       // 0.1 Hz
-  ratedSpeedRpm: number;     // not in canonical layout; kept for API compat (always 0)
-  ratedPowerkW: number;      // 0.1 kW
+  // Limits + ramps
+  minFreqHz: number;
+  maxFreqHz: number;
+  rampUpTime: number;
+  rampDownTime: number;
+  // Nameplate
+  ratedCurrentA: number;
+  ratedVoltage: number;
+  ratedFreqHz: number;
+  ratedSpeedRpm: number;
+  ratedPowerkW: number;
+  // Vendor-specific
+  pressureSetpointPsi: number;
+  opMode: number;    // 0 = Off, 1 = Manual, 2 = Auto (Phase Tech HOA)
   // Derived
   running: boolean;
   faulted: boolean;
   atReference: boolean;
-  direction: number;         // 0 = FWD, 1 = REV
+  direction: number;
 }
 
 function emptySnapshot(unitId: number): VFDDriveSnapshot {
@@ -129,92 +98,66 @@ function emptySnapshot(unitId: number): VFDDriveSnapshot {
     unitId, online: false, label: `VFD Unit ${unitId}`, manufacturer: 'generic',
     controlWord: 0, speedRefPercent: 0, statusWord: 0, actualSpeedPercent: 0,
     outputFreqHz: 0, freqRefHz: 0, motorSpeedRpm: 0, motorCurrentA: 0,
-    motorTorquePercent: 0, motorPowerkW: 0, dcBusVoltage: 0, outputVoltage: 0,
-    driveTemp: 0, faultCode: 0,
+    motorTorquePercent: 0, motorPowerkW: 0, dcBusVoltage: 0, inputVoltage: 0,
+    outputVoltage: 0, driveTemp: 0, faultCode: 0,
     minFreqHz: 0, maxFreqHz: 0, rampUpTime: 0, rampDownTime: 0,
     ratedCurrentA: 0, ratedVoltage: 0, ratedFreqHz: 0, ratedSpeedRpm: 0, ratedPowerkW: 0,
+    pressureSetpointPsi: 0, opMode: 0,
     running: false, faulted: false, atReference: false, direction: 0,
   };
 }
 
-/** Per-drive metadata that lives only on the bridge (labels, manufacturer
- *  hint for UI display). Survives bridge restarts via `simConfig`. */
-interface DriveMeta {
+/** Per-drive operator-configured metadata stored in `simConfig::vfd-drives`. */
+interface DriveAssignment {
+  unitId: number;
+  manufacturer: VFDManufacturer;
   label?: string;
-  manufacturer?: VFDManufacturer;
 }
 
-// ── Status-word bit semantics — ABB ACS310/380 convention ──
-// `statusWord` bits used to derive `running` / `faulted` / `atReference`
-// / `direction`. These match the canonical 16-reg layout's reg-2 source
-// (ABB process-data StatusWord, which is what the orbit's RTU master
-// will copy in for ABB drives). For other families the orbit-side
-// translation puts them in the same bits so this stays universal.
-const SW_READY_RUN  = 1 << 1;   // 0x0002
-const SW_AT_REF     = 1 << 8;   // 0x0100
-const SW_FAULTED    = 1 << 3;   // 0x0008
-const SW_DIRECTION  = 1 << 11;  // 0x0800 — set = REV
-
-// ── ABB ACS310 CW values for start/stop/reset.  These are what the
-// bridge writes to the orbit's HR 100+drive_offset+0 slot; the orbit
-// forwards verbatim to the VFD over RS485. If the orbit decides to
-// abstract these into role-agnostic command words later, this map
-// moves bridge-side and the orbit-side handler decodes here. ──
-const CW_START      = 0x047F;
-const CW_STOP       = 0x047E;
-const CW_RESET      = 0x0080;
-const CW_POST_RESET = 0x047E;
-
-// ── Options + dependency injection ──
-
 export interface VFDClientOptions {
-  /** Legacy field — retained for index.ts compatibility. The old
-   *  client used this to open a Modbus TCP socket; the new client
-   *  takes the VFD path through Nova so the host is ignored. */
+  // Legacy fields — retained for type compatibility with index.ts.
   host: string;
-  /** Legacy — see `host`. */
   port: number;
-  /** Legacy — kept for type compatibility with index.ts. */
   maxScanId?: number;
-  /** Legacy — kept for type compatibility with index.ts. */
   pollIntervalMs?: number;
 }
 
-/** Bridge-side dependencies needed for the new transport. Injected via
- *  `setBridgeContext()` after openSerial() resolves the Nova UART and
- *  the bridge's data layer is up. */
 export interface VFDBridgeContext {
   novaStore: NovaDataStore;
   serialBridge: CommandBridge;
   dataCache: DataCache;
+  /** Direct reference to the NovaSerialBridge so we can call
+   *  `sendVfdPollConfig` — that send isn't part of the structural
+   *  CommandBridge interface (which is per-route surface). */
+  novaBridge: NovaSerialBridge;
 }
-
-// ── Client ──
 
 export class VFDClient extends EventEmitter {
   private drives: Map<number, VFDDriveSnapshot> = new Map();
-  private meta:   Map<number, DriveMeta> = new Map();
-  /** Last-known commanded state per drive — re-sent on `start()` reconnect
-   *  to support stateless brownout recovery. (Today the orbit handles
-   *  the heartbeat; this is bookkeeping for UI continuity only.) */
-  private commandedState: Map<number, { cw: number; ref?: number }> = new Map();
+  /** Unit → profile lookup. Built from operator's drive-assignment
+   *  config on first call to `applyAssignments()`. */
+  private assignments: Map<number, DriveAssignment> = new Map();
 
   private ctx: VFDBridgeContext | null = null;
   private onBankFn: ((bank: OrbitSensorBank) => void) | null = null;
   private onChange: (() => void) | null = null;
 
+  /** Last slot that we've sent a VfdPollConfig for. Used to re-replay
+   *  on STORAGE-slot change (operator re-assigning role) without
+   *  spamming the orbit on every poll. */
+  private lastConfigSentForSlot = -1;
+  /** Lock to avoid concurrent maybeSendConfig() invocations stacking
+   *  multiple in-flight sendVfdPollConfig calls (each awaits an
+   *  Ack and overlapping ones would time out). */
+  private sendInFlight = false;
+
   constructor(_opts: VFDClientOptions) {
     super();
-    // Pre-populate empty snapshots so the API surface never returns
-    // an empty list before the first bank push lands.
     for (let i = 1; i <= DRIVES_PER_ORBIT; i++) {
       this.drives.set(i, emptySnapshot(i));
     }
   }
 
-  /** Wire up the bridge dependencies. Called once index.ts has finished
-   *  `openSerial()` and the Nova bridge is ready. Until called, the
-   *  client returns the pre-populated empty drives. */
   setBridgeContext(ctx: VFDBridgeContext): void {
     this.ctx = ctx;
   }
@@ -223,22 +166,40 @@ export class VFDClient extends EventEmitter {
     this.onChange = cb;
   }
 
+  /** Wire up the operator's drive assignments. Called by index.ts after
+   *  the `vfd-drives` config file is loaded. Each entry: { unitId,
+   *  manufacturer, label? }. Drives not present here default to the
+   *  `generic` profile (empty schedule). */
+  applyAssignments(rows: DriveAssignment[]): void {
+    this.assignments.clear();
+    for (const r of rows) {
+      this.assignments.set(r.unitId, r);
+      const snap = this.drives.get(r.unitId);
+      if (snap) {
+        snap.manufacturer = r.manufacturer;
+        if (r.label) snap.label = r.label;
+      }
+    }
+    // Re-send VfdPollConfig now that assignments may have changed.
+    this.lastConfigSentForSlot = -1;
+    void this.maybeSendConfig();
+  }
+
   async start(): Promise<void> {
-    // Subscribe to OrbitSensorBank pushes. Filter for STORAGE-role
-    // orbits' VFD passthrough window (hrBase=100) and slice into
-    // per-unit snapshots.
     if (!this.ctx) {
       console.warn('[VFDClient] start() called before setBridgeContext — drives will be empty until context wires up');
       return;
     }
-    if (this.onBankFn) return;  // already started
+    if (this.onBankFn) return;
 
     this.onBankFn = (bank: OrbitSensorBank) => {
+      // Opportunistic config retry — the first bank arrival of any kind
+      // is also when orbit topology is live in dataCache. maybeSendConfig
+      // is idempotent (skips when lastConfigSentForSlot already matches),
+      // so calling it on every bank is cheap.
+      void this.maybeSendConfig();
+
       if (bank.hrBase !== STORAGE_HR_VFD_BASE) return;
-      // Only consume from boards that the operator has assigned to
-      // STORAGE role — bridge would never put VFDs on a GDC/TRITON
-      // board, but we belt-and-suspender here to avoid mis-decoding
-      // role-window banks from other slots that happen to land here.
       const board = this.ctx!.dataCache.getOrbitBoards()
         .find(b => b.slot === bank.slot);
       if (!board || board.role !== 1 /* STORAGE */) return;
@@ -246,6 +207,11 @@ export class VFDClient extends EventEmitter {
     };
     this.ctx.novaStore.on('orbitSensorBank', this.onBankFn);
     console.log(`[VFDClient] subscribed to OrbitSensorBank @ hr_base=${STORAGE_HR_VFD_BASE} for STORAGE orbits`);
+
+    // Try sending VfdPollConfig now in case the STORAGE slot is
+    // already discovered. If not, the first bank arrival will retry
+    // via applyBank() → maybeSendConfig().
+    await this.maybeSendConfig();
   }
 
   stop(): void {
@@ -265,30 +231,37 @@ export class VFDClient extends EventEmitter {
   }
 
   setDriveMeta(unitId: number, m: { label?: string; manufacturer?: VFDManufacturer }): void {
-    const existing = this.meta.get(unitId) ?? {};
-    if (m.label !== undefined)        existing.label        = m.label;
-    if (m.manufacturer !== undefined) existing.manufacturer = m.manufacturer;
-    this.meta.set(unitId, existing);
-    // Apply to the live snapshot so getDrives() reflects immediately.
+    const a = this.assignments.get(unitId) ?? { unitId, manufacturer: 'generic' as VFDManufacturer };
+    if (m.label !== undefined)        a.label = m.label;
+    if (m.manufacturer !== undefined) a.manufacturer = m.manufacturer;
+    this.assignments.set(unitId, a);
     const snap = this.drives.get(unitId);
     if (snap) {
       if (m.label        !== undefined) snap.label        = m.label;
       if (m.manufacturer !== undefined) snap.manufacturer = m.manufacturer;
     }
+    // Manufacturer changed → re-send config so the orbit re-polls
+    // against the new profile.
+    if (m.manufacturer !== undefined) {
+      this.lastConfigSentForSlot = -1;
+      void this.maybeSendConfig();
+    }
   }
 
-  /** Write CW + optional speed ref to one drive. FC16 when both are
-   *  provided so the drive sees them atomically; FC06 for CW-only. */
+  /** Write CW + optional speed ref to one drive (legacy API). The new
+   *  preferred path is `sendAction(start, ref)` which translates per
+   *  vendor profile; `writeDrive` issues raw cache_slot writes that
+   *  only make sense for ABB-style protocols. */
   async writeDrive(unitId: number, controlWord: number, speedRefPercent?: number): Promise<boolean> {
     const storageSlot = this.findStorageSlot();
     if (storageSlot === null || !this.ctx?.serialBridge.orbitRegWrite) return false;
-    const baseAddr = STORAGE_HR_VFD_BASE + (unitId - 1) * REGS_PER_DRIVE;
+    const driveBase = STORAGE_HR_VFD_BASE + (unitId - 1) * REGS_PER_DRIVE;
     try {
       if (speedRefPercent !== undefined) {
-        await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
+        await this.ctx.serialBridge.orbitRegWrite(storageSlot, driveBase + 0,
           [controlWord & 0xFFFF, Math.max(0, Math.min(10000, speedRefPercent))]);
       } else {
-        await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
+        await this.ctx.serialBridge.orbitRegWrite(storageSlot, driveBase + 0,
           [controlWord & 0xFFFF]);
       }
       return true;
@@ -298,23 +271,15 @@ export class VFDClient extends EventEmitter {
     }
   }
 
-  /** Write a single register at a manufacturer-native address.
-   *
-   *  Currently NOT plumbed through to the orbit — the orbit's HR
-   *  100..147 window is a fixed canonical-layout cache, not arbitrary
-   *  manufacturer address space. When the orbit-side RTU master gains
-   *  a "write to native address" command path (separate orbit-side
-   *  envelope or extended HR region), this lights up. For now we
-   *  short-circuit so the /iot/fans/param endpoint returns a clear
-   *  not-supported error instead of silently writing to the wrong
-   *  slot. */
+  /** Write a vendor-native parameter. Currently NOT plumbed — needs
+   *  an orbit-side native-address write path (e.g. a separate
+   *  envelope, or extended cache region pre-configured with the
+   *  param's slot mapping). */
   async writeParam(unitId: number, addr: number, _value: number): Promise<boolean> {
-    console.warn(`[VFDClient] writeParam unit ${unitId} addr ${addr} not supported by Phase 4b Sub-3 transport — needs an orbit-side native-address write envelope`);
+    console.warn(`[VFDClient] writeParam unit ${unitId} addr ${addr} not supported by Sub-3 vendor-agnostic transport — needs an orbit-side native-address write path`);
     return false;
   }
 
-  /** Action-based control. Bridge composes the manufacturer-specific
-   *  control word; orbit forwards it verbatim to the VFD over RS485. */
   async sendAction(
     unitId: number,
     action: 'start' | 'stop' | 'reset' | 'toggle-direction',
@@ -324,49 +289,42 @@ export class VFDClient extends EventEmitter {
     if (!snap) return false;
     const storageSlot = this.findStorageSlot();
     if (storageSlot === null || !this.ctx?.serialBridge.orbitRegWrite) return false;
-    const baseAddr = STORAGE_HR_VFD_BASE + (unitId - 1) * REGS_PER_DRIVE;
+
+    const profile = getProfile(snap.manufacturer);
+    let steps;
+    switch (action) {
+      case 'start': steps = profile.actions.start(speedRefPercent); break;
+      case 'stop':  steps = profile.actions.stop();  break;
+      case 'reset': steps = profile.actions.reset(); break;
+      case 'toggle-direction':
+        // No vendor-agnostic way to express this; ABB-only legacy.
+        // Profile authors who need it should add a profile.actions.toggleDirection.
+        console.warn(`[VFDClient] toggle-direction unit ${unitId}: not supported by vendor-agnostic profile (${snap.manufacturer})`);
+        return false;
+    }
+    if (steps.length === 0) {
+      console.warn(`[VFDClient] action ${action} unit ${unitId}: profile ${snap.manufacturer} has no steps`);
+      return false;
+    }
+
+    const driveBase = STORAGE_HR_VFD_BASE + (unitId - 1) * REGS_PER_DRIVE;
     try {
-      switch (action) {
-        case 'start': {
-          const ref = Math.max(0, Math.min(10000, Math.round((speedRefPercent ?? 0) * 100)));
-          await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-            [CW_START, ref]);
-          this.commandedState.set(unitId, { cw: CW_START, ref });
-          break;
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        await this.ctx.serialBridge.orbitRegWrite(
+          storageSlot,
+          driveBase + step.cacheSlot,
+          step.values.map(v => v & 0xFFFF),
+        );
+        if (step.delayAfterMs && i < steps.length - 1) {
+          await new Promise(r => setTimeout(r, step.delayAfterMs));
         }
-        case 'stop':
-          await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-            [CW_STOP]);
-          this.commandedState.delete(unitId);
-          break;
-        case 'reset':
-          await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-            [CW_RESET]);
-          await new Promise(r => setTimeout(r, 500));
-          await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-            [CW_POST_RESET]);
-          snap.faulted = false;
-          snap.faultCode = 0;
-          this.commandedState.delete(unitId);
-          console.log(`[VFDClient] Unit ${unitId} fault reset sent`);
-          break;
-        case 'toggle-direction': {
-          // Flip the direction bit on the current CW. If the drive is
-          // running, also re-send the speed ref so we don't accidentally
-          // change setpoint while flipping direction.
-          const newCw = snap.controlWord ^ SW_DIRECTION;
-          if (snap.running && speedRefPercent !== undefined) {
-            const ref = Math.max(0, Math.min(10000, Math.round(speedRefPercent * 100)));
-            await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-              [newCw, ref]);
-            this.commandedState.set(unitId, { cw: newCw, ref });
-          } else {
-            await this.ctx.serialBridge.orbitRegWrite(storageSlot, baseAddr + F_CONTROL_WORD,
-              [newCw]);
-            this.commandedState.set(unitId, { cw: newCw });
-          }
-          break;
-        }
+      }
+      // Optimistic local state update for actions whose effect is
+      // observable in the snapshot before the next bank push.
+      if (action === 'reset') {
+        snap.faulted = false;
+        snap.faultCode = 0;
       }
       return true;
     } catch (err: any) {
@@ -377,11 +335,6 @@ export class VFDClient extends EventEmitter {
 
   // ── Private ──
 
-  /** Resolve the first STORAGE-role orbit slot. Production today has
-   *  one STORAGE orbit per panel; if a panel ever ships with multiple
-   *  STORAGE orbits the drives belong to whichever was discovered
-   *  first (deterministic — sorted by slot index).  Multi-STORAGE-VFD
-   *  is a follow-up if it becomes a customer ask. */
   private findStorageSlot(): number | null {
     if (!this.ctx) return null;
     const board = this.ctx.dataCache.getOrbitBoards()
@@ -390,61 +343,91 @@ export class VFDClient extends EventEmitter {
     return board ? board.slot : null;
   }
 
-  /** Slice a single OrbitSensorBank into per-unit snapshots and merge
-   *  into the live `drives` map. Notifies via onUpdate when anything
-   *  changed. */
+  /** Compose + send the VfdPollConfig for whichever STORAGE slot is
+   *  currently visible. Idempotent — skips when the slot hasn't
+   *  changed since last send.  Operator config changes / drive
+   *  re-assignment force a re-send by zeroing `lastConfigSentForSlot`. */
+  private async maybeSendConfig(): Promise<void> {
+    if (!this.ctx) return;
+    if (this.sendInFlight) return;
+    const storageSlot = this.findStorageSlot();
+    if (storageSlot === null) return;
+    if (storageSlot === this.lastConfigSentForSlot) return;
+
+    const entries = [];
+    for (const a of this.assignments.values()) {
+      if (a.unitId < 1 || a.unitId > DRIVES_PER_ORBIT) {
+        console.warn(`[VFDClient] assignment unit_id=${a.unitId} outside the orbit's 3-drive window — skipping`);
+        continue;
+      }
+      const profile = getProfile(a.manufacturer);
+      if (profile.pollEntries.length === 0) continue;
+      // Translate this drive's profile-relative cache slots into the
+      // orbit-window-relative cache slots: orbit cache index =
+      // (unitId-1) * REGS_PER_DRIVE + profileSlot.
+      const driveOffset = (a.unitId - 1) * REGS_PER_DRIVE;
+      const drivePollEntries = buildPollEntries(profile, a.unitId).map(e => ({
+        ...e,
+        cacheSlot: e.cacheSlot + driveOffset,
+      }));
+      entries.push(...drivePollEntries);
+    }
+
+    this.sendInFlight = true;
+    try {
+      await this.ctx.novaBridge.sendVfdPollConfig(storageSlot, entries);
+      this.lastConfigSentForSlot = storageSlot;
+      console.log(`[VFDClient] sent VfdPollConfig for STORAGE slot ${storageSlot}: ${entries.length} entries across ${this.assignments.size} drive(s)`);
+    } catch (err: any) {
+      console.error(`[VFDClient] sendVfdPollConfig failed: ${err.message}`);
+    } finally {
+      this.sendInFlight = false;
+    }
+  }
+
+  /** Decode one OrbitSensorBank push into the per-drive snapshots. */
   private applyBank(bank: OrbitSensorBank): void {
+    // The bank covers all 48 cache slots; each drive owns 16. Drive N
+    // (unitId N) lives at offsets (N-1)*16 .. N*16 - 1.
     let changed = false;
     for (let unitIdx = 0; unitIdx < DRIVES_PER_ORBIT; unitIdx++) {
       const unitId = unitIdx + 1;
-      const off = unitIdx * REGS_PER_DRIVE;
-      const v = bank.values;
-      // Defensive: a partial bank (under-populated values[]) should not
-      // throw — leave unread fields at their previous value.
-      if (off + REGS_PER_DRIVE > v.length) break;
+      const driveOffset = unitIdx * REGS_PER_DRIVE;
+      if (driveOffset + REGS_PER_DRIVE > bank.values.length) break;
 
       const snap = this.drives.get(unitId) ?? emptySnapshot(unitId);
-      const meta = this.meta.get(unitId);
+      const profile = getProfile(snap.manufacturer);
 
-      // Pull canonical layout fields verbatim — UI-side formatting
-      // handles the ×100 / ×10 scaling display.
-      snap.controlWord        = v[off + F_CONTROL_WORD]      & 0xFFFF;
-      snap.speedRefPercent    = v[off + F_SPEED_REF_X100]    & 0xFFFF;
-      snap.statusWord         = v[off + F_STATUS_WORD]       & 0xFFFF;
-      snap.actualSpeedPercent = v[off + F_ACTUAL_SPEED_X100] & 0xFFFF;
-      snap.outputFreqHz       = (v[off + F_OUTPUT_FREQ_X10]  & 0xFFFF) / 10;
-      snap.motorCurrentA      = (v[off + F_CURRENT_A_X100]   & 0xFFFF) / 100;
-      snap.motorPowerkW       = (v[off + F_POWER_KW_X100]    & 0xFFFF) / 100;
-      snap.dcBusVoltage       =  v[off + F_DC_BUS_V]         & 0xFFFF;
-      snap.driveTemp          = (v[off + F_TEMP_X10]         & 0xFFFF) / 10;
-      snap.faultCode          =  v[off + F_FAULT_CODE]       & 0xFFFF;
-      snap.maxFreqHz          = (v[off + F_MAX_FREQ_X10]     & 0xFFFF) / 10;
-      snap.rampUpTime         = (v[off + F_RAMP_UP_X10]      & 0xFFFF) / 10;
-      snap.rampDownTime       = (v[off + F_RAMP_DOWN_X10]    & 0xFFFF) / 10;
-      snap.ratedCurrentA      = (v[off + F_RATED_CUR_X100]   & 0xFFFF) / 100;
-      snap.ratedPowerkW       = (v[off + F_RATED_POWER_X100] & 0xFFFF) / 100;
-      snap.ratedFreqHz        = (v[off + F_RATED_FREQ_X10]   & 0xFFFF) / 10;
-
-      // Apply operator metadata (label, manufacturer) if known.
-      if (meta?.label)        snap.label        = meta.label;
-      if (meta?.manufacturer) snap.manufacturer = meta.manufacturer;
-
-      // Derive convenience flags from the canonical status word.
-      snap.running     = (snap.statusWord & SW_READY_RUN) !== 0;
-      snap.faulted     = (snap.statusWord & SW_FAULTED)   !== 0;
-      snap.atReference = (snap.statusWord & SW_AT_REF)    !== 0;
-      snap.direction   = (snap.statusWord & SW_DIRECTION) ? 1 : 0;
-
-      // "Online" heuristic: any non-zero reg in the slice means the
-      // orbit's RTU master has populated this drive at least once.
-      // Pure-zero slice means either the RTU hasn't run yet (today,
-      // pre-orbit-RTU-impl) or the drive is genuinely silent.
+      // Walk the profile's slot definitions; for each defined slot,
+      // pull the raw u16, apply scale + custom decoder, write the
+      // canonical snapshot field.
       let anyNonZero = false;
       for (let k = 0; k < REGS_PER_DRIVE; k++) {
-        if ((v[off + k] & 0xFFFF) !== 0) { anyNonZero = true; break; }
+        const raw = bank.values[driveOffset + k] & 0xFFFF;
+        if (raw !== 0) anyNonZero = true;
+        const def = profile.slots[k];
+        if (!def) continue;
+        const scaled = def.decode ? def.decode(raw) : (raw * (def.scale ?? 1));
+        // Cast snap to any so the dynamic field name is allowed.
+        (snap as any)[def.field] = scaled;
       }
-      snap.online = anyNonZero;
 
+      // For profiles that surface `statusWord` (ABB-style), derive
+      // the running / faulted / atReference / direction flags. Profiles
+      // that DON'T (Phase Tech etc.) already set `running` directly
+      // from a discrete-input slot, and leave statusWord at 0.
+      if (profile.slots[2]?.field === 'statusWord') {
+        snap.running     = (snap.statusWord & (1 << 1))  !== 0;
+        snap.faulted     = (snap.statusWord & (1 << 3))  !== 0;
+        snap.atReference = (snap.statusWord & (1 << 8))  !== 0;
+        snap.direction   = (snap.statusWord & (1 << 11)) ? 1 : 0;
+      } else {
+        // Phase-Tech-style: faulted iff faultCode > 0; running came
+        // straight from cache_slot 0 already.
+        snap.faulted = (snap.faultCode ?? 0) > 0;
+      }
+
+      snap.online = anyNonZero;
       this.drives.set(unitId, snap);
       changed = true;
     }
