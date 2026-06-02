@@ -54,6 +54,27 @@
  * are ever updated. The remaining slots stay at 0 ("never seen"),
  * which the encoder converts to UINT32_MAX on the wire. */
 #define ORBIT_VFD_ACTIVITY_SLOTS 24U
+
+/* VFD poll-scheduler config region (HR 600..893). Phase 4b Sub-3 wire
+ * contract (2026-06-02): the bridge composes `VfdPollConfig` (envelope
+ * tag 127) from the operator's drive assignments + bridge-side vendor
+ * profiles, Nova forwards it here as FC16 writes, and the (future)
+ * orbit-side RTU scheduler reads this region to know which RTU polls
+ * to issue. 48 max entries × 6 regs per entry + 1 terminator entry =
+ * 294 regs. Layout per entry:
+ *   reg 0: cache_slot  (u16; 0xFFFF marks end-of-table)
+ *   reg 1: unit_id     (u16; low 8 used)
+ *   reg 2: native_addr (u16)
+ *   reg 3: fc          (u16; e.g. 0x4201 for Phase Tech FC66 sub 1)
+ *   reg 4: poll_rate_ms(u16; 0 = write-only, never polled)
+ *   reg 5: writable    (u16; bit 0 only)
+ * See docs/orbit-vfd-poll-scheduler.md for the full contract. */
+#define ORBIT_VFD_CONFIG_ENTRIES_MAX  48U
+#define ORBIT_VFD_CONFIG_REGS_PER_ENTRY 6U
+/* +1 entry of headroom for the 0xFFFF terminator that Nova always
+ * writes after the last real entry. */
+#define ORBIT_VFD_CONFIG_BLOCK_SIZE \
+    ((ORBIT_VFD_CONFIG_ENTRIES_MAX + 1U) * ORBIT_VFD_CONFIG_REGS_PER_ENTRY)  /* 294 */
 /* Operator label width (chars including NUL). Mirrors the
  * proto `OrbitBoardStatus.{output,input}_labels` max_size:24. */
 #define ORBIT_LABEL_LEN          24U
@@ -187,6 +208,16 @@ typedef struct {
     /* VFD pass-through registers (HR 100..147). Filled by
      * orbit_vfd_rtu (Phase 2). */
     uint16_t vfd_regs[ORBIT_VFD_BLOCK_SIZE];
+
+    /* VFD poll-scheduler config region (HR 600..893). Phase 4b Sub-3
+     * (2026-06-02) — bridge composes `VfdPollConfig` from the operator's
+     * drive list + vendor profiles; Nova forwards as FC16 writes here;
+     * the (future) orbit-side RTU scheduler reads this to know which
+     * polls to schedule. Today the orbit only ACCEPTS the writes so the
+     * Nova-side forward round-trips cleanly; the RTU master arrives in
+     * a follow-up commit. See orbit_state.h #define block above for
+     * the per-entry layout. */
+    uint16_t vfd_config_block[ORBIT_VFD_CONFIG_BLOCK_SIZE];
 
     /* Status registers (HR 40000..40006 in the sim). */
     uint16_t cpu_temp_x10;     /* °C × 10 */

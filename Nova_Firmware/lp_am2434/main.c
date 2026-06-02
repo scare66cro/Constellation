@@ -842,26 +842,170 @@ static void bridge_rx_callback(const uint8_t *payload, size_t len)
 
         if (field == 127U && wire == 2U) {
             /* VfdPollConfig — bridge tells the STORAGE orbit how to drive
-             * its RS485 RTU master. Phase 4b Sub-3 architecture pivot
-             * (2026-06-02): vendor knowledge lives bridge-side; the
-             * orbit is a thin configurable scheduler. Nova's job here is
-             * to forward the config to the STORAGE orbit; until the
-             * orbit firmware gains the scheduler + RS485 master, this
-             * is an ack-only stub. The bridge replays VfdPollConfig on
-             * every connect so missed forwarding self-heals when the
-             * orbit support lands.
+             * its RS485 RTU master. Phase 4b Sub-3 (2026-06-02):
+             * Nova decodes the per-entry config and forwards it to the
+             * orbit's HR 600..893 region as a series of FC16 writes
+             * (chunked at 120 regs = 20 entries each to stay under the
+             * FC16 per-write cap of 123 regs while aligning to entry
+             * boundaries). The (future) orbit-side scheduler reads this
+             * region to know which RTU polls to issue. The bridge
+             * replays on every Nova reconnect, so transient forward
+             * failures self-heal — no OSPI persistence here.
              *
-             * Wire detail TBD with the orbit firmware author: most
-             * likely the config rides a designated HR window in the
-             * orbit's TCP slave (so the orbit reuses its existing
-             * Modbus path with no new endpoint). For now: log the
-             * inner length, drain the envelope, ack. */
+             * Wire layout per entry (6 u16 regs, 1:1 with proto fields):
+             *   reg 0: cache_slot   (0xFFFF = end-of-table terminator)
+             *   reg 1: unit_id      (low 8 used)
+             *   reg 2: native_addr
+             *   reg 3: fc           (low byte = FC, high byte = sub-FC)
+             *   reg 4: poll_rate_ms (0 = write-only, never polled)
+             *   reg 5: writable     (low bit only)
+             * See docs/orbit-vfd-poll-scheduler.md for the full contract. */
             uint32_t inner_len;
             size_t ln = pb_decode_varint(payload + pos, len - pos, &inner_len);
             if (ln == 0U || pos + ln + inner_len > len) return;
-            pos += ln + inner_len;
-            DebugP_log("[RX] VfdPollConfig %u B — orbit-forward pending Sub-3 RTU firmware\r\n",
-                       (unsigned)inner_len);
+            pos += ln;
+            const uint8_t *inner = payload + pos;
+            pos += inner_len;
+
+            /* Worst case: 48 entries × 6 regs + 6-reg terminator = 294. */
+            uint16_t cfg[294];
+            for (size_t i = 0; i < sizeof(cfg) / sizeof(cfg[0]); i++) cfg[i] = 0xFFFFU;
+            uint32_t slot = 0;
+            bool have_slot = false;
+            uint16_t entry_count = 0;
+
+            size_t ipos = 0;
+            while (ipos < inner_len) {
+                uint32_t itag;
+                size_t in = pb_decode_varint(inner + ipos, inner_len - ipos, &itag);
+                if (in == 0U) break;
+                ipos += in;
+                const uint32_t ifield = itag >> 3;
+                const uint8_t  iwire  = (uint8_t)(itag & 0x07U);
+                if (ifield == 1U && iwire == 0U) {
+                    uint32_t v;
+                    size_t vn = pb_decode_varint(inner + ipos,
+                                                 inner_len - ipos, &v);
+                    if (vn == 0U) break;
+                    ipos += vn;
+                    slot = v;
+                    have_slot = true;
+                } else if (ifield == 2U && iwire == 2U) {
+                    /* repeated VfdPollEntry — submsg per entry. */
+                    uint32_t elen;
+                    size_t en = pb_decode_varint(inner + ipos,
+                                                 inner_len - ipos, &elen);
+                    if (en == 0U) break;
+                    ipos += en;
+                    if (ipos + elen > inner_len) break;
+                    const uint8_t *ebytes = inner + ipos;
+                    size_t epos = 0;
+                    uint16_t cache_slot   = 0;
+                    uint16_t unit_id      = 0;
+                    uint16_t native_addr  = 0;
+                    uint16_t fc           = 0;
+                    uint16_t poll_rate_ms = 0;
+                    uint16_t writable     = 0;
+                    while (epos < elen) {
+                        uint32_t etag;
+                        size_t  etn = pb_decode_varint(ebytes + epos,
+                                                       elen - epos, &etag);
+                        if (etn == 0U) break;
+                        epos += etn;
+                        const uint32_t ef = etag >> 3;
+                        const uint8_t  ew = (uint8_t)(etag & 0x07U);
+                        if (ew == 0U) {
+                            uint32_t ev;
+                            size_t evn = pb_decode_varint(ebytes + epos,
+                                                          elen - epos, &ev);
+                            if (evn == 0U) break;
+                            epos += evn;
+                            switch (ef) {
+                                case 1U: cache_slot   = (uint16_t)ev; break;
+                                case 2U: unit_id      = (uint16_t)ev; break;
+                                case 3U: native_addr  = (uint16_t)ev; break;
+                                case 4U: fc           = (uint16_t)ev; break;
+                                case 5U: poll_rate_ms = (uint16_t)ev; break;
+                                case 6U: writable     = (uint16_t)ev; break;
+                                default: break;
+                            }
+                        } else {
+                            size_t sk = pb_skip_field(ew,
+                                                     ebytes + epos,
+                                                     elen - epos);
+                            if (sk == 0U) break;
+                            epos += sk;
+                        }
+                    }
+                    if (entry_count < (uint16_t)ORBIT_VFD_CONFIG_ENTRIES_MAX) {
+                        const size_t o = (size_t)entry_count * 6U;
+                        cfg[o + 0] = cache_slot;
+                        cfg[o + 1] = unit_id;
+                        cfg[o + 2] = native_addr;
+                        cfg[o + 3] = fc;
+                        cfg[o + 4] = poll_rate_ms;
+                        cfg[o + 5] = writable ? 1U : 0U;
+                        entry_count++;
+                    }
+                    ipos += elen;
+                } else {
+                    size_t sk = pb_skip_field(iwire, inner + ipos,
+                                              inner_len - ipos);
+                    if (sk == 0U) break;
+                    ipos += sk;
+                }
+            }
+
+            /* Always write the terminator after the last real entry so
+             * the orbit knows where the table ends. The cfg[] buffer
+             * was pre-filled with 0xFFFF, so terminator slot already
+             * has cache_slot=0xFFFF — but enforce the full 6-reg
+             * shape explicitly for clarity. */
+            if (entry_count < (uint16_t)ORBIT_VFD_CONFIG_ENTRIES_MAX) {
+                const size_t o = (size_t)entry_count * 6U;
+                cfg[o + 0] = 0xFFFFU;  /* terminator */
+                cfg[o + 1] = 0U;
+                cfg[o + 2] = 0U;
+                cfg[o + 3] = 0U;
+                cfg[o + 4] = 0U;
+                cfg[o + 5] = 0U;
+            }
+
+            if (!have_slot || slot >= 256U) {
+                DebugP_log("[RX] VfdPollConfig missing/bad slot (have=%d slot=%u)\r\n",
+                           have_slot, (unsigned)slot);
+                needs_ack = true;
+                continue;
+            }
+
+            /* Total regs to forward = entries+terminator, rounded into
+             * 6-reg blocks. Walk in 120-reg chunks (20 entries = 120
+             * regs; well under FC16's 123-reg per-write cap). */
+            const uint16_t total_regs = (uint16_t)(((uint16_t)(entry_count + 1U))
+                                                   * 6U);
+            const uint16_t CHUNK_REGS = 120U;  /* 20 entries × 6 regs */
+            int rc = 0;
+            uint16_t off = 0;
+            while (off < total_regs) {
+                uint16_t this_chunk = (uint16_t)(total_regs - off);
+                if (this_chunk > CHUNK_REGS) this_chunk = CHUNK_REGS;
+                rc = OrbitClient_WriteHoldingRegisters(
+                    (uint8_t)slot,
+                    (uint16_t)(600U + off),
+                    &cfg[off],
+                    this_chunk);
+                if (rc != 0) {
+                    DebugP_log("[RX] VfdPollConfig FC16 chunk failed: "
+                               "slot=%u off=%u count=%u rc=%d\r\n",
+                               (unsigned)slot, (unsigned)off,
+                               (unsigned)this_chunk, rc);
+                    break;
+                }
+                off += this_chunk;
+            }
+            DebugP_log("[RX] VfdPollConfig slot=%u entries=%u regs=%u rc=%d\r\n",
+                       (unsigned)slot, (unsigned)entry_count,
+                       (unsigned)total_regs, rc);
             needs_ack = true;
             continue;
         }

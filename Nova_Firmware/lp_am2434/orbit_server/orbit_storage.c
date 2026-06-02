@@ -19,6 +19,13 @@
 #define HR_VFD_END        (HR_VFD_BASE + ORBIT_VFD_BLOCK_SIZE)   /* 148 */
 #define HR_SENSOR_BASE    200
 #define HR_SENSOR_END     (HR_SENSOR_BASE + ORBIT_SENSOR_BLOCK_SIZE) /* 264 */
+/* VFD poll-scheduler config region. Phase 4b Sub-3 (2026-06-02). Bridge
+ * composes the config from vendor profiles; Nova forwards via FC16; the
+ * orbit (future scheduler) reads this region. Accepting writes here
+ * today is what closes the Nova-side round-trip even before the orbit
+ * RTU master lands. */
+#define HR_VFD_CONFIG_BASE 600U
+#define HR_VFD_CONFIG_END  (HR_VFD_CONFIG_BASE + ORBIT_VFD_CONFIG_BLOCK_SIZE) /* 894 */
 #define HR_STATUS_BASE    40000
 #define HR_STATUS_COUNT   7
 
@@ -83,6 +90,9 @@ static uint16_t read_one_hr(const OrbitStateData *s, uint16_t addr,
     }
     if (addr >= HR_SENSOR_BASE && addr < HR_SENSOR_END) {
         return (uint16_t)s->sensor_block[addr - HR_SENSOR_BASE];
+    }
+    if (addr >= HR_VFD_CONFIG_BASE && addr < HR_VFD_CONFIG_END) {
+        return s->vfd_config_block[addr - HR_VFD_CONFIG_BASE];
     }
     if (addr >= HR_STATUS_BASE && addr < HR_STATUS_BASE + HR_STATUS_COUNT) {
         switch (addr - HR_STATUS_BASE) {
@@ -159,6 +169,15 @@ static uint8_t write_one_hr(OrbitStateData *s, uint16_t addr, uint16_t value)
          * intended behaviour: live data wins, injected stale values
          * get superseded. */
         s->sensor_block[addr - HR_SENSOR_BASE] = (int16_t)value;
+        return MB_EX_NONE;
+    }
+    if (addr >= HR_VFD_CONFIG_BASE && addr < HR_VFD_CONFIG_END) {
+        /* VFD poll-scheduler config write — Nova forwards the bridge's
+         * VfdPollConfig envelope here as FC16. We accept and cache; the
+         * orbit-side RTU master (follow-up commit) reads this region to
+         * know which polls to schedule. No further validation — the
+         * bridge validates per-entry shape before sending. */
+        s->vfd_config_block[addr - HR_VFD_CONFIG_BASE] = value;
         return MB_EX_NONE;
     }
     if (addr >= HR_STATUS_BASE && addr < HR_STATUS_BASE + HR_STATUS_COUNT) {

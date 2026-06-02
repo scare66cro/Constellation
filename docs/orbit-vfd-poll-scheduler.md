@@ -1,7 +1,8 @@
 # Orbit-side VFD Poll Scheduler — contract for the STORAGE orbit's RS485 RTU master
 
 > **Status:** wire contract landed 2026-06-02 (bridge + Nova + proto).
-> Orbit-side implementation pending hardware bring-up.
+> Nova-side forwarding landed 2026-06-02 (this revision). Orbit-side
+> RTU scheduler implementation pending hardware bring-up.
 > This document is the spec the orbit firmware author writes against.
 
 ## TL;DR
@@ -233,40 +234,50 @@ FC16 (Write Multi HRs) → sends RS485:
 `[unit=2, fc=16, addr=0, qty=2, bcnt=4, 0x047F, 5000, CRC]` → drive
 starts at 50% speed.
 
-## Nova → orbit forwarding (TBD)
+## Nova → orbit forwarding (landed 2026-06-02)
 
-How Nova actually delivers `VfdPollConfig` to the orbit is the one
-remaining design choice. Two natural options:
+Nova's `VfdPollConfig` handler at field 127 in
+[`main.c`](../Nova_Firmware/lp_am2434/main.c) decodes the inner
+protobuf, packs each entry into a 6-reg slot, and forwards via chunked
+FC16 writes to the orbit's HR 600..893 config region. The orbit's TCP
+slave at [`orbit_storage.c`](../Nova_Firmware/lp_am2434/orbit_server/orbit_storage.c)
+accepts the writes and caches them in `OrbitStateData::vfd_config_block[]`.
+The (future) orbit-side RTU master will read this region to know which
+RTU polls to schedule.
 
-### Option N1: Dedicated config region in the orbit's HR map
-Nova translates `VfdPollConfig` into a series of FC16 writes to a
-designated region (say HR 600..815, 48 entries × 4 regs each). The
-orbit's TCP slave detects writes to this region and refreshes the
-table on the next scheduler tick. **Pro:** no new orbit-side TCP
-endpoint. **Con:** orbit needs to know the region's HR layout.
-
-### Option N2: New orbit-side Modbus FC
-Nova issues a custom Modbus TCP message (vendor FC 67?) carrying the
-config blob verbatim. Orbit dispatches on FC.  **Pro:** typed wire.
-**Con:** one more Modbus FC to maintain.
-
-Recommend **N1** — keeps the orbit's TCP surface lean and reuses
-the existing FC16 path. Layout:
+### Per-entry HR layout (6 regs × 49 entries max = 294 regs)
 
 ```
-HR 600..603  entry 0: (cache_slot | fc<<16, unit_id, native_addr, poll_rate_ms | writable<<31)
-HR 604..607  entry 1: same shape
-...
-HR 600 + 4N..603 + 4N  entry N
+HR 600 + 6N + 0  cache_slot   u16 — 0xFFFF marks end-of-table (terminator slot)
+HR 600 + 6N + 1  unit_id      u16 — low 8 used (1..247)
+HR 600 + 6N + 2  native_addr  u16
+HR 600 + 6N + 3  fc           u16 — low byte = FC, high byte = sub-FC
+HR 600 + 6N + 4  poll_rate_ms u16 — 0 = write-only, never polled
+HR 600 + 6N + 5  writable     u16 — bit 0 only
 ```
 
-Last entry marker: `cache_slot = 0xFFFF` in the first reg.
+This is a 1:1 mirror of the `VfdPollEntry` proto fields. The 6-reg
+shape was chosen over a tighter 4-reg pack because it stays
+human-readable when dumping the orbit HR map for debug, and the extra
+96 reg slots (vs the original ~192-reg proposal) cost nothing on the
+AM2434's MSRAM budget.
 
-Nova's `VfdPollConfig` handler at field 127 (in `main.c`) iterates the
-proto entries, packs into the 4-reg-per-entry layout, and issues an
-FC16 to (orbit_slot, addr=600, values=[...]). This handler is currently
-an ack-only stub; flesh it out when the orbit's config region is
-implemented.
+### Terminator + chunking
+
+Nova writes a terminator entry `(cache_slot=0xFFFF, others=0)` after
+the last real entry so the orbit knows where the table ends.
+
+FC16 caps at 123 regs per write, so Nova chunks at **120 regs (= 20
+entries)** per write — boundaries stay aligned to the 6-reg entry
+shape. Up to 3 writes cover the worst case (48 entries + terminator =
+294 regs → 120 + 120 + 54).
+
+### Replay semantics
+
+The bridge replays `VfdPollConfig` on every Nova reconnect. The orbit
+does not OSPI-persist the table — same pattern as `OrbitRoleAssign`
+and `AoEquipAssign`. A transient FC16 failure here heals on the next
+bridge↔Nova handshake. No retry state machine in Nova.
 
 ## What's NOT covered yet
 
