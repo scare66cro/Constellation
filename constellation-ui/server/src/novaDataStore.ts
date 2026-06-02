@@ -506,6 +506,37 @@ export interface OrbitBoardStatus {
    *  ao_equip_t in nova_fan_output.h. Operator picks per AO via the
    *  Level 2 PWM 4-20 mA Output Setup page. */
   aoEquip: number[];
+
+  /** Sub-1 audit follow-up (2026-06-02): fields 16-23 are EMITTED by
+   *  the LP today (see lp_am2434/main.c:4328-4353) but were dropped by
+   *  the decoder until this commit. Each field is independently optional
+   *  on the wire (proto3 zero-suppression) — when the LP omits a bitmap
+   *  the property here stays `undefined` so consumers can distinguish
+   *  "all bits clear" (== 0) from "not yet polled". */
+
+  /** Live DI bitmap (Modbus discrete inputs 0..14). Bits:
+   *    0..9   → DI 0..9
+   *    10     → E-stop
+   *    11..14 → DC24V monitor channels 0..3 */
+  digitalInputs?: number;
+  /** Live DO bitmap. Bits 0..9 → DO 0..9. */
+  digitalOutputs?: number;
+  /** DC24V output channel state bitmap. Bits 0..3 → DC24V output 0..3.
+   *  Kept separate from `digitalInputs` so the DC24V *monitor* (input
+   *  side) is not conflated with the DC24V *driver* (output side). */
+  dc24vOutputs?: number;
+  /** AO level per channel, percent ×10 (0..1000). Length=2 today. */
+  analogOutputsX10?: number[];
+  /** Last-comm age in seconds per VFD slot (length=24).  Sentinel
+   *  `0xFFFFFFFF` means "never spoken to". */
+  vfdActivitySecs?: number[];
+  /** Last-comm age in seconds per sensor board (length=16). Same sentinel. */
+  sensorActivitySecs?: number[];
+  /** Operator-assigned labels for the 10 DO channels (length=10).
+   *  Empty string at slot N means "no label set" — UI falls back to "DO N". */
+  outputLabels?: string[];
+  /** Operator-assigned labels for the 10 DI channels (length=10). */
+  inputLabels?: string[];
 }
 
 export interface OrbitStatus {
@@ -1476,6 +1507,57 @@ export class NovaDataStore extends EventEmitter {
     const zzVal = gv(f, 12);
     const legacySlot = (zzVal & 1) ? -((zzVal >> 1) + 1) : (zzVal >> 1);
 
+    /** Drain a `repeated uint32` field that may arrive either packed
+     *  (single PB_LEN with concatenated varints — proto3 default for
+     *  scalar repeated) or unpacked (one PB_VARINT entry per value). */
+    const repeatedU32 = (field: number): number[] => {
+      const out: number[] = [];
+      for (const x of f) {
+        if (x.field !== field) continue;
+        if (x.wireType === PB_VARINT) {
+          out.push(x.value as number);
+        } else if (x.wireType === PB_LEN) {
+          const b = x.value as Buffer;
+          let p = 0;
+          while (p < b.length) {
+            let v = 0, shift = 0;
+            while (p < b.length) {
+              const by = b[p++];
+              v |= (by & 0x7F) << shift;
+              if (!(by & 0x80)) break;
+              shift += 7;
+              if (shift >= 35) { p = b.length; break; }
+            }
+            out.push(v >>> 0);
+          }
+        }
+      }
+      return out;
+    };
+
+    /** Repeated string is always unpacked on the wire (proto3 spec). */
+    const repeatedString = (field: number): string[] => {
+      const out: string[] = [];
+      for (const x of f) {
+        if (x.field !== field || x.wireType !== PB_LEN) continue;
+        out.push((x.value as Buffer).toString('utf8'));
+      }
+      return out;
+    };
+
+    // Field 16..18 are uint32 bitmaps. proto3 zero-suppression means an
+    // absent field decodes as `undefined` here (not `0`) — distinguishes
+    // "never polled" from "all bits clear".
+    const di     = f.find(x => x.field === 16 && x.wireType === PB_VARINT)?.value as number | undefined;
+    const dout   = f.find(x => x.field === 17 && x.wireType === PB_VARINT)?.value as number | undefined;
+    const dc24v  = f.find(x => x.field === 18 && x.wireType === PB_VARINT)?.value as number | undefined;
+
+    const aox10  = repeatedU32(19);
+    const vfdAct = repeatedU32(20);
+    const senAct = repeatedU32(21);
+    const outLbl = repeatedString(22);
+    const inLbl  = repeatedString(23);
+
     return {
       slot: gv(f, 1),
       dipswitchId: gv(f, 2),
@@ -1491,33 +1573,15 @@ export class NovaDataStore extends EventEmitter {
       legacySlot,
       refrigStage: gv(f, 13),
       ipAddress: gs(f, 14),
-      // Accept both packed (wire=PB_LEN, the proto3 default) and
-      // unpacked-repeated (wire=PB_VARINT) — LP firmware emits packed
-      // (a single len-delimited field 15 carrying ch0,ch1 varints).
-      aoEquip: (() => {
-        const out: number[] = [];
-        for (const x of f) {
-          if (x.field !== 15) continue;
-          if (x.wireType === PB_VARINT) {
-            out.push(x.value as number);
-          } else if (x.wireType === PB_LEN) {
-            const buf = x.value as Buffer;
-            let p = 0;
-            while (p < buf.length) {
-              let v = 0, shift = 0;
-              while (p < buf.length) {
-                const b = buf[p++];
-                v |= (b & 0x7F) << shift;
-                if (!(b & 0x80)) break;
-                shift += 7;
-                if (shift >= 35) { p = buf.length; break; }
-              }
-              out.push(v >>> 0);
-            }
-          }
-        }
-        return out;
-      })(),
+      aoEquip: repeatedU32(15),
+      digitalInputs:      di,
+      digitalOutputs:     dout,
+      dc24vOutputs:       dc24v,
+      analogOutputsX10:   aox10.length      ? aox10  : undefined,
+      vfdActivitySecs:    vfdAct.length     ? vfdAct : undefined,
+      sensorActivitySecs: senAct.length     ? senAct : undefined,
+      outputLabels:       outLbl.length     ? outLbl : undefined,
+      inputLabels:        inLbl.length      ? inLbl  : undefined,
     };
   }
 

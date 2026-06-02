@@ -3297,13 +3297,31 @@ export function createApiRoutes(dataCache: DataCache, serialBridge: CommandBridg
   router.get('/orbits', (_req: Request, res: Response) => {
     const boards = dataCache.getOrbitBoards();
     res.json({
-      orbits: boards.map(b => ({
-        slot: b.slot,
-        dipswitchId: b.dipswitchId ?? (b.slot + 2),  // matches firmware ORBIT_IP scheme
-        connected: b.connected,
-        role: b.role,                       // 0=UNASSIGNED 1=STORAGE 2=DOOR 3=REFRIG
-        aoEquip: b.aoEquip ?? [0, 0],
-      })),
+      orbits: boards.map(b => {
+        // Phase 4b Sub-1 audit follow-up (2026-06-02): include the
+        // OrbitBoardStatus fields 16-23 that the LP has emitted since
+        // the April 2026 LP-I/O extension but the bridge was dropping
+        // on the floor. Each field is independently optional — when
+        // the LP omits one on the wire (proto3 zero-suppression), it
+        // stays `undefined` here and is filtered out below so the
+        // response stays compact for slots that haven't reported.
+        const row: Record<string, unknown> = {
+          slot: b.slot,
+          dipswitchId: b.dipswitchId ?? (b.slot + 2),  // matches firmware ORBIT_IP scheme
+          connected: b.connected,
+          role: b.role,                       // 0=UNASSIGNED 1=STORAGE 2=DOOR 3=REFRIG
+          aoEquip: b.aoEquip ?? [0, 0],
+        };
+        if (b.digitalInputs      !== undefined) row.digitalInputs      = b.digitalInputs;
+        if (b.digitalOutputs     !== undefined) row.digitalOutputs     = b.digitalOutputs;
+        if (b.dc24vOutputs       !== undefined) row.dc24vOutputs       = b.dc24vOutputs;
+        if (b.analogOutputsX10   !== undefined) row.analogOutputsX10   = b.analogOutputsX10;
+        if (b.vfdActivitySecs    !== undefined) row.vfdActivitySecs    = b.vfdActivitySecs;
+        if (b.sensorActivitySecs !== undefined) row.sensorActivitySecs = b.sensorActivitySecs;
+        if (b.outputLabels       !== undefined) row.outputLabels       = b.outputLabels;
+        if (b.inputLabels        !== undefined) row.inputLabels        = b.inputLabels;
+        return row;
+      }),
     });
   });
 

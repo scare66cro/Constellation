@@ -58,6 +58,22 @@ export interface OrbitBoardCacheRow {
   legacySlot?: number;      // proto: legacy_slot (-1 = unmapped)
   refrigStage?: number;     // proto: refrig_stage (REFRIG role only)
   ipAddress?: string;       // proto: ip_address
+
+  // ── Phase 4b Sub-1 audit follow-up (2026-06-02): proto fields 16-23.
+  //    LP firmware has emitted these since the April 2026 LP-I/O extension
+  //    but the bridge decoder was dropping them on the floor — see
+  //    novaDataStore.ts::decodeOrbitBoardStatus. Each is independently
+  //    optional on the wire (proto3 zero-suppression); a missing field
+  //    decodes as `undefined` so consumers can distinguish "never polled"
+  //    from "all bits clear".
+  digitalInputs?: number;      // bitmap: DI 0..9 + estop(10) + DC24V mon 11..14
+  digitalOutputs?: number;     // bitmap: DO 0..9
+  dc24vOutputs?: number;       // bitmap: DC24V output 0..3
+  analogOutputsX10?: number[]; // percent×10 per AO channel (len 2 today)
+  vfdActivitySecs?: number[];  // per-VFD comm age (len 24, 0xFFFFFFFF=never)
+  sensorActivitySecs?: number[]; // per-sensor comm age (len 16, same sentinel)
+  outputLabels?: string[];     // operator-assigned DO labels (len 10)
+  inputLabels?: string[];      // operator-assigned DI labels (len 10)
 }
 
 export interface CgiEntry {

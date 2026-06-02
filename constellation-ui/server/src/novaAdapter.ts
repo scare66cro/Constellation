@@ -795,6 +795,17 @@ export function createNovaAdapter(
       legacySlot:  b.legacySlot,
       refrigStage: b.refrigStage,
       ipAddress:   b.ipAddress,
+      // Sub-1 audit follow-up — pass through verbatim. Decoder leaves
+      // each field `undefined` when the LP omits it on the wire, so
+      // optional-chaining is the consumer contract.
+      digitalInputs:      b.digitalInputs,
+      digitalOutputs:     b.digitalOutputs,
+      dc24vOutputs:       b.dc24vOutputs,
+      analogOutputsX10:   b.analogOutputsX10,
+      vfdActivitySecs:    b.vfdActivitySecs,
+      sensorActivitySecs: b.sensorActivitySecs,
+      outputLabels:       b.outputLabels,
+      inputLabels:        b.inputLabels,
     })));
   }
 
