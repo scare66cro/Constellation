@@ -3912,33 +3912,6 @@ bool LpSettings_SetRemoteOff(uint32_t eq_index, uint8_t new_state)
     return true;
 }
 
-/* ─── VFD subsystem (Phase 4b Sub-phase 3) ────────────────────────────
- *
- * Cache the bridge-supplied VFD endpoint + polling parameters. The
- * bridge replays VfdConfig on every connect so a missed update or a
- * Nova reboot is self-healing. Returns true on actual change so the
- * caller (main.c::bridge_rx_callback) can (re)start nova_vfd_client
- * with the new endpoint without polluting steady-state with idempotent
- * restart noise. */
-bool LpSettings_SetVfdConfig(uint32_t host_ipv4,
-                             uint16_t port,
-                             uint8_t  max_scan_unit_id,
-                             uint16_t poll_interval_ms)
-{
-    bool changed = false;
-    if (s_data.vfd.host_ipv4        != host_ipv4)        { s_data.vfd.host_ipv4        = host_ipv4;        changed = true; }
-    if (s_data.vfd.port             != port)             { s_data.vfd.port             = port;             changed = true; }
-    if (s_data.vfd.max_scan_unit_id != max_scan_unit_id) { s_data.vfd.max_scan_unit_id = max_scan_unit_id; changed = true; }
-    if (s_data.vfd.poll_interval_ms != poll_interval_ms) { s_data.vfd.poll_interval_ms = poll_interval_ms; changed = true; }
-    if (!s_data.vfd.configured) { s_data.vfd.configured = true; changed = true; }
-    return changed;
-}
-
-const LpVfdConfig *LpSettings_GetVfdConfig(void)
-{
-    return &s_data.vfd;
-}
-
 uint8_t LpSettings_GetRemoteOff(uint32_t eq_index)
 {
     if (eq_index >= LP_IO_ENTRIES_MAX) return 0U;

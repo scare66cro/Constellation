@@ -335,9 +335,6 @@ const MSG_ORBIT_ROLE_ASSIGN  = 122;
 const MSG_AO_EQUIP_ASSIGN    = 123;
 const MSG_TRITON_REG_WRITE   = 125;
 const MSG_ORBIT_REG_WRITE    = 126;
-const MSG_VFD_CONFIG         = 127;
-const MSG_VFD_REG_BANK       = 128;
-const MSG_VFD_RAW_WRITE      = 129;
 
 /* ──────────────────────────────────────────────────────────────────────── *
  *  Message name map for logging                                           *
@@ -386,9 +383,6 @@ const MSG_NAMES: Record<number, string> = {
   [MSG_AO_EQUIP_ASSIGN]:    'AoEquipAssign',
   [MSG_TRITON_REG_WRITE]:   'TritonRegWrite',
   [MSG_ORBIT_REG_WRITE]:    'OrbitRegWrite',
-  [MSG_VFD_CONFIG]:         'VfdConfig',
-  [MSG_VFD_REG_BANK]:       'VfdRegBank',
-  [MSG_VFD_RAW_WRITE]:      'VfdRawWrite',
 };
 
 // Export MSG IDs so the firmware update manager can reference them
@@ -397,7 +391,6 @@ export {
   MSG_FW_ACTIVATE_BANK, MSG_FW_UPDATE_STATUS, MSG_FW_BANK_INFO,
   MSG_ORBIT_STATUS, MSG_ORBIT_DISCOVERY, MSG_ORBIT_ROLE_ASSIGN, MSG_AO_EQUIP_ASSIGN,
   MSG_TRITON_REG_WRITE, MSG_ORBIT_REG_WRITE,
-  MSG_VFD_CONFIG, MSG_VFD_REG_BANK, MSG_VFD_RAW_WRITE,
 };
 
 // Re-export PB helpers for use by the firmware update manager
@@ -645,59 +638,6 @@ export class NovaSerialBridge extends EventEmitter {
       enc.varintForce(3, v & 0xFFFF);
     }
     return this.sendCommand(MSG_ORBIT_REG_WRITE, enc.encode());
-  }
-
-  /**
-   * Tell Nova which VFD endpoint to poll. Phase 4b Sub-phase 3
-   * (2026-06-01). Sent at bridge startup (and any time the operator
-   * changes vfd-host/port). Nova caches in `LpSettings.vfd` and the
-   * `nova_vfd_client` task picks up the new config on its next cycle.
-   *
-   * `hostIpv4` is the dotted IPv4 string (e.g. "10.47.27.108"). Empty
-   * string disables VFD polling Nova-side.
-   *
-   * All four fields force-encode because 0 is meaningful (0 host =
-   * disable, 0 port = ignore-cached, 0 scan = no auto-discover, 0 poll
-   * = clamp-to-100ms default in Nova).
-   */
-  async sendVfdConfig(hostIpv4: string, port: number,
-                      maxScanUnitId: number, pollIntervalMs: number): Promise<number> {
-    let packed = 0;
-    if (hostIpv4) {
-      const parts = hostIpv4.split('.').map(s => Number(s) & 0xFF);
-      if (parts.length === 4 && parts.every(n => Number.isFinite(n))) {
-        packed = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
-      }
-    }
-    const inner = new PbEncoder()
-      .varintForce(1, packed)
-      .varintForce(2, port & 0xFFFF)
-      .varintForce(3, maxScanUnitId & 0xFF)
-      .varintForce(4, pollIntervalMs & 0xFFFF)
-      .encode();
-    return this.sendCommand(MSG_VFD_CONFIG, inner);
-  }
-
-  /**
-   * Forward a Modbus HR write to a VFD unit. Mirror of
-   * `sendOrbitRegWrite` but routes to the VFD endpoint Nova learnt via
-   * `sendVfdConfig`. Nova picks FC06 for `values.length === 1` else
-   * FC16. Phase 4b Sub-phase 3.
-   */
-  async sendVfdRawWrite(unitId: number, addr: number, values: number[]): Promise<number> {
-    if (!Array.isArray(values) || values.length === 0) {
-      throw new Error('sendVfdRawWrite: values must be a non-empty array');
-    }
-    if (values.length > 123) {
-      throw new Error(`sendVfdRawWrite: too many values (${values.length} > 123)`);
-    }
-    const enc = new PbEncoder()
-      .varintForce(1, unitId)
-      .varintForce(2, addr);
-    for (const v of values) {
-      enc.varintForce(3, v & 0xFFFF);
-    }
-    return this.sendCommand(MSG_VFD_RAW_WRITE, enc.encode());
   }
 
   /**
