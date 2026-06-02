@@ -432,7 +432,14 @@ function encField(field: number, wireType: number, payload: Buffer): Buffer {
 }
 
 // Mount API routes at /iot (matching the UI's fetch URLs)
-const VFD_ENABLED = (process.env.VFD_ENABLED ?? 'false').toLowerCase() === 'true';
+// VFD_HOST / VFD_PORT / VFD_MAX_SCAN are retained for shape compatibility
+// with the legacy VFDClientOptions but are now ignored — Phase 4b Sub-3
+// rewrote vfdClient.ts to ride Nova UART → STORAGE orbit → RS485 instead
+// of opening a Modbus TCP socket directly. With no socket to fail, the
+// client is a free subscription on the OrbitSensorBank stream; we
+// default to enabled so /iot/fans shows the 3 pre-populated drive slots
+// even before the orbit RTU master starts publishing real values.
+const VFD_ENABLED = (process.env.VFD_ENABLED ?? 'true').toLowerCase() === 'true';
 const VFD_HOST = process.env.VFD_HOST ?? '127.0.0.1';
 const VFD_PORT = Number(process.env.VFD_PORT ?? '5020');
 const VFD_MAX_SCAN = Number(process.env.VFD_MAX_SCAN ?? '8');
@@ -761,6 +768,17 @@ const protoForwards = {
 };
 
 const apiSerialBridge = { ...commandDispatcher, ...protoForwards };
+
+// Phase 4b Sub-3 (2026-06-02): wire the VFD client's bridge dependencies
+// now that novaStore + apiSerialBridge + dataCache all exist. The old
+// vfdClient opened a Modbus TCP socket directly; the new transport rides
+// Nova UART → STORAGE orbit → RS485 to the VFD, so vfdClient subscribes
+// to OrbitSensorBank pushes at hr_base=100 and dispatches writes through
+// serialBridge.orbitRegWrite. See vfdClient.ts file header.
+if (vfdClient) {
+  vfdClient.setBridgeContext({ novaStore, serialBridge: apiSerialBridge, dataCache });
+}
+
 app.use('/iot', createApiRoutes(dataCache, apiSerialBridge, upgradeManager, novaLogStore ?? undefined, vfdClient ?? undefined, novaFwManager ?? undefined, undefined, novaStore, masterSlaveSync, remoteSystemsSync));
 
 // --- Phase 0.4: /proto/write/:settingsField ---------------------------
