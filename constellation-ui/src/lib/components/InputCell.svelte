@@ -27,7 +27,11 @@
   $: board = pid / 12;
   $: io = pid % 12;
   let numInputs = parseInt(ioInfo[2], 10);
-  $: equip = board >= 1 && io >= 7 ? [ ...inputList, ...lights ]: inputList;
+  // Bay lights freely assignable to any input port. AS2's legacy
+  // `board >= 1 && io >= 7` restriction was the proving-DI side of
+  // the expansion-board-1 port-7/8 wiring constraint — gone on
+  // Constellation (operator picks any DI).
+  $: equip = [...inputList, ...lights];
 
   $: inputConfig = value;
 

@@ -23,7 +23,11 @@
   let pid = (i * 12) + j;
   $: board = pid / 12;
   $: io = pid % 12;
-  $: equip = board >= 1 && io >= 7 ? [...outputList, ...lights ] : outputList;
+  // Bay lights freely assignable to any output. AS2's legacy
+  // `board >= 1 && io >= 7` restriction was an expansion-board-1
+  // port-7/8 hardware constraint that doesn't apply on Constellation
+  // (no panel switches; operator picks any DO).
+  $: equip = [...outputList, ...lights];
   $: outputConfig = value;
 
   function dispatchChange(event: Event) {

@@ -327,7 +327,9 @@
     try {
       const numInputs = parseInt(ioInfo[i]?.[2] || '0', 10);
       const allowedInput = (j <= numInputs) && ((i !== 0) || (j !== 1));
-      const equipOptions = (i >= 1 && (j % 12) >= 7) ? [...inputList, ...lights] : inputList;
+      // Bay lights assignable to any input. Legacy AS2 expansion-board-1
+      // port-7/8 hardware limit removed on Constellation.
+      const equipOptions = [...inputList, ...lights];
       if (allowedInput && equipOptions.some(opt => opt.value === event.detail.value)) {
         ioConfig.config.inputConfig[pidNum] = event.detail.value;
         ioConfig.config.inputConfig = clearStaleAssignments(
@@ -348,7 +350,8 @@
         const nextJ = (parseInt(nextPid, 10)) % 12 || 12; // convert pid to 1..12 within board
         const numInputs2 = parseInt(ioInfo[nextBoard]?.[2] || '0', 10);
         const allowedInput2 = (nextJ <= numInputs2) && ((nextBoard !== 0) || (nextJ !== 1));
-        const equipOptions2 = (nextBoard >= 1 && nextJ >= 7) ? [...inputList, ...lights] : inputList;
+        // Same as equipOptions above — bay lights everywhere on Constellation.
+        const equipOptions2 = [...inputList, ...lights];
         if (allowedInput2 && equipOptions2.some(opt => opt.value === nextValue)) {
           ioConfig.config.inputConfig[nextPidNum] = nextValue;
           ioConfig.config.inputConfig = clearStaleAssignments(
