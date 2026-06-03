@@ -2,7 +2,7 @@
   import GellertPage from "$lib/components/GellertPage.svelte";
   import Card from "$lib/ui/Card.svelte";
   import { onMount } from "svelte";
-  import { frontMatterStore, navigationStore } from "$lib/store";
+  import { navigationStore } from "$lib/store";
   import { getHttpUrl } from "$lib/business/util";
   import Table from "$lib/ui/Table.svelte";
   import Row from "$lib/ui/Row.svelte";
@@ -13,7 +13,8 @@
   import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
   import { isEqual } from "lodash-es";
   import { t } from "svelte-i18n";
-  import { loadMonitorSettings } from "$lib/business/protoStores";
+  import { equipmentComposite, loadMonitorSettings } from "$lib/business/protoStores";
+  import { EQ } from "$lib/business/equipmentEnum";
   import { useDraft } from "$lib/business/useDraft";
   import { TAG } from "$lib/business/protoTags";
 
@@ -30,17 +31,21 @@
   $: ready = false;
   $: wait = false;
   $: edit = $navigationStore?.level > 0;
-  $: main = $frontMatterStore?.main as string[];
-  $: statusColor1 = getStatusColor(main?.[19]);
-  $: statusColor2 = getStatusColor(main?.[21]);
+  // Live lights state from EquipmentStatus (typed proto). The legacy
+  // bridge stuffed `main[19]/[21]` with a placeholder `'0'` that never
+  // reflected the actual coil — the row always read "On". Pull
+  // outputOn for EQ.LIGHTS1/2 directly so the status tracks the
+  // firmware coil state in real time.
+  $: light1On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS1)?.outputOn;
+  $: light2On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS2)?.outputOn;
 
   onMount(() => {
     $navigationStore.isDirty = () => !isEqual($draft, $live);
     ready = true;
   });
 
-  function getStatusColor(status: string): string {
-    return status === '0' ? 'text-green-500 font-bold' : 'text-red-500 font-bold';
+  function statusColor(on: boolean): string {
+    return on ? 'text-green-500 font-bold' : 'text-red-500 font-bold';
   }
 
   async function postButton(lights: number) {
@@ -70,20 +75,20 @@
       </Row>
       <Row>
         <Column><TextField size="xl" bind:value={$draft.bay1Label} {edit} keyboardType={KeyboardTypes.Alpha} validation={validation.lightsBay1Label}/></Column>
-        <Column><span class={statusColor1}>{main?.[19] === '0' ? $t('global.on') : $t('global.off')}</span></Column>
+        <Column><span class={statusColor(light1On)}>{light1On ? $t('global.on') : $t('global.off')}</span></Column>
         <Column>
           <Button size="xl" on:click={() => postButton(1)}>{ $t('global.toggle') }</Button>
         </Column>
       </Row>
       <Row>
         <Column><TextField size="xl" bind:value={$draft.bay2Label} {edit} keyboardType={KeyboardTypes.Alpha} validation={validation.lightsBay2Label}/></Column>
-        <Column><span class={statusColor2}>{main?.[21] === '0' ? $t('global.on') : $t('global.off')}</span></Column>
+        <Column><span class={statusColor(light2On)}>{light2On ? $t('global.on') : $t('global.off')}</span></Column>
         <Column>
           <Button size="xl" on:click={() => postButton(2)}>{ $t('global.toggle') }</Button>
         </Column>
       </Row>
     </Table>
-    <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} bind:validation={validation} autoSave
+    <SaveButton {edit} bind:wait={wait} data={$draft} original={$live} bind:validation={validation}
       onSave={() => lm.save()} />
   </Card>
 </GellertPage>
