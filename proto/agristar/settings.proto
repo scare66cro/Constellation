@@ -345,6 +345,13 @@ message DoorSettings {
   float  u_limit        = 4;  // PID U-limit (door[3])
   uint32 actuator_time  = 5;  // total open time, seconds (door[4])
   uint32 cool_air_cycle = 6;  // cooling air short-cycle, minutes (door[5])
+  // 2026-06-03: operator-set target % when remote_off=MANUAL on
+  // EQ_DOORS. Engine drives PWM_DOORS to this % instead of forcing
+  // PWM_MAX. Modal on the Equipment Control row prompts the operator
+  // for the value when they pick Close (default 0) or Open (default
+  // 100). Clamped 0..100 firmware-side; persisted in the OSPI save
+  // blob so a power-cycle preserves the operator's choice.
+  uint32 manual_pct     = 7;
 }
 
 // ─── Load Monitor (StoreLoadMonitor / UI_SendLoadMonitor, 16 fields) ─────

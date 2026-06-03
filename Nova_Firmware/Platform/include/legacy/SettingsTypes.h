@@ -129,6 +129,11 @@ typedef struct
   PID_PARAMS PID;
   short ActuatorTime;   // secs (1-500)
   char CoolAirCycle;    // mins (1-30)
+  uint8_t ManualPct;    // 2026-06-03: operator-set target % (0..100) when
+                        // RemoteOff[EQ_DOORS]=MANUAL. Engine drives PWM_DOORS
+                        // to this % instead of forcing PWM_MAX. See
+                        // lp_engine_shim.c::lp_engine_tick post-mode
+                        // override block for the runtime translation.
 } DOOR_CTRL;
 
 typedef struct

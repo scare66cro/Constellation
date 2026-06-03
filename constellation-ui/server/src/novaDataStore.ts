@@ -272,6 +272,7 @@ export interface DoorSettings {
   uLimit: number;
   actuatorTime: number;
   coolAirCycle: number;
+  manualPct: number;
 }
 
 export interface VersionInfo {
@@ -1212,6 +1213,7 @@ export class NovaDataStore extends EventEmitter {
       uLimit:       gf(f, 4),
       actuatorTime: gv(f, 5),
       coolAirCycle: gv(f, 6),
+      manualPct:    gv(f, 7),
     };
     this.emit('doorSettings', this.doorSettings);
   }

@@ -300,6 +300,7 @@ typedef struct {
     float    u_limit;         /* 4 */
     uint32_t actuator_time;   /* 5 */
     uint32_t cool_air_cycle;  /* 6 */
+    uint32_t manual_pct;      /* 7 — operator target % when remote_off=MANUAL */
 } LpDoor;
 
 /* Mirrors CureLimitSettings (settings.proto field 17, envelope tag 57). */

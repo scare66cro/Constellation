@@ -589,6 +589,9 @@ static void mirror_door(const LpSettingsData *lp)
 {
     Settings.Door.CoolAirCycle = (char)lp->door.cool_air_cycle;
     Settings.Door.ActuatorTime = (short)lp->door.actuator_time;
+    Settings.Door.ManualPct    = (uint8_t)(lp->door.manual_pct > 100U
+                                            ? 100U
+                                            : lp->door.manual_pct);
     Settings.Door.PID.P        = lp->door.p_gain;
     Settings.Door.PID.I        = lp->door.i_gain;
     Settings.Door.PID.D        = lp->door.d_gain;
@@ -1085,22 +1088,49 @@ void lp_engine_tick(void)
      * `ApplyManualOverrides` doesn't handle it). Run AFTER SetMode so
      * we win against any auto-PID writes for this tick. Equipment
      * Control mapping for the DOORS row:
-     *   AUTO   (0) — leave engine in control (no override here).
+     *   AUTO   (0) — leave engine in control (no override). On the
+     *                  TRANSITION back to AUTO from OFF/MANUAL we
+     *                  also force PWM_DOORS to MIN and zero the PID
+     *                  state so doors close cleanly first, then the
+     *                  engine PID re-evaluates from a fresh
+     *                  zero-error baseline next tick. Matches the
+     *                  operator expectation that "AUTO closes the
+     *                  doors until the system drives them open."
      *   OFF    (1) — SW_FRESHAIR_AUTO is clear (build_switch_state),
      *                  CtrlDoorsPulsed naturally pulses closed. Belt:
      *                  also push PWM_DOORS to MIN so a stray engine
      *                  PID write earlier in the tick can't keep it
      *                  partly open.
-     *   MANUAL (2) — force PWM_DOORS to MAX and assert EQ_DOORS so
-     *                  CtrlDoorsPulsed pulses open. */
+     *   MANUAL (2) — drive PWM_DOORS to `Settings.Door.ManualPct`
+     *                  (0..100) instead of forcing PWM_MAX. Operator
+     *                  enters the target % via a modal on the
+     *                  Equipment Control row. ManualPct = 0 closes,
+     *                  100 opens, intermediate values hold position. */
     {
+        static uint8_t s_prev_door_ro = 0U /* AUTO */;
         uint8_t door_ro = lp->remote_off.state[EQ_DOORS];
         if (door_ro == 1U /* OFF */) {
             PwmChannel[PWM_DOORS].Output = PWM_MIN_VALUE;
         } else if (door_ro == 2U /* MANUAL */) {
-            PwmChannel[PWM_DOORS].Output = PWM_MAX_VALUE;
+            uint32_t pct = Settings.Door.ManualPct;
+            if (pct > 100U) pct = 100U;
+            PwmChannel[PWM_DOORS].Output =
+                (unsigned int)PWM_MIN_VALUE
+                + (unsigned int)((pct * (uint32_t)PWM_RANGE + 50U) / 100U);
             OutputOn(EQ_DOORS);
+        } else if (door_ro == 0U /* AUTO */ && s_prev_door_ro != 0U) {
+            /* MANUAL/OFF → AUTO transition: close + clear PID state.
+             * The next engine tick will rebuild PID demand from
+             * fresh plenum/setpoint readings without inheriting any
+             * stale integral wind-up from the time the operator
+             * held the doors at a manual position. */
+            PwmChannel[PWM_DOORS].Output = PWM_MIN_VALUE;
+            PIDCtrl[PID_DOOR].CurError   = 0.0f;
+            PIDCtrl[PID_DOOR].PrevError  = 0.0f;
+            PIDCtrl[PID_DOOR].IntError   = 0.0f;
+            PIDCtrl[PID_DOOR].Timer      = 0U;
         }
+        s_prev_door_ro = door_ro;
     }
 
     /* BURNER manual override. Burner on Constellation is PWM (4-20 mA),
