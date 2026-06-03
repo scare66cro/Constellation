@@ -4072,8 +4072,8 @@ static const LpIoDefault s_io_defaults[61] = {
     /* 20 EQ_REFRIG_STAGE8    */ { M_ALL,    IO_BOTH,   1 },
     /* 21 EQ_REFRIG_DEFROST1  */ { M_ALL,    IO_BOTH,   0 },
     /* 22 EQ_REFRIG_DEFROST2  */ { M_ALL,    IO_BOTH,   0 },
-    /* 23 EQ_LIGHTS1          */ { M_ALL,    IO_BOTH,   0 },
-    /* 24 EQ_LIGHTS2          */ { M_ALL,    IO_BOTH,   0 },
+    /* 23 EQ_LIGHTS1          */ { M_ALL,    IO_BOTH,   1 }, /* renamable 2026-06-03 — operator names bay lights via IO Config since the dedicated L1 Bay Lights page was consolidated into Equipment Control */
+    /* 24 EQ_LIGHTS2          */ { M_ALL,    IO_BOTH,   1 },
     /* 25 EQ_AUX1             */ { M_ALL,    IO_BOTH,   1 },
     /* 26 EQ_AUX2             */ { M_ALL,    IO_BOTH,   1 },
     /* 27 EQ_AUX3             */ { M_ALL,    IO_BOTH,   1 },
