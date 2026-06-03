@@ -35,6 +35,7 @@ import {
 	co2Settings,
 	cureSettings,
 	equipmentStatus,
+	failureSettings,
 	fanRuntime,
 	ioConfig,
 	ioDefinition,
@@ -193,7 +194,8 @@ function buildPanel(
 	fr: TagPayload[typeof TAG.FanRuntime] | null,
 	rt: TagPayload[typeof TAG.Runtimes] | null,
 	ms: TagPayload[typeof TAG.MasterSlaveSettings] | null,
-	vfd: TagPayload[typeof TAG.VfdStatus] | null
+	vfd: TagPayload[typeof TAG.VfdStatus] | null,
+	fs: TagPayload[typeof TAG.FailureSettings] | null
 ): string[] {
 	const panel = new Array<string>(31).fill('0');
 
@@ -255,7 +257,16 @@ function buildPanel(
 	//   panel[12] = climacell output (DO readback)
 	panel[9]  = swKey(EQ.FAN);
 	panel[10] = isConfigured(EQ.CLIMACELL) || isConfigured(EQ.BURNER) ? swKey(EQ.CLIMACELL) : '0';
-	panel[11] = inOn(EQ.CLIMACELL);
+	// panel[11] = climacell "proved" input. The home-page Climacell
+	// component renders the running graphic only when this is INPUT_GOOD
+	// ('1'). On Constellation the proving DI is usually unwired, so we
+	// honor the operator's Level 2 Failures 1 ClimacellMode setting: when
+	// it's 'None' (0), proving is intentionally disabled and we force
+	// INPUT_GOOD so the graphic tracks (output on) | (manual switch).
+	// Any other failure mode keeps the real DI behavior — operator opted
+	// into proving and a missing/low contact correctly hides the graphic.
+	const climacellProveDisabled = (fs?.climacellMode ?? 0) === 0;
+	panel[11] = climacellProveDisabled ? '1' : inOn(EQ.CLIMACELL);
 	panel[12] = outOn(EQ.CLIMACELL);
 	// [13] = humid software-switch (head1 stands in as the family proxy)
 	panel[13] =
@@ -401,7 +412,8 @@ export const frontMatterComposite: Readable<FrontMatterShape | null> = derived(
 		fanRuntime,
 		runtimes,
 		warningReport,
-		vfdStatus
+		vfdStatus,
+		failureSettings
 	],
 	([
 		$ss,
@@ -421,14 +433,15 @@ export const frontMatterComposite: Readable<FrontMatterShape | null> = derived(
 		$fr,
 		$rt,
 		$warn,
-		$vfd
+		$vfd,
+		$fs
 	]) => {
 		// Gate on the set of stores the legacy WS channel carried
 		// unconditionally. Absent optional stores don't block emission.
 		if (!$ss || !$eq || !$basic || !$ioCfg) return null;
 
 		const main = buildMain($ss, $plenum, $cure, $co2, $vfd);
-		const panel = buildPanel($ss, $eq, $ioCfg, $basic, $fr, $rt, $master, $vfd);
+		const panel = buildPanel($ss, $eq, $ioCfg, $basic, $fr, $rt, $master, $vfd, $fs);
 
 		// `misc` is consumed by `routes/+page.svelte` only as `misc[0]` for
 		// boardType. Constellation hardware is always Agri-Star (the legacy
