@@ -23,7 +23,12 @@
 
 export const EQ = {
   FAN:             0,   /* EQ_FAN              */
-  /* DOORS:        1     EQ_DOORS — managed by GDC, no operator switch */
+  DOORS:           1,   /* EQ_DOORS — operator Auto/Close/Open via doorBtn;
+                         * mirrored into lp->remote_off.state[1] and read by
+                         * build_switch_state to gate SW_FRESHAIR_AUTO/MANUAL
+                         * (lp_engine_shim.c). Was excluded pre-2026-06-03
+                         * under the assumption that the GDC owned doors —
+                         * but the Equipment Status row does drive it. */
   REFRIGERATION:   2,   /* EQ_REFRIGERATION    */
   CLIMACELL:       3,   /* EQ_CLIMACELL        */
   HEAT:            4,   /* EQ_HEAT             */
@@ -73,6 +78,7 @@ export const REMOTE_SYSSTOP = 3;   /* set only by CMD_SYSTEM_STOP */
  */
 export const BUTTON_TO_RO: Record<string, number> = {
   fanBtn:          EQ.FAN,
+  doorBtn:         EQ.DOORS,
   refrigBtn:       EQ.REFRIGERATION,
   climacellBtn:    EQ.CLIMACELL,
   heatBtn:         EQ.HEAT,
