@@ -14,6 +14,7 @@
 	import { onDestroy, onMount } from "svelte";
   import { t } from "svelte-i18n";
 	import DoorDiagRow from "$lib/components/DoorDiagRow.svelte";
+	import LightsRow from "$lib/components/LightsRow.svelte";
 	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
   import { getHttpUrl } from "$lib/business/util";
   import { equipmentComposite, systemStatus } from "$lib/business/protoStores";
@@ -383,6 +384,8 @@
             {#if row.name === 'humid1'}
               <HumidifierRow rows={humidRows(leftRows)} pump={pumpRows(leftRows)} {edit} bind:wait={wait} />
             {/if}
+          {:else if row.name === 'lights1' || row.name === 'lights2'}
+            <LightsRow bind:wait={wait} {...row} />
           {:else}
             <EquipmentRow bind:wait={wait} {...row} />
           {/if}
@@ -410,6 +413,8 @@
           {#each rightRows as row}
             {#if row.name === 'doordiag'}
               <DoorDiagRow bind:wait={wait} {row} />
+            {:else if row.name === 'lights1' || row.name === 'lights2'}
+              <LightsRow bind:wait={wait} {...row} />
             {:else if !row.name.startsWith('refrig') && !row.name.startsWith('defrost')}
               <EquipmentRow bind:wait={wait} {...row} />
             {/if}

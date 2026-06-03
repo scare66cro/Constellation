@@ -123,6 +123,12 @@ type RowShape = {
 	 * values, more intuitive for an actuator. */
 	offLabel?: string;
 	manualLabel?: string;
+	/** Bay-light boolean status (LightsRow only): TRUE = current-sense
+	 * relay indicates lights are physically on (`EquipState.inputOn`).
+	 * Drives the colored On/Off label. The Toggle button under it
+	 * posts `lightsXBtn=Toggle` independently of this — the wire is
+	 * a toggle command, the status reads the actual hardware. */
+	statusOn?: boolean;
 };
 
 /** Standard equipment row builder. Reads input semantics from the
@@ -260,6 +266,43 @@ function buildDoorDiagRow(
 		panelSwitchColor: sw.color,
 		edit,
 		target,
+	};
+}
+
+/** Bay-light row. 2026-06-03 consolidation: the dedicated Level 1
+ * Bay Lights page is gone; its Toggle button + on/off status pattern
+ * lands here, replacing the AUTO/OFF/MANUAL dropdown that EquipmentRow
+ * builds for everything else. Bridge dispatches `lightsXBtn=Toggle`
+ * via `lightsButtonNextState` anyway (toggle is the only valid action
+ * for lights), so the dropdown was misleading. Renaming flows
+ * through IO Config now that EQ_LIGHTS1/2 are flagged renamable in
+ * lp_settings.c (firmware 0.A.228). */
+function buildLightsRow(
+	equipment: Equipment,
+	rowName: string,
+	defaultLabel: string,
+	btn: string,
+	io: IoEntry | undefined,
+	state: EquipState | undefined,
+	edit: boolean,
+): RowShape {
+	const inputOn = state?.inputOn ?? false;
+	const outputOn = state?.outputOn ?? false;
+	return {
+		exists: exists(io, equipment.outputConfig),
+		name: rowName,
+		equipmentName: renamedAs(io, defaultLabel),
+		equipmentStatus: undefined,
+		panelSwitchStatus: undefined,
+		equipOn: inputOn,
+		remSwitchName: btn,
+		outputColor: getOutputColor(outputOn),
+		statusColor: inputOn
+			? 'text-green-700 font-bold'
+			: 'text-red-500 font-bold',
+		panelSwitchColor: undefined,
+		edit,
+		statusOn: inputOn,
 	};
 }
 
@@ -489,11 +532,11 @@ export function getEquipment(
 		}
 
 		case 'lights1':
-			return buildRow(equipment, eq, tr('equipment.bay-lights-1'), 'lights1Btn',
-				equipment.ioNames[EQ.LIGHTS1], e(EQ.LIGHTS1), edit);
+			return buildLightsRow(equipment, eq, tr('equipment.bay-lights-1'),
+				'lights1Btn', equipment.ioNames[EQ.LIGHTS1], e(EQ.LIGHTS1), edit);
 		case 'lights2':
-			return buildRow(equipment, eq, tr('equipment.bay-lights-2'), 'lights2Btn',
-				equipment.ioNames[EQ.LIGHTS2], e(EQ.LIGHTS2), edit);
+			return buildLightsRow(equipment, eq, tr('equipment.bay-lights-2'),
+				'lights2Btn', equipment.ioNames[EQ.LIGHTS2], e(EQ.LIGHTS2), edit);
 	}
 	return undefined;
 }

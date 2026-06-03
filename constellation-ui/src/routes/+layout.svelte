@@ -115,7 +115,6 @@
 			{ text: $t('level1.climacell.climacell-control'), value: 'climacell', display: true, navigation: true },
 			{ text: $t('page-list.co2-purge'), value: 'co2', display: true, navigation: true },
 			{ text: $t('page-list.equipment-control'), value: 'equipment', display: true, navigation: true },
-			{ text: $t('level1.lights.bay-light-control'),  value: 'lights', display: true, navigation: true },
 			{ text: $t('page-list.miscellaneous'), value: 'miscellaneous', display: true, navigation: true },
 			{ text: $t('page-list.preferences'), value: 'preferences', display: true, navigation: true },
 			{ text: $t('level1.email.email-alerts'), value: 'email', display: true, navigation: true },

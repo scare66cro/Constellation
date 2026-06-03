@@ -41,7 +41,12 @@
 	let route = {
 		RUNCLOCK: '/level1/runclock',
 		FANSPEED: '/level1/fanspeed',
-		BAYLIGHTS: '/level1/lights',
+		// Bay lights consolidated into Equipment Control (2026-06-03)
+		// — dedicated page eliminated; the LightsRow inside Equipment
+		// Status provides the same Toggle button + live status,
+		// renames flow through IO Config now that EQ_LIGHTS1/2 are
+		// renamable in lp_settings.c (fw 0.A.228).
+		BAYLIGHTS: '/level1/equipment',
 		CLIMACELL: '/level1/climacell',
 		HUMIDIFIER: '/level1/humidifier',
 	};
