@@ -10,7 +10,7 @@
     export let humidifierNumber: number;
 </script>
 
-{#if boardType === 'Agri-Star' || (boardType === 'AS2' && humidifierEquipment !== EQUIP_NOT_DEFINED)}
+{#if humidifierEquipment !== EQUIP_NOT_DEFINED && (boardType === 'Agri-Star' || boardType === 'AS2')}
 <div class="flex h-full w-1/6">
     <button on:click>
         {#if humidifierInput === INPUT_GOOD && humidifierSwitch === SWITCH_AUTO && humidifierHeadOutput === OUTPUT_ON}

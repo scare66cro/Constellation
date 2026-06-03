@@ -258,18 +258,16 @@ function buildPanel(
 	panel[9]  = swKey(EQ.FAN);
 	panel[10] = isConfigured(EQ.CLIMACELL) || isConfigured(EQ.BURNER) ? swKey(EQ.CLIMACELL) : '0';
 	// panel[11] = climacell "proved" input. The home-page Climacell
-	// component renders the running graphic only when this is INPUT_GOOD,
-	// which is the string '0' — the legacy AS2 climacell-prove DI is
-	// wired normally-closed, so "good" = contact closed = DI low. On
-	// Constellation the proving DI is usually unwired (input_map[i]=0),
-	// in which case the firmware emits input_on=false and `inOn` already
-	// returns '0' = INPUT_GOOD — the gate passes by default. We still
-	// force INPUT_GOOD explicitly when Level 2 Failures 1 ClimacellMode
-	// is 'None' (0), so that an operator who happened to map a DI that
-	// reads high gets a coherent "proving disabled" experience. Any
-	// other failure mode passes the real DI through.
+	// component renders the running graphic only when this is
+	// INPUT_GOOD ('1' = DI active/high — modern active-high
+	// convention, see mode.ts where the legacy '0=good' was flipped
+	// 2026-06-03). When the operator's Level 2 Failures 1
+	// ClimacellMode is 'None' (0) we force INPUT_GOOD so the graphic
+	// tracks output+switch alone. Any other failure mode passes the
+	// real DI through so a mapped proving contact (active-high when
+	// closed/proving good) gates the graphic correctly.
 	const climacellProveDisabled = (fs?.climacellMode ?? 0) === 0;
-	panel[11] = climacellProveDisabled ? '0' : inOn(EQ.CLIMACELL);
+	panel[11] = climacellProveDisabled ? '1' : inOn(EQ.CLIMACELL);
 	panel[12] = outOn(EQ.CLIMACELL);
 	// [13] = humid software-switch (head1 stands in as the family proxy)
 	panel[13] =
