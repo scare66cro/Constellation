@@ -206,9 +206,14 @@ function buildRefrigRow(
 	};
 }
 
-/** Door diagnostic row. Door % open comes from the front-matter
- * `main[15]` slot (still legacy CSV — front-matter migration is a
- * separate phase). The diag state lives in the door equipment alarm. */
+/** Door diagnostic row. Door % open comes from
+ * `SystemStatus.pwmDoorsPct` (typed proto field 20) — same source as the
+ * regular door status row. The legacy `main[15]` slot was filled from
+ * `SystemStatus.coolOutput` which is the ACTIVE mode's output (refrig %
+ * when in ST_REFRIG, doors % when in ST_COOLING) — that mislabelled
+ * 100% in the doors-diag row whenever the system escalated to refrig
+ * even though the damper was actually closed at PWM_MIN. The diag
+ * state itself still lives in the door equipment alarm. */
 function buildDoorDiagRow(
 	equipment: Equipment,
 	rowName: string,
@@ -216,7 +221,7 @@ function buildDoorDiagRow(
 	btn: string,
 	io: IoEntry | undefined,
 	state: EquipState | undefined,
-	doorPercent: string,
+	doorPct: number | undefined,
 	edit: boolean,
 	target: string,
 ): RowShape {
@@ -245,7 +250,7 @@ function buildDoorDiagRow(
 		exists: exists(io, equipment.outputConfig),
 		name: rowName,
 		equipmentName: renamedAs(io, defaultLabel),
-		equipmentStatus: doorPercent || tr(statusKey),
+		equipmentStatus: doorPct !== undefined ? `${doorPct}%` : tr(statusKey),
 		panelSwitchStatus: tr(sw.statusKey),
 		equipOn: remote !== REMOTE.OFF,
 		diagOn,
@@ -256,13 +261,6 @@ function buildDoorDiagRow(
 		edit,
 		target,
 	};
-}
-
-function getDoorPercent(main: string[] | undefined): string {
-	if (!main) return '';
-	const v = main[15];
-	if (v === undefined) return '';
-	return isNaN(parseInt(v)) ? v : `${v}%`;
 }
 
 /* ───────────────────────────────────────────────────────────────────── */
@@ -454,7 +452,7 @@ export function getEquipment(
 		case 'doordiag':
 			return buildDoorDiagRow(equipment, eq, tr('level2.pid.fresh-air-doors'), 'doorDiag',
 				equipment.ioNames[EQ.DOORS], e(EQ.DOORS),
-				getDoorPercent(main), edit, '');
+				doorPct, edit, '');
 
 		case 'cure': {
 			// Cure is operator-controlled via virtual remote_off slot
