@@ -411,6 +411,12 @@ export function getEquipment(
 				statusColor: status.color,
 				panelSwitchColor: sw.color,
 				edit,
+				// Refrigeration is AUTO/OFF only. MANUAL would force all
+				// stages on without temperature gating, which can
+				// damage compressors and freeze product — never a
+				// valid operator choice. Matches the cure-row pattern
+				// (2-state switch via allowManual=false).
+				allowManual: false,
 			};
 		}
 		case 'refrig1':
