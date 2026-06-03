@@ -285,6 +285,7 @@ export function getEquipment(
 	eq: string,
 	edit: boolean,
 	main: string[] | undefined,
+	doorPct?: number,
 ): RowShape | undefined {
 	const e = equipment.eqByIdx;
 	const refrigMaster = e(EQ.REFRIGERATION)?.remoteOff ?? REMOTE.AUTO;
@@ -431,10 +432,22 @@ export function getEquipment(
 			// MANUAL/OFF semantics map to OPEN/CLOSE on the wire (same
 			// remote_off values 2/1 — no protocol change). Firmware
 			// forces PWM_DOORS to MAX/MIN respectively in lp_engine_tick.
+			//
+			// Status column shows the COMMANDED door % from
+			// SystemStatus.pwm_doors_pct (field 20) — always populated by
+			// firmware regardless of system mode (cool / refrig / standby /
+			// shutdown). Operators with no DI feedback wired (the common
+			// case on Constellation installs — no limit switches on the
+			// fresh-air actuators) were otherwise stuck seeing "Off" at
+			// all times even while the door PID was actively driving the
+			// damper to 50%+. Pulling the typed proto field gives the
+			// commanded position the operator can actually verify against
+			// the physical actuator.
 			return {
 				...buildRow(equipment, eq, tr('level2.pid.fresh-air-doors'), 'doorBtn',
 					equipment.ioNames[EQ.DOORS], e(EQ.DOORS), edit),
 				exists: true,
+				equipmentStatus: doorPct !== undefined ? `${doorPct}%` : tr('global.off'),
 				offLabel: tr('global.close'),
 				manualLabel: tr('global.open'),
 			};

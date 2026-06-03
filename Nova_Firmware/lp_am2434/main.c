@@ -3409,6 +3409,18 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
      *                          [7:4]   RO_REFRIGERATION
      *                          [11:8]  RO_CLIMACELL
      *                          [15:12] RO_HUMIDIFIER1
+     *   24 gate_bits       — refrigeration-escalation gate trace (June 2026):
+     *                          [0]     CheckInputs(SW_REFRIG_AUTO)
+     *                          [1]     CheckInputs(SW_FAN_AUTO)
+     *                          [2]     CheckInputs(SW_FRESHAIR_AUTO)
+     *                          [3]     CheckInputs(EQ_REFRIG_STANDBY)
+     *                          [4]     SystemAlarm[AL_REFRIGERATION]==FM_ALARM
+     *                          [6:5]   Settings.Refrig.Mode (0=Eco,1=Refrig,2=Enth)
+     *                          [8:7]   Settings.OutsideAir.CtrlMode (0=Out,1=Plen)
+     *                          [10:9]  Settings.Refrig.FailMode
+     *                          [23:16] Settings.OutsideAir.AboveBelow (raw 8 bits)
+     *   25 plenum_set_x10  — Settings.Plenum.TempSet * 10 (preserve 1 dp)
+     *   26 osa_diff_x10    — Settings.OutsideAir.Diff   * 10 (preserve 1 dp)
      *
      * All externs are satisfied by Platform .c TUs already linked into
      * the LP image (nova_states.obj, nova_pwm.obj, hal_orbit.obj). */
@@ -3444,6 +3456,33 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
         DIAG_EMIT_VARINT(0xA8, 0x01, refr_pct);
         DIAG_EMIT_VARINT(0xB0, 0x01, (uint32_t)Nova_GetEStopActive()); /* field 22 */
         DIAG_EMIT_VARINT(0xB8, 0x01, ro_bits);
+
+        /* Field 24: refrigeration-gate trace. Packed view of every input
+         * SetStateRefrig / SetStateCooling read on this tick, so the
+         * probe can replay the gate without flashing diag-only firmware. */
+        {
+            uint32_t gate = 0U;
+            gate |= ((uint32_t)(CheckInputs(SW_REFRIG_AUTO)    ? 1U : 0U)) <<  0;
+            gate |= ((uint32_t)(CheckInputs(SW_FAN_AUTO)       ? 1U : 0U)) <<  1;
+            gate |= ((uint32_t)(CheckInputs(SW_FRESHAIR_AUTO)  ? 1U : 0U)) <<  2;
+            gate |= ((uint32_t)(CheckInputs(EQ_REFRIG_STANDBY) ? 1U : 0U)) <<  3;
+            gate |= ((uint32_t)((SystemAlarm[AL_REFRIGERATION] == FM_ALARM) ? 1U : 0U)) << 4;
+            gate |= ((uint32_t)Settings.Refrig.Mode         & 0x03U) <<  5;
+            gate |= ((uint32_t)Settings.OutsideAir.CtrlMode & 0x03U) <<  7;
+            gate |= ((uint32_t)Settings.Refrig.FailMode     & 0x03U) <<  9;
+            gate |= ((uint32_t)(unsigned char)Settings.OutsideAir.AboveBelow) << 16;
+            DIAG_EMIT_VARINT(0xC0, 0x01, gate);
+        }
+
+        /* Field 25 / 26: setpoint + outside-air diff scaled by 10 so we
+         * can recover one decimal place from a varint (negative values
+         * round-trip via int32→uint32 reinterpret). */
+        {
+            int32_t pset = (int32_t)(Settings.Plenum.TempSet * 10.0f);
+            int32_t pdif = (int32_t)(Settings.OutsideAir.Diff * 10.0f);
+            DIAG_EMIT_VARINT(0xC8, 0x01, (uint32_t)pset);
+            DIAG_EMIT_VARINT(0xD0, 0x01, (uint32_t)pdif);
+        }
         #undef DIAG_EMIT_VARINT
 diag_done: ;
     }

@@ -16,7 +16,7 @@
 	import DoorDiagRow from "$lib/components/DoorDiagRow.svelte";
 	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
   import { getHttpUrl } from "$lib/business/util";
-  import { equipmentComposite } from "$lib/business/protoStores";
+  import { equipmentComposite, systemStatus } from "$lib/business/protoStores";
 
   type Counts = {
     leftRows: number,
@@ -91,7 +91,7 @@
 
   function updateRows(equipment: Equipment): void {
     leftRows.forEach((row) => {
-      const eq = getEquipment(equipment, row.name, edit, $frontMatterStore?.main as string[]);
+      const eq = getEquipment(equipment, row.name, edit, $frontMatterStore?.main as string[], doorPct);
       if (eq) {
         row.equipmentStatus = eq.equipmentStatus;
         row.panelSwitchStatus = eq.panelSwitchStatus;
@@ -103,7 +103,7 @@
       }
     });
     rightRows.forEach((row) => {
-      const eq = getEquipment(equipment, row.name, edit, $frontMatterStore?.main as string[]);
+      const eq = getEquipment(equipment, row.name, edit, $frontMatterStore?.main as string[], doorPct);
       if (eq) {
         row.equipmentStatus = eq.equipmentStatus;
         row.panelSwitchStatus = eq.panelSwitchStatus;
@@ -116,6 +116,15 @@
     });
     leftRows = leftRows;
     rightRows = rightRows;
+  }
+
+  // Reactively refresh row data when SystemStatus updates so the
+  // commanded door % in the status column tracks the firmware's
+  // PWM_DOORS.Output as the PID ramps. Without this the door row would
+  // only refresh when equipmentComposite changes (which is much less
+  // frequent than SystemStatus emits).
+  $: if (equipment && $systemStatus !== null) {
+    updateRows(equipment);
   }
 
   async function loadData(equipment: Equipment): Promise<void> {
@@ -323,8 +332,17 @@
     }
   }
 
+  // pwm_doors_pct is field 20 on SystemStatus — always populated by
+  // firmware (every system_status emit, regardless of mode) as the
+  // commanded door PWM %. Used by `getEquipment('door', …)` to fill
+  // the status column. Operators without DI feedback on the fresh-air
+  // actuators (the common Constellation install) otherwise see "Off"
+  // for the door row even while the door PID is actively driving the
+  // damper — see equipmentStatus.ts::getEquipment 'door' case.
+  $: doorPct = $systemStatus?.pwmDoorsPct;
+
   function rightSideAdd(equipment: Equipment, equipmentName: string, counts: Counts): void {
-    const eq = getEquipment(equipment, equipmentName, edit, $frontMatterStore?.main as string[]);
+    const eq = getEquipment(equipment, equipmentName, edit, $frontMatterStore?.main as string[], doorPct);
     if (eq) {
       rightRows.push(eq);
       counts.rightRows += 1;
@@ -332,7 +350,7 @@
   }
 
   function leftSideAdd(equipment: Equipment, equipmentName: string, counts: Counts): void {
-    const eq = getEquipment(equipment, equipmentName, edit, $frontMatterStore?.main as string[]);
+    const eq = getEquipment(equipment, equipmentName, edit, $frontMatterStore?.main as string[], doorPct);
     if (eq) {
       leftRows.push(eq);
       counts.leftRows += 1;
