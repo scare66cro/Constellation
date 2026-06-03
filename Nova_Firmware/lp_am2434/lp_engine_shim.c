@@ -1107,6 +1107,63 @@ void lp_engine_tick(void)
     }
 
     lp_calc_cooling_available();
+
+    /* ─── Pulse-door tick (1 Hz) — Nova port of legacy AS2 ─────────────
+     *
+     * The AS2 board ran `SerialShiftTimerISR` (Timer.c:191) at 4 Hz; the
+     * pulse-door block gated on `PulseCount == 4` so it effectively ran
+     * at 1 Hz. It decremented `PulseDoorMove` by 1 per second and drove
+     * the open/close pulse coils during travel. The ISR was removed in
+     * the Nova port (no shift register on AM2434) but the globals
+     * `PulseDoorMove` / `PulseDoorPosition` / `PulseDoor` still exist
+     * and `CtrlDoors()`'s PID gate still checks
+     * `(Counter < Timer || PulseDoorMove != 0)`.
+     *
+     * Without this tick, the first `CtrlDoorsPulsed()` call after a PID
+     * fire sets `PulseDoorMove > 0`, and because nothing ever decrements
+     * it back to zero, the PID gate locks forever. Bench symptom on
+     * 0.A.224: fresh-air door output climbs to ~5% in the first few
+     * seconds after boot, then never moves again for 16+ hours (the only
+     * unblock path is the 02:00 daily `CtrlDoorsPulsed_Init`, which
+     * re-arms the counter but doesn't fix the underlying drain).
+     *
+     * Direct 1:1 port of the legacy block (Timer.c:201-244). Engine
+     * already ticks 1 Hz so no PulseCount subdivision needed. Both this
+     * block and `CtrlDoorsPulsed()` run from `lp_engine_task` so
+     * `PulseDoorFlag` is preserved for legacy faithfulness only — there
+     * is no actual race to guard against in Nova. */
+    if (PulseDoorFlag == 0) {
+        const unsigned int doorOutput = PwmChannel[PWM_DOORS].Output;
+        if (doorOutput == PWM_MAX_VALUE
+            && PulseDoorMove == 0 && PulseDoorInit == 0) {
+            /* Steady OPEN pulse when commanded to max. */
+            OutputOn (EQ_PULSEDOOR_OPEN);
+            OutputOff(EQ_PULSEDOOR_CLOSE);
+        } else if (doorOutput == PWM_MIN_VALUE
+                   && PulseDoorMove == 0 && PulseDoorInit == 0) {
+            /* Steady CLOSE pulse when commanded to min. */
+            OutputOn (EQ_PULSEDOOR_CLOSE);
+            OutputOff(EQ_PULSEDOOR_OPEN);
+        } else if (PulseDoorMove != 0) {
+            /* Travel in progress: drive the direction coil, decrement
+             * the remaining travel time, advance the position tracker. */
+            PulseDoorFlag = 1;
+            OutputOn(PulseDoor);
+            PulseDoorMove--;
+            if (PulseDoor == EQ_PULSEDOOR_OPEN) {
+                PulseDoorPosition++;
+                OutputOff(EQ_PULSEDOOR_CLOSE);
+            } else {
+                PulseDoorPosition--;
+                OutputOff(EQ_PULSEDOOR_OPEN);
+            }
+            PulseDoorFlag = 0;
+        } else {
+            /* Idle between commands: both coils off. */
+            OutputOff(EQ_PULSEDOOR_OPEN);
+            OutputOff(EQ_PULSEDOOR_CLOSE);
+        }
+    }
 }
 
 unsigned char lp_engine_get_current_mode(void)
