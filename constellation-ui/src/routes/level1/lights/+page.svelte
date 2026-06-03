@@ -31,13 +31,18 @@
   $: ready = false;
   $: wait = false;
   $: edit = $navigationStore?.level > 0;
-  // Live lights state from EquipmentStatus (typed proto). The legacy
-  // bridge stuffed `main[19]/[21]` with a placeholder `'0'` that never
-  // reflected the actual coil — the row always read "On". Pull
-  // outputOn for EQ.LIGHTS1/2 directly so the status tracks the
-  // firmware coil state in real time.
-  $: light1On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS1)?.outputOn;
-  $: light2On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS2)?.outputOn;
+  // Live lights state from EquipmentStatus (typed proto). The bay
+  // light wiring model on Constellation is "3-way switch" style:
+  // the firmware drives an output coil (toggle command) and the
+  // light starter has a current-sensing relay that reports back
+  // through the INPUT. So "are the lights actually on?" reads from
+  // EquipState.inputOn — current is flowing → relay closed → DI
+  // high under the active-high polarity convention (mode.ts). If
+  // an operator pulls the bulb or the breaker trips, output stays
+  // on but inputOn drops to false and the status correctly shows
+  // OFF.
+  $: light1On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS1)?.inputOn;
+  $: light2On = !!$equipmentComposite?.eqByIdx(EQ.LIGHTS2)?.inputOn;
 
   onMount(() => {
     $navigationStore.isDirty = () => !isEqual($draft, $live);

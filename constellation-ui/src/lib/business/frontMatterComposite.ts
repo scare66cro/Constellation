@@ -298,11 +298,19 @@ function buildPanel(
 	panel[24] = outOn(EQ.HUMID_HEAD3);
 	panel[25] = outOn(EQ.HUMID_PUMP3);
 
-	// [26..29] — bay lights
+	// [26..29] — bay lights.
+	// panel[28]/[29] feed the home-page Baylight icon. Bay lights are
+	// wired "3-way switch" style: firmware drives an output coil
+	// (toggle command), and the light starter's current-sensing
+	// relay reports the ACTUAL state through the INPUT. So the bulb
+	// icon should track `inOn` (current is flowing — lights really
+	// on) not `outOn` (coil just commanded). If a bulb burns out or
+	// the breaker trips, output stays high while inputOn drops to
+	// false and the icon correctly hides.
 	panel[26] = portForEq(EQ.LIGHTS1);
 	panel[27] = portForEq(EQ.LIGHTS2);
-	panel[28] = outOn(EQ.LIGHTS1);
-	panel[29] = outOn(EQ.LIGHTS2);
+	panel[28] = inOn(EQ.LIGHTS1);
+	panel[29] = inOn(EQ.LIGHTS2);
 
 	// [30] — master/slave (0=none, 1=master, 2=slave)
 	panel[30] = String(ms?.mode ?? 0);
