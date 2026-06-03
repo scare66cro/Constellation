@@ -1787,15 +1787,32 @@ void CtrlRefrig(float ActualTemp, float TargetTemp)
     }
   }
 
-  /* Nova-architecture output-path gate (2026-06-02). See CtrlDoors
-   * (below) for the full rationale. Refrig gate uses STAGE1 as the
-   * canonical pulse-coil check (the AS2 convention — if the operator
-   * assigned STAGE1 they almost certainly assigned the other stages
-   * they need; this matches the legacy gate's intent). AO path:
-   * AO_EQUIP_REFRIG = 3 (a single 0-100% refrig demand driving a
-   * staged controller, e.g. condenser-fan VFD or compressor VSD). */
-  if (Settings.EquipIo[EQ_REFRIG_STAGE1].Output == IO_UNDEFINED
-      && !nova_any_ao_assigned_for(AO_EQUIP_REFRIG))
+  /* Nova-architecture output-path gate (2026-06-02, widened 2026-06-03).
+   * Constellation supports THREE refrigeration control options; this
+   * gate raises "Mode configuration error" (WARN_NO_OUTPUT) only when
+   * NONE of them are configured:
+   *
+   *   1. AS2-style stages — any of EQ_REFRIG_STAGE1..8 has a coil
+   *      output mapped in IO Config (sequential staging via DOs).
+   *   2. PWM 0-100% — an orbit AO slot is assigned to AO_EQUIP_REFRIG
+   *      (single analog demand driving a VFD/VSD condenser-fan).
+   *   3. TRITON — at least one orbit slot is configured with role=
+   *      TRITON (Modbus TCP 0-100% command, no AS2-side IO needed).
+   *
+   * CtrlRefrig is only called from ModeRefrig (SystemState=ST_REFRIG)
+   * so the implicit precondition "operator selected refrigeration"
+   * (RunClock=RC_REFRIG path) is already true at this point. */
+  bool any_stage_mapped = false;
+  for (int s = EQ_REFRIG_STAGE1; s <= EQ_REFRIG_STAGE8; s++) {
+    if (Settings.EquipIo[s].Output != IO_UNDEFINED) {
+      any_stage_mapped = true;
+      break;
+    }
+  }
+  extern bool Nova_AnyTritonConfigured(void);
+  if (!any_stage_mapped
+      && !nova_any_ao_assigned_for(AO_EQUIP_REFRIG)
+      && !Nova_AnyTritonConfigured())
   {
     WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_REFRIGERATION);
     return;

@@ -49,6 +49,7 @@
 
 /* lp_settings.h lives next to us under lp_am2434/. */
 #include "lp_settings.h"
+#include "orbit_server/orbit_role.h"
 
 /* OrbitClient_GetSample is exposed by orbit_client.h. */
 #include "orbit_client.h"
@@ -161,6 +162,30 @@ static void mirror_remote_off(const LpSettingsData *lp)
 static volatile uint8_t s_estop_active = 0;
 
 uint8_t Nova_GetEStopActive(void) { return s_estop_active; }
+
+/* Is any orbit slot configured with role=TRITON? Used by CtrlRefrig's
+ * mode-configuration gate to recognize "operator picked TRITON as
+ * the refrigeration path" — without this, the gate would falsely
+ * raise WARN_NO_OUTPUT ("Mode configuration error") on a Constellation
+ * panel that uses TRITON for refrigeration and has no AS2-style
+ * EQ_REFRIG_STAGE1..8 mapped or PWM AO assigned.
+ *
+ * Checks the operator's intent (populated && role==TRITON) rather
+ * than connectivity (`OrbitSample.online`). Offline TRITON would
+ * generate a separate orbit-connectivity alarm, not a mode-config
+ * one — the config side just cares that the operator declared a
+ * TRITON exists. */
+bool Nova_AnyTritonConfigured(void)
+{
+    for (uint32_t slot = 0U; slot < LP_ORBIT_ROLE_MAX; slot++) {
+        const LpOrbitRoleEntry *e = LpSettings_GetOrbitRole(slot);
+        if (e != NULL && e->populated != 0U
+            && e->role == ORBIT_ROLE_TRITON) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* Build IoBoard[MAIN].InputState from operator state. Constellation
  * has NO panel switches and NO CPLD — only one physical input exists
