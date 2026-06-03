@@ -273,6 +273,7 @@ export interface DoorSettings {
   actuatorTime: number;
   coolAirCycle: number;
   manualPct: number;
+  manualTimeoutMins: number;
 }
 
 export interface VersionInfo {
@@ -1207,13 +1208,14 @@ export class NovaDataStore extends EventEmitter {
   private decodeDoorSettings(data: Buffer): void {
     const f = pbDecode(data);
     this.doorSettings = {
-      pGain:        gf(f, 1),
-      iGain:        gf(f, 2),
-      dGain:        gf(f, 3),
-      uLimit:       gf(f, 4),
-      actuatorTime: gv(f, 5),
-      coolAirCycle: gv(f, 6),
-      manualPct:    gv(f, 7),
+      pGain:             gf(f, 1),
+      iGain:             gf(f, 2),
+      dGain:             gf(f, 3),
+      uLimit:            gf(f, 4),
+      actuatorTime:      gv(f, 5),
+      coolAirCycle:      gv(f, 6),
+      manualPct:         gv(f, 7),
+      manualTimeoutMins: gv(f, 8),
     };
     this.emit('doorSettings', this.doorSettings);
   }

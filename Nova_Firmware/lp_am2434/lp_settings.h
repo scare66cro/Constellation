@@ -294,13 +294,14 @@ typedef struct {
 /* Mirrors DoorSettings (settings.proto field 19, envelope tag 56).
  * Note: SettingsUpdate sub-field for SAVE is 19 (NOT envelope tag). */
 typedef struct {
-    float    p_gain;          /* 1 */
-    float    i_gain;          /* 2 */
-    float    d_gain;          /* 3 */
-    float    u_limit;         /* 4 */
-    uint32_t actuator_time;   /* 5 */
-    uint32_t cool_air_cycle;  /* 6 */
-    uint32_t manual_pct;      /* 7 — operator target % when remote_off=MANUAL */
+    float    p_gain;             /* 1 */
+    float    i_gain;             /* 2 */
+    float    d_gain;             /* 3 */
+    float    u_limit;             /* 4 */
+    uint32_t actuator_time;      /* 5 */
+    uint32_t cool_air_cycle;     /* 6 */
+    uint32_t manual_pct;         /* 7 — operator target % when remote_off=MANUAL */
+    uint32_t manual_timeout_mins;/* 8 — auto-revert to AUTO after N minutes; 0 = stay manual forever */
 } LpDoor;
 
 /* Mirrors CureLimitSettings (settings.proto field 17, envelope tag 57). */

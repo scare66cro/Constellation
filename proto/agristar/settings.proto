@@ -351,7 +351,14 @@ message DoorSettings {
   // for the value when they pick Close (default 0) or Open (default
   // 100). Clamped 0..100 firmware-side; persisted in the OSPI save
   // blob so a power-cycle preserves the operator's choice.
-  uint32 manual_pct     = 7;
+  uint32 manual_pct          = 7;
+  // 2026-06-03: optional auto-revert timeout while remote_off=MANUAL.
+  // 0 = stay manual forever (operator must flip back to AUTO).
+  // >0 = on the tick `elapsed >= manual_timeout_mins`, firmware
+  //      auto-reverts EQ_DOORS to AUTO (which triggers the existing
+  //      close+PID-reset path). Replaces the legacy door-diag-row
+  //      pattern from AS2 (60-min diag clear). Clamped 0..1440.
+  uint32 manual_timeout_mins = 8;
 }
 
 // ─── Load Monitor (StoreLoadMonitor / UI_SendLoadMonitor, 16 fields) ─────

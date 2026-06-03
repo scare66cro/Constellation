@@ -13,7 +13,6 @@
 	import RefrigerationRow from "$lib/components/RefrigerationRow.svelte";
 	import { onDestroy, onMount } from "svelte";
   import { t } from "svelte-i18n";
-	import DoorDiagRow from "$lib/components/DoorDiagRow.svelte";
 	import LightsRow from "$lib/components/LightsRow.svelte";
 	import DoorEquipRow from "$lib/components/DoorEquipRow.svelte";
 	import ScrollableArea from "$lib/components/ScrollableArea.svelte";
@@ -243,9 +242,9 @@
         counts.refrigAdded = 1;
       }
 
-      if (level >= 1) {
-          rightSideAdd(equipment, 'doordiag', counts);
-      }
+      // (Right-side `doordiag` row removed 2026-06-03 — the
+      // FreshAirDoorModal in Equipment Control subsumes its 60-min
+      // auto-clear via the new DoorSettings.manual_timeout_mins.)
 
       if (potatoMode && equipment.outputConfig[4] !== '-1') {
         if (level >= 1) {
@@ -414,9 +413,7 @@
             </Row>
           {/if}
           {#each rightRows as row}
-            {#if row.name === 'doordiag'}
-              <DoorDiagRow bind:wait={wait} {row} />
-            {:else if row.name === 'lights1' || row.name === 'lights2'}
+            {#if row.name === 'lights1' || row.name === 'lights2'}
               <LightsRow bind:wait={wait} {...row} />
             {:else if row.name === 'door'}
               <DoorEquipRow bind:wait={wait} {...row} />

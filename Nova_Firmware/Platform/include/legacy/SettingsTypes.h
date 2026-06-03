@@ -127,13 +127,16 @@ typedef struct
 typedef struct
 {
   PID_PARAMS PID;
-  short ActuatorTime;   // secs (1-500)
-  char CoolAirCycle;    // mins (1-30)
-  uint8_t ManualPct;    // 2026-06-03: operator-set target % (0..100) when
-                        // RemoteOff[EQ_DOORS]=MANUAL. Engine drives PWM_DOORS
-                        // to this % instead of forcing PWM_MAX. See
-                        // lp_engine_shim.c::lp_engine_tick post-mode
-                        // override block for the runtime translation.
+  short ActuatorTime;       // secs (1-500)
+  char CoolAirCycle;        // mins (1-30)
+  uint8_t ManualPct;        // 2026-06-03: operator-set target % (0..100) when
+                            // RemoteOff[EQ_DOORS]=MANUAL. Engine drives
+                            // PWM_DOORS to this % instead of forcing
+                            // PWM_MAX. See lp_engine_shim.c::lp_engine_tick
+                            // post-mode override block.
+  uint16_t ManualTimeoutMins; // 2026-06-03: 0 = stay MANUAL forever; >0 = auto-
+                            // revert to AUTO after N minutes (clamped 0..1440).
+                            // Replaces the legacy door-diag-row 60-min clear.
 } DOOR_CTRL;
 
 typedef struct

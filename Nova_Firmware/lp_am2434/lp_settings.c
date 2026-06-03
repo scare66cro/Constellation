@@ -1732,6 +1732,7 @@ bool LpSettings_ApplyDoor(const uint8_t *payload, size_t len)
             case 5: nw.actuator_time = v;  break;
             case 6: nw.cool_air_cycle = v; break;
             case 7: nw.manual_pct    = (v > 100U) ? 100U : v; break;
+            case 8: nw.manual_timeout_mins = (v > 1440U) ? 1440U : v; break;
             default: break;
             }
         } else if (wire == 5U) {
@@ -1767,6 +1768,7 @@ size_t LpSettings_BuildDoorBody(uint8_t *buf, size_t bufsize)
     pos = emit_uint32(buf, bufsize, pos, 5, s_data.door.actuator_time);
     pos = emit_uint32(buf, bufsize, pos, 6, s_data.door.cool_air_cycle);
     pos = emit_uint32(buf, bufsize, pos, 7, s_data.door.manual_pct);
+    pos = emit_uint32(buf, bufsize, pos, 8, s_data.door.manual_timeout_mins);
     return pos;
 }
 

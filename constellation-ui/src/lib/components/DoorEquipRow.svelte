@@ -14,7 +14,7 @@
   import Column from "$lib/ui/Column.svelte";
   import Row from "$lib/ui/Row.svelte";
   import { t } from "svelte-i18n";
-  import DoorTargetModal from "./DoorTargetModal.svelte";
+  import FreshAirDoorModal from "./FreshAirDoorModal.svelte";
 
   export let exists: boolean = false;
   export let name: string = '';
@@ -69,11 +69,12 @@
     modalOpen = true;
   }
 
-  async function onModalSave(_pct: number) {
-    // Modal already wrote DoorSettings.manual_pct via writeProto.
-    // Send the equipment command to flip remote_off → MANUAL=2.
-    // (Both Close and Open route through MANUAL — the % is the
-    // operator's real intent, the label is just the default.)
+  async function onModalSave(_pct: number, _timeoutMins: number) {
+    // Modal already wrote DoorSettings (manual_pct + manual_timeout_mins)
+    // via writeProto. Send the equipment command to flip remote_off →
+    // MANUAL=2. (Both Close and Open route through MANUAL — the % is
+    // the operator's real intent; firmware handles the auto-revert
+    // timeout independently.)
     await postModeNow('On');
     pendingMode = null;
   }
@@ -120,7 +121,7 @@
       {/if}
     </Column>
   </Row>
-  <DoorTargetModal
+  <FreshAirDoorModal
     bind:open={modalOpen}
     initialPct={modalInitialPct}
     onSave={onModalSave}

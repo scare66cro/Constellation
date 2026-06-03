@@ -592,6 +592,10 @@ static void mirror_door(const LpSettingsData *lp)
     Settings.Door.ManualPct    = (uint8_t)(lp->door.manual_pct > 100U
                                             ? 100U
                                             : lp->door.manual_pct);
+    Settings.Door.ManualTimeoutMins =
+        (uint16_t)(lp->door.manual_timeout_mins > 1440U
+                    ? 1440U
+                    : lp->door.manual_timeout_mins);
     Settings.Door.PID.P        = lp->door.p_gain;
     Settings.Door.PID.I        = lp->door.i_gain;
     Settings.Door.PID.D        = lp->door.d_gain;
@@ -1107,8 +1111,30 @@ void lp_engine_tick(void)
      *                  Equipment Control row. ManualPct = 0 closes,
      *                  100 opens, intermediate values hold position. */
     {
-        static uint8_t s_prev_door_ro = 0U /* AUTO */;
+        static uint8_t  s_prev_door_ro      = 0U /* AUTO */;
+        static uint32_t s_manual_start_tick = 0U;
         uint8_t door_ro = lp->remote_off.state[EQ_DOORS];
+        const uint32_t now_tick = XTimerVal;
+
+        /* Auto-revert: if operator set Manual with a non-zero timeout,
+         * track when MANUAL started; on the tick `elapsed >= timeout`
+         * call LpSettings_SetRemoteOff(EQ_DOORS, AUTO) which next tick
+         * will run the MANUAL→AUTO transition path below (close + PID
+         * reset). Replaces the legacy door-diag 60-min clear pattern;
+         * operator picks the duration in the modal (0 = persistent). */
+        if (door_ro == 2U && s_prev_door_ro != 2U) {
+            s_manual_start_tick = now_tick;
+        }
+        if (door_ro == 2U && Settings.Door.ManualTimeoutMins != 0U) {
+            const uint32_t timeout_ticks =
+                (uint32_t)Settings.Door.ManualTimeoutMins * (uint32_t)T_MINS;
+            if (now_tick - s_manual_start_tick >= timeout_ticks) {
+                (void)LpSettings_SetRemoteOff((uint32_t)EQ_DOORS,
+                                              0U /* AUTO */);
+                door_ro = 0U;
+            }
+        }
+
         if (door_ro == 1U /* OFF */) {
             PwmChannel[PWM_DOORS].Output = PWM_MIN_VALUE;
         } else if (door_ro == 2U /* MANUAL */) {
