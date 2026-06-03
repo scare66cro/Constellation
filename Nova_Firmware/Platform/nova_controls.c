@@ -50,13 +50,41 @@
 #include "Warnings.h"
 
 /* Mirror of `ao_equip_t` (canonical numeric mapping lives in
- * Nova_Firmware/lp_am2434/main.c — `AO_EQUIP_DOORS = 2`). Duplicated
- * here as a literal so Platform code can sanity-check the operator's
- * AO assignment without depending on controller-only headers. Keep in
- * sync with main.c if new equipment kinds are added. */
-#ifndef AO_EQUIP_DOORS
-#define AO_EQUIP_DOORS  2U
+ * Nova_Firmware/lp_am2434/main.c — `AO_EQUIP_FAN=1 DOORS=2 REFRIG=3
+ * BURNER=4`). Duplicated here as literals so Platform code can sanity-
+ * check the operator's AO assignment without depending on controller-
+ * only headers. Keep in sync with main.c if new equipment kinds are
+ * added. Settings.h:122-130 references `nova_fan_output.h` for this
+ * enum but no such file exists; main.c's `#define`s are the truth. */
+#ifndef AO_EQUIP_FAN
+#define AO_EQUIP_FAN     1U
 #endif
+#ifndef AO_EQUIP_DOORS
+#define AO_EQUIP_DOORS   2U
+#endif
+#ifndef AO_EQUIP_REFRIG
+#define AO_EQUIP_REFRIG  3U
+#endif
+#ifndef AO_EQUIP_BURNER
+#define AO_EQUIP_BURNER  4U
+#endif
+
+/* "Does the operator have at least one orbit AO slot assigned to this
+ * equipment kind?" — used by the Nova-architecture output-path gates
+ * in CtrlDoors/CtrlBurner/CtrlFan/CtrlRefrig. Walks the Settings.AoEquip
+ * matrix (16 orbit slots × 2 AO channels each). Returns true on the
+ * first match; early-exit keeps the runtime overhead negligible. */
+static bool nova_any_ao_assigned_for(uint8_t equip)
+{
+  for (unsigned slot = 0; slot < 16U; slot++) {
+    for (unsigned ch = 0; ch < 2U; ch++) {
+      if (Settings.AoEquip[slot][ch] == equip) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 /*** defines ***/
 
@@ -596,9 +624,15 @@ void CtrlBurner(int Output)
     return;
   }
 
-  // check that either digital output or PWM is defined
-  if (   Settings.EquipIo[EQ_BURNER].Output == IO_UNDEFINED
-      && Settings.PWM[PWM_BURNER].Enabled == 0)
+  /* Nova-architecture output-path gate (2026-06-02). See CtrlDoors
+   * (below) for the full rationale. Burner runs only in Onion-mode
+   * Cure path so the trap was masked here for most bench testing, but
+   * the legacy `Settings.PWM[PWM_BURNER].Enabled` check would still
+   * false-positive WARN_NO_OUTPUT for every Nova-architecture install
+   * configured for AO-driven burner control. Trip the warning only
+   * when neither output path is wired. */
+  if (Settings.EquipIo[EQ_BURNER].Output == IO_UNDEFINED
+      && !nova_any_ao_assigned_for(AO_EQUIP_BURNER))
   {
     WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_BURNER);
     return;
@@ -947,17 +981,9 @@ void CtrlDoors(float Actual, float Target)
    * fields instead. Gate trips ONLY when neither path is wired. */
   {
     bool have_pulse_coils =
-        (Settings.EquipIo[EQ_PULSEDOOR_OPEN ].Output != 0u) &&
-        (Settings.EquipIo[EQ_PULSEDOOR_CLOSE].Output != 0u);
-    bool have_ao_assignment = false;
-    for (unsigned slot = 0; slot < 16U && !have_ao_assignment; slot++) {
-      for (unsigned ch = 0; ch < 2U && !have_ao_assignment; ch++) {
-        if (Settings.AoEquip[slot][ch] == AO_EQUIP_DOORS) {
-          have_ao_assignment = true;
-        }
-      }
-    }
-    if (!have_pulse_coils && !have_ao_assignment) {
+        (Settings.EquipIo[EQ_PULSEDOOR_OPEN ].Output != IO_UNDEFINED) &&
+        (Settings.EquipIo[EQ_PULSEDOOR_CLOSE].Output != IO_UNDEFINED);
+    if (!have_pulse_coils && !nova_any_ao_assigned_for(AO_EQUIP_DOORS)) {
       WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_DOORS);
       return;
     }
@@ -1190,9 +1216,16 @@ void CtrlFan(int speed)
   float Ref2 = SENSOR_VAL_UNDEFINED;
   unsigned int Counter = XTimerVal;
 
-  // check that either digital output or PWM is defined
-  if (   Settings.EquipIo[EQ_FAN].Output == IO_UNDEFINED
-      && Settings.PWM[PWM_FAN].Enabled == 0)
+  /* Nova-architecture output-path gate (2026-06-02). See CtrlDoors
+   * (below) for the full rationale. Fan PID is the most-exercised
+   * control loop so this gate fires the most visibly when broken;
+   * legacy `Settings.PWM[PWM_FAN].Enabled` is the AS2 TM4C hardware
+   * PWM flag and has no Nova analogue. Pulse-coil path: a single
+   * EQ_FAN coil (Settings.EquipIo[EQ_FAN]); AO path:
+   * AO_EQUIP_FAN = 1 (the most common configuration, since most fan
+   * VFDs accept a 0-10V or 4-20mA speed reference). */
+  if (Settings.EquipIo[EQ_FAN].Output == IO_UNDEFINED
+      && !nova_any_ao_assigned_for(AO_EQUIP_FAN))
   {
     WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_FAN);
     return;
@@ -1754,9 +1787,15 @@ void CtrlRefrig(float ActualTemp, float TargetTemp)
     }
   }
 
-  // check that either digital output or PWM is defined
-  if (   Settings.EquipIo[EQ_REFRIG_STAGE1].Output == IO_UNDEFINED
-      && Settings.PWM[PWM_REFRIGERATION].Enabled == 0)
+  /* Nova-architecture output-path gate (2026-06-02). See CtrlDoors
+   * (below) for the full rationale. Refrig gate uses STAGE1 as the
+   * canonical pulse-coil check (the AS2 convention — if the operator
+   * assigned STAGE1 they almost certainly assigned the other stages
+   * they need; this matches the legacy gate's intent). AO path:
+   * AO_EQUIP_REFRIG = 3 (a single 0-100% refrig demand driving a
+   * staged controller, e.g. condenser-fan VFD or compressor VSD). */
+  if (Settings.EquipIo[EQ_REFRIG_STAGE1].Output == IO_UNDEFINED
+      && !nova_any_ao_assigned_for(AO_EQUIP_REFRIG))
   {
     WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_REFRIGERATION);
     return;
