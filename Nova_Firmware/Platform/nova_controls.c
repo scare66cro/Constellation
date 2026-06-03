@@ -49,6 +49,15 @@
 #include "Timer.h"
 #include "Warnings.h"
 
+/* Mirror of `ao_equip_t` (canonical numeric mapping lives in
+ * Nova_Firmware/lp_am2434/main.c — `AO_EQUIP_DOORS = 2`). Duplicated
+ * here as a literal so Platform code can sanity-check the operator's
+ * AO assignment without depending on controller-only headers. Keep in
+ * sync with main.c if new equipment kinds are added. */
+#ifndef AO_EQUIP_DOORS
+#define AO_EQUIP_DOORS  2U
+#endif
+
 /*** defines ***/
 
 /*** typedefs and structures ***/
@@ -918,12 +927,40 @@ void CtrlDoors(float Actual, float Target)
     return;
   }
 
-  // check that either digital output or PWM is defined
-  if (   Settings.EquipIo[EQ_PULSEDOOR_POWER].Output == 0
-      && Settings.PWM[PWM_DOORS].Enabled == 0)
+  /* Nova-architecture output-path gate (replaces legacy
+   * `Settings.PWM[PWM_DOORS].Enabled` check, 2026-06-02).
+   *
+   * In legacy AS2 doors were driven either by direct shift-register
+   * pulse-door coils OR by a dedicated hardware PWM channel on the
+   * TM4C. In Nova:
+   *   - Pulse-coil path: operator assigns EQ_PULSEDOOR_OPEN AND
+   *     EQ_PULSEDOOR_CLOSE coils via IO Config (typically to GDC-orbit
+   *     DOs); `CtrlDoorsPulsed` bit-bangs them, equipment_output_sync
+   *     pushes coil state out to the orbit DO regs each tick.
+   *   - 4-20mA path: operator assigns PWM_DOORS to an orbit AO via
+   *     PWM Config (Settings.AoEquip[slot][ch] == AO_EQUIP_DOORS);
+   *     equipment_ao_sync_task pushes PwmChannel[PWM_DOORS].Output
+   *     to that orbit's HR 0/1 each tick.
+   * The legacy `Settings.PWM[PWM_DOORS].Enabled` field has no meaning
+   * in Nova IO Config — its check would trip the warning for every
+   * customer using the new configuration path. Check the Nova-shape
+   * fields instead. Gate trips ONLY when neither path is wired. */
   {
-    WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_DOORS);
-    return;
+    bool have_pulse_coils =
+        (Settings.EquipIo[EQ_PULSEDOOR_OPEN ].Output != 0u) &&
+        (Settings.EquipIo[EQ_PULSEDOOR_CLOSE].Output != 0u);
+    bool have_ao_assignment = false;
+    for (unsigned slot = 0; slot < 16U && !have_ao_assignment; slot++) {
+      for (unsigned ch = 0; ch < 2U && !have_ao_assignment; ch++) {
+        if (Settings.AoEquip[slot][ch] == AO_EQUIP_DOORS) {
+          have_ao_assignment = true;
+        }
+      }
+    }
+    if (!have_pulse_coils && !have_ao_assignment) {
+      WarningsSet(WARN_NO_OUTPUT, FM_ALARM, NA, EQ_DOORS);
+      return;
+    }
   }
 
   // reset the timer
