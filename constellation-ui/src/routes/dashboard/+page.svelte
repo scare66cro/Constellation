@@ -40,6 +40,7 @@
   import RefrigTopologyCard from "$lib/components/dashboard/RefrigTopologyCard.svelte";
   import AudioAlert        from "$lib/components/dashboard/AudioAlert.svelte";
   import CureIntakeAssembly from "$lib/components/dashboard/CureIntakeAssembly.svelte";
+  import DraggableSensorBadge from "$lib/components/dashboard/DraggableSensorBadge.svelte";
   import { equipmentComposite as eqStore } from "$lib/business/protoStores";
 
   // ─── Reactive proto data ──────────────────────────────────────────
@@ -194,16 +195,28 @@
     if (clockTimer) clearInterval(clockTimer);
   });
 
-  // ─── Sensor label slots (placeholder spatial layout) ──────────────
-  // 3 zones (North / Middle / South) × 3 depths (Top / Middle / Bottom).
-  // Until we have the customer-specific bay layout, all slots show the
-  // plenum temp as a placeholder. Real per-position sensor values plug
-  // in here from sensorData / SystemStatus extension fields.
-  $: pileSensors = [
-    [{ label: 'PT N Bay',   t: plenumTemp }, { label: 'PT N Mid',  t: plenumTemp }, { label: 'PT N End',  t: plenumTemp }],
-    [{ label: 'PT Mid Bay', t: plenumTemp }, { label: 'PT Mid Mid',t: plenumTemp }, { label: 'PT Mid End',t: plenumTemp }],
-    [{ label: 'PT S Bay',   t: plenumTemp }, { label: 'PT S Mid',  t: plenumTemp }, { label: 'PT S End',  t: plenumTemp }],
+  // ─── Pile sensor slots (drag-positionable, persisted per ID) ─────
+  // Each slot has a stable id (used for localStorage persistence) +
+  // an initial (x, y) fraction of the pile canvas. Until we have
+  // per-position sensor data, all values show plenum temp. Operators
+  // can drag each pill to its actual spatial location on the pile;
+  // their layout persists across reloads. Production view should
+  // toggle `editable={false}` to lock layout.
+  $: pileSensorSlots = [
+    { id: 'pt-n-bay',   label: 'PT N Bay',   x: 0.15, y: 0.20 },
+    { id: 'pt-n-mid',   label: 'PT N Mid',   x: 0.50, y: 0.20 },
+    { id: 'pt-n-end',   label: 'PT N End',   x: 0.85, y: 0.20 },
+    { id: 'pt-mid-bay', label: 'PT Mid Bay', x: 0.15, y: 0.50 },
+    { id: 'pt-mid-mid', label: 'PT Mid Mid', x: 0.50, y: 0.50 },
+    { id: 'pt-mid-end', label: 'PT Mid End', x: 0.85, y: 0.50 },
+    { id: 'pt-s-bay',   label: 'PT S Bay',   x: 0.15, y: 0.78 },
+    { id: 'pt-s-mid',   label: 'PT S Mid',   x: 0.50, y: 0.78 },
+    { id: 'pt-s-end',   label: 'PT S End',   x: 0.85, y: 0.78 },
   ];
+
+  // Whether sensor pills are draggable. In production this should
+  // be derived from auth level / a site-admin toggle.
+  let sensorsEditable = true;
 
   function backToHome() {
     $navigationStore.level = 0;
@@ -243,6 +256,17 @@
     Not in menu (access via /dashboard URL only)
   </div>
   <div class="flex items-center gap-3">
+    <!-- Sensor layout edit-toggle: when enabled, pile sensor badges
+         are draggable + show ⋮⋮ handles. Layout persists per ID
+         to localStorage. Lock for production / kiosk viewing. -->
+    <button
+      class="px-2 py-0.5 rounded border text-xs font-bold
+             {sensorsEditable ? 'bg-blue-100 border-blue-400 text-blue-800' : 'bg-white border-gray-300 text-gray-600'}"
+      on:click={() => sensorsEditable = !sensorsEditable}
+      title={sensorsEditable ? 'Lock sensor layout' : 'Unlock sensor layout (drag to position)'}
+    >
+      {sensorsEditable ? '🔓 Layout' : '🔒 Locked'}
+    </button>
     <!-- Language flag: click to swap UI language. Currently EN ↔ ZH;
          add more in src/lib/i18n/index.ts and extend the toggle. -->
     <button
@@ -420,19 +444,22 @@
       <AnimatedPilePath fanPct={fanPctNum} running={fanOn} outlets={9}/>
     </div>
 
-    <!-- Sensor labels overlaid spatially — each shifts color based on
-         delta from plenum setpoint so hot/cold spots stand out. -->
-    <div class="absolute inset-0 grid grid-rows-3 grid-cols-3 gap-2 p-6 pt-12 pb-20">
-      {#each pileSensors as row, ri (ri)}
-        {#each row as cell, ci (ci)}
-          <div class="flex {ri === 0 ? 'items-start' : ri === 1 ? 'items-center' : 'items-end'} {ci === 0 ? 'justify-start' : ci === 1 ? 'justify-center' : 'justify-end'}">
-            <SensorBadge
-              label={cell.label}
-              value={ss?.plenumTemp ?? null}
-              setpoint={ps?.tempSetpoint ?? null}
-            />
-          </div>
-        {/each}
+    <!-- Pile sensor pills — DRAG-POSITIONABLE. Operators move each
+         pill to its real spatial location on the pile (per-site
+         layout persists in localStorage). Color shifts blue→green
+         →red by delta from plenum setpoint; mini-sparkline shows
+         recent trend. Drag-handle (⋮⋮) visible in edit mode. -->
+    <div class="absolute inset-0 p-6 pt-12 pb-20">
+      {#each pileSensorSlots as slot (slot.id)}
+        <DraggableSensorBadge
+          id={slot.id}
+          label={slot.label}
+          value={ss?.plenumTemp ?? null}
+          setpoint={ps?.tempSetpoint ?? null}
+          initialX={slot.x}
+          initialY={slot.y}
+          editable={sensorsEditable}
+        />
       {/each}
     </div>
 
