@@ -41,6 +41,7 @@
   import AudioAlert        from "$lib/components/dashboard/AudioAlert.svelte";
   import CureIntakeAssembly from "$lib/components/dashboard/CureIntakeAssembly.svelte";
   import DraggableSensorBadge from "$lib/components/dashboard/DraggableSensorBadge.svelte";
+  import ZoneSelector from "$lib/components/dashboard/ZoneSelector.svelte";
   import { equipmentComposite as eqStore } from "$lib/business/protoStores";
 
   // ─── Reactive proto data ──────────────────────────────────────────
@@ -256,6 +257,12 @@
     Not in menu (access via /dashboard URL only)
   </div>
   <div class="flex items-center gap-3">
+    <!-- Multi-zone selector: lists this Pi5 ("Local") + every panel
+         in /iot/remote-systems. Picking a remote opens its dashboard /
+         orbits / home in a new tab (Tier A). Live online indicators
+         refresh every 10s. -->
+    <ZoneSelector/>
+
     <!-- Sensor layout edit-toggle: when enabled, pile sensor badges
          are draggable + show ⋮⋮ handles. Layout persists per ID
          to localStorage. Lock for production / kiosk viewing. -->
