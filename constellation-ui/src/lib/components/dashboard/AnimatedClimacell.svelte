@@ -43,12 +43,6 @@
                style="animation-delay: {drop.delay}s"/>
     {/each}
   {/if}
-
-  <!-- Snowflake symbol when active (cooling indication) -->
-  {#if active}
-    <text x="50" y="55" text-anchor="middle" font-size="22"
-          fill="#0369a1" opacity="0.4">❄</text>
-  {/if}
 </svg>
 
 <style>

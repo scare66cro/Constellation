@@ -30,6 +30,7 @@
   import { headersStore, navigationStore } from "$lib/store";
   import { EQ } from "$lib/business/equipmentEnum";
   import { goto } from "$app/navigation";
+  import { locale } from "svelte-i18n";
   import AnimatedFan       from "$lib/components/dashboard/AnimatedFan.svelte";
   import AnimatedDamper    from "$lib/components/dashboard/AnimatedDamper.svelte";
   import AnimatedClimacell from "$lib/components/dashboard/AnimatedClimacell.svelte";
@@ -181,6 +182,19 @@
     $navigationStore.level = 0;
     goto('/');
   }
+
+  // ─── Language flag toggle ────────────────────────────────────────
+  // svelte-i18n is initialized with 'en' and 'zh' (see src/lib/i18n).
+  // Click cycles between them. Resolved-locale strings can carry a
+  // region tag (e.g. 'en-US', 'zh-CN') so we test for the base code.
+  $: localeShort = ($locale ?? 'en').slice(0, 2).toLowerCase();
+  $: flagInfo = localeShort === 'zh'
+    ? { emoji: '🇨🇳', label: '中文', next: 'EN' }
+    : { emoji: '🇺🇸', label: 'EN',   next: '中文' };
+
+  function toggleLocale() {
+    locale.set(localeShort === 'zh' ? 'en' : 'zh');
+  }
 </script>
 
 <svelte:head>
@@ -195,7 +209,19 @@
     <strong>PREVIEW</strong> · Operator Dashboard · Read-only ·
     Not in menu (access via /dashboard URL only)
   </div>
-  <button class="underline" on:click={backToHome}>← Back to Home</button>
+  <div class="flex items-center gap-3">
+    <!-- Language flag: click to swap UI language. Currently EN ↔ ZH;
+         add more in src/lib/i18n/index.ts and extend the toggle. -->
+    <button
+      class="flex items-center gap-1 px-2 py-0.5 rounded border border-orange-300 bg-white hover:bg-orange-50"
+      on:click={toggleLocale}
+      title="Switch to {flagInfo.next}"
+    >
+      <span class="text-lg leading-none">{flagInfo.emoji}</span>
+      <span class="text-xs font-bold">{flagInfo.label}</span>
+    </button>
+    <button class="underline" on:click={backToHome}>← Back to Home</button>
+  </div>
 </div>
 
 <!-- ════════════════════════════════════════════════════════════════ -->
@@ -237,14 +263,22 @@
   <div class="col-span-2 flex flex-col gap-2">
     <div class="text-xs text-center font-bold text-gray-500 tracking-wider">INTAKE</div>
 
-    <!-- Top damper: louvers rotate to physical % -->
+    <!-- TOP DAMPER = EXHAUST.
+         Gravity-closed: only opens when the bottom fresh-air doors
+         open AND positive pressure (the fans pushing return air
+         that can't recirculate through the closed bottom intake
+         path) forces it open. So the visual reflects the same %
+         as the intake damper, but only when both are commanded > 5%.
+         When intake is closed, exhaust is held shut by gravity even
+         if the operator commanded it open. -->
     <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
-      <div class="text-xs text-gray-500 mb-1">Top Damper</div>
-      <AnimatedDamper pct={doorsPct} width={90} height={70}/>
-      <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct}%</div>
+      <div class="text-xs text-gray-500 mb-1">Exhaust</div>
+      <AnimatedDamper pct={doorsPct > 5 ? doorsPct : 0} width={90} height={70}/>
+      <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct > 5 ? doorsPct : 0}%</div>
       {#if doorsRemoteOff === 2}
         <div class="text-[10px] text-blue-700 font-bold">MANUAL</div>
       {/if}
+      <div class="text-[9px] text-gray-400 mt-0.5">Gravity-closed</div>
     </div>
 
     <!-- Climacell evap: droplets cascade when active -->
@@ -276,9 +310,13 @@
       </div>
     {/if}
 
-    <!-- Bottom damper: same animated louvers -->
+    <!-- BOTTOM DAMPER = INTAKE.
+         Driven directly by the doors PWM (the operator's commanded
+         fresh-air % or the engine's PID demand in AUTO). When this
+         opens, the gravity-closed top exhaust opens with it under
+         positive pressure; both closed → the fan recirculates. -->
     <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
-      <div class="text-xs text-gray-500 mb-1">Bottom Damper</div>
+      <div class="text-xs text-gray-500 mb-1">Intake</div>
       <AnimatedDamper pct={doorsPct} width={90} height={70}/>
       <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct}%</div>
     </div>
