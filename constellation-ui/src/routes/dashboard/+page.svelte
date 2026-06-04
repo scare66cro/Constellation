@@ -39,6 +39,7 @@
   import SensorBadge       from "$lib/components/dashboard/SensorBadge.svelte";
   import RefrigTopologyCard from "$lib/components/dashboard/RefrigTopologyCard.svelte";
   import AudioAlert        from "$lib/components/dashboard/AudioAlert.svelte";
+  import CureIntakeAssembly from "$lib/components/dashboard/CureIntakeAssembly.svelte";
   import { equipmentComposite as eqStore } from "$lib/business/protoStores";
 
   // ─── Reactive proto data ──────────────────────────────────────────
@@ -108,6 +109,30 @@
   //   11 ST_FAILURE      etc.
   $: systemState = ss?.systemState ?? 0;
   $: modeInfo    = stateToModeInfo(systemState);
+
+  // ─── Mode-driven canvas swap ──────────────────────────────────────
+  // ST_AIRCURE (5) and ST_BURNERCURE (24) trigger the cure-mode
+  // intake assembly + amber pile texture. ST_PURGE (18) shifts the
+  // pile background to a green theme to make the CO₂ purge cycle
+  // visually distinct from regular cooling/refrig.
+  $: isCuring   = systemState === 5 || systemState === 24;
+  $: isPurging  = systemState === 18;
+  $: pileTheme  = pileBackground(systemState);
+  function pileBackground(s: number): string {
+    if (s === 5 || s === 24)
+      return 'linear-gradient(180deg, #fde68a 0%, #d97706 50%, #92400e 100%)';   // amber/onion
+    if (s === 18)
+      return 'linear-gradient(180deg, #bbf7d0 0%, #16a34a 55%, #166534 100%)';   // green/purge
+    return 'linear-gradient(180deg, #c8a060 0%, #8b6334 50%, #6b4824 100%)';     // default potato/onion brown
+  }
+  $: pileBorderClass = isCuring  ? 'border-amber-700'
+                     : isPurging ? 'border-emerald-700'
+                     :             'border-amber-700';
+  // For the cure coil heat indicator: scale from plenum temp delta
+  // above 80°F (a reasonable "starting to cure" baseline).
+  $: cureCoilHeat = ss?.plenumTemp != null
+    ? Math.max(0, Math.min(100, (ss.plenumTemp - 80) * 5))
+    : 0;
 
   function stateToModeInfo(s: number): { label: string; banner: string; dot: string } {
     switch (s) {
@@ -267,7 +292,24 @@
 <!-- ════════════════════════════════════════════════════════════════ -->
 <div class="grid grid-cols-12 gap-3 p-3" style="min-height: calc(100vh - 200px);">
 
-  <!-- ──── INTAKE STACK (left) ──────────────────────────────────── -->
+  <!-- ──── INTAKE COLUMN (left) — canvas swap by mode ──────────────
+       Standard intake (damper/climacell/fan/heat/damper) when in
+       cooling/refrig/recirc/standby. Curing modes (ST_AIRCURE/
+       ST_BURNERCURE) swap in the CureIntakeAssembly: vertical cure
+       coil + dual flanking burners + fan still pushing cured air
+       to the plenum. The pile background also shifts to an amber
+       onion theme (see pileTheme). -->
+  {#if isCuring}
+    <div class="col-span-2">
+      <CureIntakeAssembly
+        fanPct={fanPctNum}
+        fanRunning={fanOn}
+        leftBurnerOn={burnerOn}
+        rightBurnerOn={burnerOn}
+        coilHeat={cureCoilHeat}
+      />
+    </div>
+  {:else}
   <div class="col-span-2 flex flex-col gap-2">
     <div class="text-xs text-center font-bold text-gray-500 tracking-wider">INTAKE</div>
 
@@ -349,10 +391,14 @@
       </div>
     {/if}
   </div>
+  {/if}
 
-  <!-- ──── PILE CROSS-SECTION (center) ──────────────────────────── -->
-  <div class="col-span-7 rounded-lg relative overflow-hidden border-2 border-amber-700"
-       style="background: linear-gradient(180deg, #c8a060 0%, #8b6334 50%, #6b4824 100%);">
+  <!-- ──── PILE CROSS-SECTION (center) — theme by mode ─────────────
+       Background gradient swaps per systemState: amber-onion for
+       curing, green for CO2 purge, default brown for cooling/refrig.
+       Border tint follows the same convention. -->
+  <div class="col-span-7 rounded-lg relative overflow-hidden border-2 {pileBorderClass}"
+       style="background: {pileTheme};">
 
     <!-- Texture: scatter of darker spots for pile feel -->
     <svg viewBox="0 0 400 300" preserveAspectRatio="none" class="absolute inset-0 w-full h-full opacity-30 pointer-events-none">
