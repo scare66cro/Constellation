@@ -35,9 +35,11 @@
   import AnimatedDamper    from "$lib/components/dashboard/AnimatedDamper.svelte";
   import AnimatedClimacell from "$lib/components/dashboard/AnimatedClimacell.svelte";
   import AnimatedFlame     from "$lib/components/dashboard/AnimatedFlame.svelte";
-  import AnimatedRefrigCoil from "$lib/components/dashboard/AnimatedRefrigCoil.svelte";
-  import AnimatedAirflow   from "$lib/components/dashboard/AnimatedAirflow.svelte";
+  import AnimatedPilePath  from "$lib/components/dashboard/AnimatedPilePath.svelte";
   import SensorBadge       from "$lib/components/dashboard/SensorBadge.svelte";
+  import RefrigTopologyCard from "$lib/components/dashboard/RefrigTopologyCard.svelte";
+  import AudioAlert        from "$lib/components/dashboard/AudioAlert.svelte";
+  import { equipmentComposite as eqStore } from "$lib/business/protoStores";
 
   // ─── Reactive proto data ──────────────────────────────────────────
   $: ss   = $systemStatus;
@@ -201,6 +203,12 @@
   <title>Operator Dashboard (Preview)</title>
 </svelte:head>
 
+<!-- Critical-state audio + visual alert. Shows a fixed banner along
+     the very top of the viewport when SystemState enters FAILURE /
+     SHUTDOWN / REMOTE_STANDBY / SYS_REMOTEOFF, beeps once per
+     transition, persistable mute via localStorage. -->
+<AudioAlert systemState={systemState} label={modeInfo.label}/>
+
 <!-- ════════════════════════════════════════════════════════════════ -->
 <!-- Preview banner — visible reminder this is experimental / opt-in -->
 <!-- ════════════════════════════════════════════════════════════════ -->
@@ -273,7 +281,7 @@
          if the operator commanded it open. -->
     <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
       <div class="text-xs text-gray-500 mb-1">Exhaust</div>
-      <AnimatedDamper pct={doorsPct > 5 ? doorsPct : 0} width={90} height={70}/>
+      <AnimatedDamper pct={doorsPct > 5 ? doorsPct : 0} width={90} height={70} flow="out"/>
       <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct > 5 ? doorsPct : 0}%</div>
       {#if doorsRemoteOff === 2}
         <div class="text-[10px] text-blue-700 font-bold">MANUAL</div>
@@ -284,7 +292,14 @@
     <!-- Climacell evap: droplets cascade when active -->
     <div class="border-2 rounded-lg p-2 flex flex-col items-center {climacellOn ? 'bg-cyan-50 border-cyan-500' : 'bg-white border-gray-300'}">
       <div class="text-xs {climacellOn ? 'text-cyan-800' : 'text-gray-500'} mb-1">Climacell</div>
-      <AnimatedClimacell active={climacellOn} size={70}/>
+      <!-- Climacell demand: tracks fan PWM when climacell is active —
+           more airflow = more evaporative work, so droplet density
+           rises with fan demand. Falls back to 50 (steady) when
+           fanPctNum is 0 but the coil is running. -->
+      <AnimatedClimacell
+        active={climacellOn}
+        demand={fanPctNum > 0 ? fanPctNum : 50}
+        size={70}/>
       <div class="text-[10px] font-bold {climacellOn ? 'text-cyan-700' : 'text-gray-400'}">{climacellOn ? 'ACTIVE' : 'OFF'}</div>
     </div>
 
@@ -317,7 +332,7 @@
          positive pressure; both closed → the fan recirculates. -->
     <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
       <div class="text-xs text-gray-500 mb-1">Intake</div>
-      <AnimatedDamper pct={doorsPct} width={90} height={70}/>
+      <AnimatedDamper pct={doorsPct} width={90} height={70} flow="in"/>
       <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct}%</div>
     </div>
 
@@ -351,10 +366,12 @@
       {/each}
     </svg>
 
-    <!-- Curved airflow: arrows travel along arcs over the pile when
-         the fan is running. Speed scales with fanPct. -->
+    <!-- Distribution duct: horizontal pipe along the pile floor with
+         outlet vents that emit vertical air streams rising through
+         the product. Matches the actual physical flow: fan → plenum
+         → duct → distributed bottom-to-top through the pile. -->
     <div class="absolute inset-0 pointer-events-none">
-      <AnimatedAirflow fanPct={fanPctNum} running={fanOn} arrowCount={5}/>
+      <AnimatedPilePath fanPct={fanPctNum} running={fanOn} outlets={9}/>
     </div>
 
     <!-- Sensor labels overlaid spatially — each shifts color based on
@@ -410,24 +427,17 @@
   <!-- ──── RIGHT PANEL (data cards) ──────────────────────────────── -->
   <div class="col-span-3 flex flex-col gap-2">
 
-    <!-- Refrigeration card with animated coil -->
-    <div class="border-2 rounded-lg p-3 {refrigPct > 5 ? 'bg-sky-50 border-sky-500' : 'bg-white border-gray-300'}">
-      <div class="flex justify-between items-baseline">
-        <div class="font-bold text-sm">Refrigeration</div>
-        <div class="text-[10px] text-gray-500">
-          {(rs as any)?.refrigMode === 0 ? 'ECO' : (rs as any)?.refrigMode === 1 ? 'REFRIG' : (rs as any)?.refrigMode === 2 ? 'ENTH' : ''}
-        </div>
-      </div>
-      <div class="flex items-center gap-2 mt-1">
-        <AnimatedRefrigCoil pct={refrigPct} active={refrigPct > 5} size={110}/>
-        <div>
-          <div class="text-4xl font-bold {refrigPct > 5 ? 'text-sky-700' : 'text-gray-400'}">{refrigPct}%</div>
-          <div class="text-xs text-gray-500">
-            {outputDemandLabel === 'Refrigeration Output' ? 'demand' : 'idle'}
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- Refrigeration topology card: auto-picks between Stages / PWM /
+         TRITON based on what's configured. Mirrors the 0.A.227
+         widened gate in CtrlRefrig. tritonConfigured is hard-wired
+         false until the dashboard subscribes to OrbitStatus tag 120
+         and walks slots for role=TRITON (next iteration). -->
+    <RefrigTopologyCard
+      equipment={$eqStore}
+      refrigPct={refrigPct}
+      refrigModeRaw={(rs as any)?.refrigMode}
+      tritonConfigured={false}
+    />
 
     <!-- Cooling-available temp card -->
     <div class="border-2 rounded-lg p-3 bg-white border-gray-300">
