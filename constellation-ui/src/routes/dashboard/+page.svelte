@@ -30,6 +30,13 @@
   import { headersStore, navigationStore } from "$lib/store";
   import { EQ } from "$lib/business/equipmentEnum";
   import { goto } from "$app/navigation";
+  import AnimatedFan       from "$lib/components/dashboard/AnimatedFan.svelte";
+  import AnimatedDamper    from "$lib/components/dashboard/AnimatedDamper.svelte";
+  import AnimatedClimacell from "$lib/components/dashboard/AnimatedClimacell.svelte";
+  import AnimatedFlame     from "$lib/components/dashboard/AnimatedFlame.svelte";
+  import AnimatedRefrigCoil from "$lib/components/dashboard/AnimatedRefrigCoil.svelte";
+  import AnimatedAirflow   from "$lib/components/dashboard/AnimatedAirflow.svelte";
+  import SensorBadge       from "$lib/components/dashboard/SensorBadge.svelte";
 
   // ─── Reactive proto data ──────────────────────────────────────────
   $: ss   = $systemStatus;
@@ -74,6 +81,15 @@
   $: doorsPct  = ss?.pwmDoorsPct ?? 0;
   $: refrigPct = ss?.pwmRefrigPct ?? 0;
   $: fanSpeed  = ss?.fanSpeed ?? 'Off';
+  // Parse fan speed string ("25"/"Off"/"Manual"/…) → numeric % for
+  // the animated fan's rotation rate. "Off"/"Manual"/anything non-
+  // numeric → 0. The Fan card still renders the raw string for the
+  // operator's label.
+  $: fanPctNum = parseFanPct(fanSpeed);
+  function parseFanPct(s: string): number {
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
 
   // ─── Build mode ──────────────────────────────────────────────────
   // basicSetup.systemMode: 0=Potato 1=Onion. Drives crop icon + curing
@@ -221,56 +237,62 @@
   <div class="col-span-2 flex flex-col gap-2">
     <div class="text-xs text-center font-bold text-gray-500 tracking-wider">INTAKE</div>
 
-    <!-- Top damper -->
-    <div class="bg-white border-2 rounded-lg p-3 text-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
-      <div class="text-xs text-gray-500">Top Damper</div>
-      <div class="text-2xl font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'}">{doorsPct}%</div>
+    <!-- Top damper: louvers rotate to physical % -->
+    <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
+      <div class="text-xs text-gray-500 mb-1">Top Damper</div>
+      <AnimatedDamper pct={doorsPct} width={90} height={70}/>
+      <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct}%</div>
       {#if doorsRemoteOff === 2}
-        <div class="text-xs text-blue-700 font-bold mt-1">MANUAL</div>
+        <div class="text-[10px] text-blue-700 font-bold">MANUAL</div>
       {/if}
     </div>
 
-    <!-- Climacell evap -->
-    <div class="border-2 rounded-lg p-3 text-center {climacellOn ? 'bg-cyan-100 border-cyan-500' : 'bg-white border-gray-300'}">
-      <div class="text-xs {climacellOn ? 'text-cyan-800' : 'text-gray-500'}">Climacell</div>
-      <div class="text-2xl">{climacellOn ? '❄' : '·'}</div>
-      <div class="text-xs font-bold {climacellOn ? 'text-cyan-700' : 'text-gray-400'}">{climacellOn ? 'ACTIVE' : 'OFF'}</div>
+    <!-- Climacell evap: droplets cascade when active -->
+    <div class="border-2 rounded-lg p-2 flex flex-col items-center {climacellOn ? 'bg-cyan-50 border-cyan-500' : 'bg-white border-gray-300'}">
+      <div class="text-xs {climacellOn ? 'text-cyan-800' : 'text-gray-500'} mb-1">Climacell</div>
+      <AnimatedClimacell active={climacellOn} size={70}/>
+      <div class="text-[10px] font-bold {climacellOn ? 'text-cyan-700' : 'text-gray-400'}">{climacellOn ? 'ACTIVE' : 'OFF'}</div>
     </div>
 
-    <!-- Fan stack -->
-    <div class="border-2 rounded-lg p-3 text-center {fanOn ? 'bg-emerald-50 border-emerald-500' : 'bg-white border-gray-300'}">
-      <div class="text-xs {fanOn ? 'text-emerald-800' : 'text-gray-500'}">Fan</div>
-      <div class="text-2xl font-bold {fanOn ? 'text-emerald-700' : 'text-gray-400'}">
+    <!-- Fan stack: blades spin at fan % rate -->
+    <div class="border-2 rounded-lg p-2 flex flex-col items-center {fanOn ? 'bg-emerald-50 border-emerald-500' : 'bg-white border-gray-300'}">
+      <div class="text-xs {fanOn ? 'text-emerald-800' : 'text-gray-500'} mb-1">Fan</div>
+      <AnimatedFan pct={fanPctNum} running={fanOn} size={70}/>
+      <div class="text-lg font-bold {fanOn ? 'text-emerald-700' : 'text-gray-400'} mt-1">
         {fanSpeed === 'Off' ? 'OFF' : `${fanSpeed}%`}
       </div>
     </div>
 
-    <!-- Heat path: burner (onion) OR heat (potato), and cavity heat -->
+    <!-- Heat path: burner (onion) OR heat (potato), flame flickers when on -->
     {#if isOnion}
-      <div class="border-2 rounded-lg p-3 text-center {burnerOn ? 'bg-orange-100 border-orange-500' : 'bg-white border-gray-300'}">
-        <div class="text-xs {burnerOn ? 'text-orange-800' : 'text-gray-500'}">Burner</div>
-        <div class="text-2xl">{burnerOn ? '🔥' : '·'}</div>
+      <div class="border-2 rounded-lg p-2 flex flex-col items-center {burnerOn ? 'bg-orange-100 border-orange-500' : 'bg-white border-gray-300'}">
+        <div class="text-xs {burnerOn ? 'text-orange-800' : 'text-gray-500'} mb-1">Burner</div>
+        <AnimatedFlame active={burnerOn} size={56}/>
       </div>
     {:else}
-      <div class="border-2 rounded-lg p-3 text-center {heatOn ? 'bg-orange-100 border-orange-500' : 'bg-white border-gray-300'}">
-        <div class="text-xs {heatOn ? 'text-orange-800' : 'text-gray-500'}">Plenum Heat</div>
-        <div class="text-2xl">{heatOn ? '🔥' : '·'}</div>
+      <div class="border-2 rounded-lg p-2 flex flex-col items-center {heatOn ? 'bg-orange-100 border-orange-500' : 'bg-white border-gray-300'}">
+        <div class="text-xs {heatOn ? 'text-orange-800' : 'text-gray-500'} mb-1">Plenum Heat</div>
+        <AnimatedFlame active={heatOn} size={56}/>
       </div>
     {/if}
 
-    <!-- Bottom damper -->
-    <div class="bg-white border-2 rounded-lg p-3 text-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
-      <div class="text-xs text-gray-500">Bottom Damper</div>
-      <div class="text-2xl font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'}">{doorsPct}%</div>
+    <!-- Bottom damper: same animated louvers -->
+    <div class="bg-white border-2 rounded-lg p-2 flex flex-col items-center {doorsPct > 5 ? 'border-blue-500' : 'border-gray-300'}">
+      <div class="text-xs text-gray-500 mb-1">Bottom Damper</div>
+      <AnimatedDamper pct={doorsPct} width={90} height={70}/>
+      <div class="text-lg font-bold {doorsPct > 5 ? 'text-blue-600' : 'text-gray-400'} mt-1">{doorsPct}%</div>
     </div>
 
-    <!-- Cavity heat (if onion build) -->
+    <!-- Cavity heat (if onion build): inline flame indicator -->
     {#if cavityHeatOn !== undefined}
-      <div class="border-2 rounded-lg p-2 text-center text-xs {cavityHeatOn ? 'bg-amber-100 border-amber-500' : 'bg-white border-gray-200'}">
-        <span class="font-bold">Cavity Heat</span>
-        <span class={cavityHeatOn ? 'text-amber-700 font-bold' : 'text-gray-400'}>
-          {cavityHeatOn ? 'ON' : 'OFF'}
-        </span>
+      <div class="border-2 rounded-lg p-2 flex items-center justify-center gap-2 text-xs {cavityHeatOn ? 'bg-amber-100 border-amber-500' : 'bg-white border-gray-200'}">
+        <AnimatedFlame active={cavityHeatOn} size={28}/>
+        <div>
+          <div class="font-bold">Cavity Heat</div>
+          <div class={cavityHeatOn ? 'text-amber-700 font-bold' : 'text-gray-400'}>
+            {cavityHeatOn ? 'ON' : 'OFF'}
+          </div>
+        </div>
       </div>
     {/if}
   </div>
@@ -291,22 +313,23 @@
       {/each}
     </svg>
 
-    <!-- Airflow arrows (top row, animated via CSS pulse) -->
-    <div class="absolute top-2 left-0 right-0 flex justify-around text-blue-300 text-2xl select-none pointer-events-none">
-      {#each Array(8) as _, i (i)}
-        <span class="airflow-arrow" style="animation-delay: {i * 120}ms">↪</span>
-      {/each}
+    <!-- Curved airflow: arrows travel along arcs over the pile when
+         the fan is running. Speed scales with fanPct. -->
+    <div class="absolute inset-0 pointer-events-none">
+      <AnimatedAirflow fanPct={fanPctNum} running={fanOn} arrowCount={5}/>
     </div>
 
-    <!-- Sensor labels overlaid spatially -->
+    <!-- Sensor labels overlaid spatially — each shifts color based on
+         delta from plenum setpoint so hot/cold spots stand out. -->
     <div class="absolute inset-0 grid grid-rows-3 grid-cols-3 gap-2 p-6 pt-12 pb-20">
       {#each pileSensors as row, ri (ri)}
         {#each row as cell, ci (ci)}
           <div class="flex {ri === 0 ? 'items-start' : ri === 1 ? 'items-center' : 'items-end'} {ci === 0 ? 'justify-start' : ci === 1 ? 'justify-center' : 'justify-end'}">
-            <div class="bg-orange-300 bg-opacity-90 rounded-md px-2 py-1 shadow-md border border-orange-700">
-              <div class="text-[10px] text-gray-700 leading-tight">{cell.label}</div>
-              <div class="font-bold text-sm leading-tight">{cell.t}°F</div>
-            </div>
+            <SensorBadge
+              label={cell.label}
+              value={ss?.plenumTemp ?? null}
+              setpoint={ps?.tempSetpoint ?? null}
+            />
           </div>
         {/each}
       {/each}
@@ -349,7 +372,7 @@
   <!-- ──── RIGHT PANEL (data cards) ──────────────────────────────── -->
   <div class="col-span-3 flex flex-col gap-2">
 
-    <!-- Refrigeration card -->
+    <!-- Refrigeration card with animated coil -->
     <div class="border-2 rounded-lg p-3 {refrigPct > 5 ? 'bg-sky-50 border-sky-500' : 'bg-white border-gray-300'}">
       <div class="flex justify-between items-baseline">
         <div class="font-bold text-sm">Refrigeration</div>
@@ -357,9 +380,14 @@
           {(rs as any)?.refrigMode === 0 ? 'ECO' : (rs as any)?.refrigMode === 1 ? 'REFRIG' : (rs as any)?.refrigMode === 2 ? 'ENTH' : ''}
         </div>
       </div>
-      <div class="text-4xl font-bold {refrigPct > 5 ? 'text-sky-700' : 'text-gray-400'}">{refrigPct}%</div>
-      <div class="text-xs text-gray-500">
-        Output {outputDemandLabel === 'Refrigeration Output' ? 'demand' : ''}
+      <div class="flex items-center gap-2 mt-1">
+        <AnimatedRefrigCoil pct={refrigPct} active={refrigPct > 5} size={110}/>
+        <div>
+          <div class="text-4xl font-bold {refrigPct > 5 ? 'text-sky-700' : 'text-gray-400'}">{refrigPct}%</div>
+          <div class="text-xs text-gray-500">
+            {outputDemandLabel === 'Refrigeration Output' ? 'demand' : 'idle'}
+          </div>
+        </div>
       </div>
     </div>
 
@@ -432,13 +460,7 @@
 </div>
 
 <style>
-  @keyframes airflow {
-    0%   { opacity: 0.3; transform: translateX(0); }
-    50%  { opacity: 0.9; transform: translateX(8px); }
-    100% { opacity: 0.3; transform: translateX(0); }
-  }
-  .airflow-arrow {
-    display: inline-block;
-    animation: airflow 1.6s ease-in-out infinite;
-  }
+  /* All equipment animations live in their respective components
+     (AnimatedFan / AnimatedDamper / AnimatedClimacell / AnimatedFlame /
+     AnimatedRefrigCoil / AnimatedAirflow). This file is layout-only. */
 </style>
