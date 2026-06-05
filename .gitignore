@@ -183,3 +183,12 @@ _restart_bridge.sh
 # main.c.bak.pre-enet, makefile.bak.pre-enet).
 *.bak
 *.bak.*
+
+# Pi5 SSD images (large binaries — never commit; the .md manifest IS tracked)
+backups/*.img
+backups/*.img.gz
+backups/*.gz
+backups/*.zst
+# local sudo-password file used by image_pi5.sh (never commit)
+.pi_sudo_pw
+pi_sudo_pw*
