@@ -19,16 +19,18 @@
   import PlenumSetpointsForm from "$lib/components/PlenumSetpointsForm.svelte";
   import HumidifierControlForm from "$lib/components/HumidifierControlForm.svelte";
   import RefrigerationForm from "$lib/components/RefrigerationForm.svelte";
+  import Flag from "$lib/components/Flag.svelte";
 
   // ─── Language switch — reuses the app's svelte-i18n + persisted localeStore.
   //   Adding a language = one row here + a matching locales/<code>.json
-  //   (registered in lib/i18n.ts). `tag` is a kiosk-safe 2-char marker, NOT a
-  //   flag emoji — Pi/Linux Chromium renders flag emoji as "US"/"CN" letterboxes.
+  //   (registered in lib/i18n.ts) + a flag branch in Flag.svelte. Flags are
+  //   inline SVG (Flag.svelte), NOT flag emoji — Pi/Linux Chromium has no
+  //   flag-emoji font and would render those as "US"/"CN" letterboxes.
   const LANGS = [
-    { code: "en", tag: "EN", label: "English" },
-    { code: "es", tag: "ES", label: "Español" },
-    { code: "fr", tag: "FR", label: "Français" },
-    { code: "zh", tag: "中", label: "中文" },
+    { code: "en", label: "English" },
+    { code: "es", label: "Español" },
+    { code: "fr", label: "Français" },
+    { code: "zh", label: "中文" },
   ];
   let langOpen = false;
   $: curLang = LANGS.find((l) => ($locale ?? "en").toLowerCase().startsWith(l.code)) ?? LANGS[0];
@@ -431,7 +433,7 @@
     <!-- language switch (top-right) — drives the app-wide locale -->
     <div class="tb-lang">
       <button class="lang-btn" on:click={() => (langOpen = !langOpen)} aria-haspopup="listbox" aria-expanded={langOpen}>
-        <span class="lang-flag">{curLang.tag}</span>
+        <Flag code={curLang.code} />
         <span class="lang-name">{curLang.label}</span>
         <span class="lang-caret">▾</span>
       </button>
@@ -441,7 +443,7 @@
           {#each LANGS as l (l.code)}
             <button class="lang-item" class:active={l.code === curLang.code} role="option"
                     aria-selected={l.code === curLang.code} on:click={() => setLang(l.code)}>
-              <span class="lang-flag">{l.tag}</span> {l.label}
+              <Flag code={l.code} /> {l.label}
             </button>
           {/each}
         </div>
@@ -812,8 +814,7 @@
   .tb-lang { position:relative; }
   .lang-btn { display:flex; align-items:center; gap:7px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:7px 12px; font-size:13px; font-weight:600; cursor:pointer; }
   .lang-btn:hover { border-color:#475569; }
-  /* kiosk-safe code badge (no flag emoji — Pi Chromium can't render those) */
-  .lang-flag { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:18px; padding:0 4px; font-size:11px; font-weight:800; line-height:1; letter-spacing:0.3px; color:#93c5fd; background:#16233b; border:1px solid #334155; border-radius:5px; }
+  /* flag chips (inline SVG via Flag.svelte — see lang-btn / lang-item) */
   .lang-caret { font-size:10px; color:#64748b; }
   .lang-scrim { position:fixed; inset:0; background:transparent; border:none; z-index:40; cursor:default; }
   .lang-menu { position:absolute; right:0; top:calc(100% + 6px); z-index:41; background:#0f1827; border:1px solid #334155; border-radius:10px; padding:4px; min-width:148px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
