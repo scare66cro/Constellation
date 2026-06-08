@@ -25,7 +25,9 @@
 
   const localeOptions = [
     { text: 'English', value: 'en' },
-    { text: 'Chinese', value: 'zh' },
+    { text: 'Español', value: 'es' },
+    { text: 'Français', value: 'fr' },
+    { text: '中文', value: 'zh' },
   ];
 
   async function changeLocale() {

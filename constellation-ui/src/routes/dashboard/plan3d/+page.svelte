@@ -11,24 +11,56 @@
   // ═══════════════════════════════════════════════════════════════════
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
-  import { systemStatus, sensorData, warningReport, plenumSettings } from "$lib/business/protoStores";
+  import { systemStatus, sensorData, warningReport, plenumSettings, equipmentStatus } from "$lib/business/protoStores";
+  import { navigationStore, frontMatterStore, modeToColorStore, localeStore } from "$lib/store";
+  import { locale } from "svelte-i18n";
+  import { INPUT_GOOD, OUTPUT_ON } from "$lib/business/mode";
+  import { EQ } from "$lib/business/equipmentEnum";
+  import PlenumSetpointsForm from "$lib/components/PlenumSetpointsForm.svelte";
+  import HumidifierControlForm from "$lib/components/HumidifierControlForm.svelte";
+  import RefrigerationForm from "$lib/components/RefrigerationForm.svelte";
 
-  // ─── Live proto data (read-only) — live value, else faked drift ────
+  // ─── Language switch — reuses the app's svelte-i18n + persisted localeStore.
+  //   Adding a language = one row here + a matching locales/<code>.json
+  //   (registered in lib/i18n.ts). `tag` is a kiosk-safe 2-char marker, NOT a
+  //   flag emoji — Pi/Linux Chromium renders flag emoji as "US"/"CN" letterboxes.
+  const LANGS = [
+    { code: "en", tag: "EN", label: "English" },
+    { code: "es", tag: "ES", label: "Español" },
+    { code: "fr", tag: "FR", label: "Français" },
+    { code: "zh", tag: "中", label: "中文" },
+  ];
+  let langOpen = false;
+  $: curLang = LANGS.find((l) => ($locale ?? "en").toLowerCase().startsWith(l.code)) ?? LANGS[0];
+  function setLang(code: string) { localeStore.set(code); locale.set(code); langOpen = false; }
+
+  // ─── TEMPORARY access unlock ──────────────────────────────────────
+  // The form gates editing on `navigationStore.level > 0`; the dashboard
+  // runs at level 0, so program/settings fields are read-only. This
+  // button bumps the level directly so equipment can be programmed from
+  // the spatial UI during bring-up.
+  // TODO(auth): replace with Azure website account permissions + auto
+  //   sign-in over Bluetooth — no manual unlock button in production.
+  $: programUnlocked = $navigationStore.level > 0;
+  function toggleProgram() {
+    $navigationStore.level = programUnlocked ? 0 : 2;
+  }
+
+  // ─── Live controller data (read-only). Production: real values only —
+  //   no fabricated/demo fallbacks. Missing value → "—" (see f0/f1). ──
   $: ss = $systemStatus;
   $: sd = $sensorData;
-  const lv = (live: number | null | undefined, fake: number): number =>
-    (live != null && Number.isFinite(live)) ? live : fake;
+  // Live-only display: real controller value, or "—" when absent. NO
+  // fabricated/demo values — plan3d is production and reads the live
+  // controller exclusively.
+  const f1 = (v: number | null | undefined): string =>
+    Number.isFinite(v as number) ? (v as number).toFixed(1) : "—";
+  const f0 = (v: number | null | undefined): string =>
+    Number.isFinite(v as number) ? (v as number).toFixed(0) : "—";
   const sensorAt = (arr: any[] | undefined, i: number): number | null => {
     const r = arr?.[i];
     return (r && r.valid !== false && Number.isFinite(r.value)) ? r.value : null;
   };
-
-  // tick for gentle drift
-  let t = 0;
-  let timer: ReturnType<typeof setInterval> | null = null;
-  onMount(() => { timer = setInterval(() => (t += 1), 1200); });
-  onDestroy(() => { if (timer) clearInterval(timer); });
-  const wob = (seed: number, amp: number): number => Math.sin((t + seed * 1.7) * 0.5) * amp;
 
   // ─── Header: clock / mode / alarms / setpoints ────────────────────
   let now = new Date();
@@ -38,48 +70,117 @@
   $: clockStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   $: dateStr  = now.toLocaleDateString([], { month: "short", day: "numeric" });
 
-  function stateToMode(s: number) {
-    switch (s) {
-      case 28: return { label: "Refrigeration", dot: "#0ea5e9", tint: "#f0f9ff" };
-      case 5: case 24: return { label: "Curing", dot: "#f59e0b", tint: "#fffbeb" };
-      case 18: return { label: "CO₂ Purge", dot: "#14b8a6", tint: "#f0fdfa" };
-      case 34: return { label: "Standby", dot: "#94a3b8", tint: "#f8fafc" };
-      case 33: return { label: "Shutdown", dot: "#ef4444", tint: "#fef2f2" };
-      case 11: return { label: "Failure", dot: "#b91c1c", tint: "#fee2e2" };
-      default: return { label: "Cooling", dot: "#10b981", tint: "#ecfdf5" };
-    }
+  // Canonical mode label + color — the SAME map the production header uses
+  //   ($modeToColorStore[currentMode], populated in +layout, potato/onion
+  //   aware). Reads SystemStatus.current_mode (the UI mode code), NOT
+  //   systemState — the earlier hand-rolled table mis-mapped them
+  //   (e.g. showed "Curing" in potato/refrigeration mode).
+  $: mc = $modeToColorStore?.[ss?.currentMode ?? 0] ?? { color: "#94a3b8", text: "" };
+  // Some mode colours (Failure #5c1212, remote-off, shutdown 'black') are
+  // dark accents meant for a light header — unreadable as text on the dark
+  // dashboard chip. Brighten toward white so the mode is always legible
+  // while still shifting hue per mode. Fall back to the raw mode number if
+  // the label map hasn't loaded.
+  function brighten(c: string, amt = 0.55): string {
+    if (typeof c !== "string" || c[0] !== "#" || c.length !== 7) return "#cbd5e1";
+    const ch = (i: number) => parseInt(c.slice(i, i + 2), 16);
+    const mix = (v: number) => Math.round(v + (255 - v) * amt).toString(16).padStart(2, "0");
+    return `#${mix(ch(1))}${mix(ch(3))}${mix(ch(5))}`;
   }
-  $: mode = stateToMode(ss?.systemState ?? 6);
+  $: mode = {
+    label: mc.text || `Mode ${ss?.currentMode ?? "—"}`,
+    dot: mc.color || "#94a3b8",
+    color: brighten(mc.color || "#94a3b8"),
+  };
   $: wr = $warningReport;
   $: alarms = (wr as any)?.entries ?? (wr as any)?.alarms ?? [];
   $: alarmCount = Array.isArray(alarms) ? alarms.length : 0;
   $: pls = $plenumSettings;
-  $: tempSP = lv((pls as any)?.tempSetpoint, 42);
+  $: tempSP = (pls as any)?.tempSetpoint;
 
   // readouts
-  $: outsideTemp = lv(ss?.outsideTemp, 47);
-  $: plenumT = lv(ss?.plenumTemp, 41 + wob(5, 0.5));
-  $: plenumH = lv(ss?.plenumHumid, 92 + wob(6, 1.2));
-  $: returnT = lv(ss?.returnTemp, 52 + wob(7, 0.6));
-  $: returnH = lv(ss?.returnHumid, 85 + wob(8, 1.2));
-  $: co2v = lv(ss?.co2Level, 640 + Math.round(wob(9, 18)));
+  $: outsideTemp = ss?.outsideTemp;
+  $: plenumT = ss?.plenumTemp;
+  $: plenumH = ss?.plenumHumid;
+  $: returnT = ss?.returnTemp;
+  $: returnH = ss?.returnHumid;
+  $: co2v = ss?.co2Level;
   let locked = false;   // edit-lock: when on, pieces can't be dragged
 
-  // ─── Mock settings popup (clicking the PLENUM card opens the plenum
-  //   setpoints page as a modal — mirrors level1/plentemp fields). ──
-  let settingsOpen = false;
+  // ─── Equipment settings modal ─────────────────────────────────────
+  //   Generic dispatcher: clicking an equipment hotspot sets `activeModal`
+  //   to a key; the modal renders the matching shared *Form.svelte (the
+  //   SAME component its classic page uses — real writeProto save path).
+  //   Adding a migrated form = one entry in MODAL_TITLES + one hotspot +
+  //   one {:else if} branch. docs/spatial-ui-page-migration.md
+  type ModalKey = 'plenum' | 'humidifier' | 'refrig';
+  const MODAL_TITLES: Record<ModalKey, string> = {
+    plenum: 'Plenum Setpoints & Alarms',
+    humidifier: 'Humidifier Control',
+    refrig: 'Refrigeration Setup',
+  };
+  let activeModal: ModalKey | null = null;
+  let modalUnit: number | null = null;  // for per-unit forms (e.g. humidifier head)
   let justMoved = false;   // distinguishes a tap (open) from a drag (move)
-  let mSetT = 42, mSetH = 95, mUseRamp = false;
-  let mRampRate = 0.5, mRampHrs = 4, mRampTarget = 38;
-  let mAloDeg = 3, mAloMin = 30, mAhiDeg = 3, mAhiMin = 30;
-  let mSaved = false;
-  function saveMock() { mSaved = true; setTimeout(() => { mSaved = false; settingsOpen = false; }, 900); }
+  let modalForm: { flush: () => Promise<void> } | undefined;
+  let saving = false;
+  function openModal(key: ModalKey, unit: number | null = null) {
+    if (justMoved) return;   // a drag just ended — don't treat as a tap
+    modalUnit = unit;
+    activeModal = key;
+  }
+  // Per-unit modal title (humidifier #1/#2/#3); static otherwise.
+  $: modalTitle = !activeModal ? ''
+    : activeModal === 'humidifier' && modalUnit !== null
+      ? `Humidifier #${modalUnit + 1} Control`
+      : MODAL_TITLES[activeModal];
+
+  // ─── Humidifier head IO-config assignment ─────────────────────────
+  //   panel[14]/[18]/[22] = the IO-config output-port assignment for
+  //   HUMID_HEAD1/2/3 ('-1' when unassigned — see frontMatterComposite).
+  //   A head's 3D hotspot renders only when its port is assigned, and its
+  //   modal is locked to that unit.
+  $: humPanel = ($frontMatterStore?.panel as string[]) ?? [];
+  $: humAssigned = [humPanel[14], humPanel[18], humPanel[22]].map((p) => p !== undefined && p !== '-1');
+
+  // ─── Humidifier running state (mist) — production logic ────────────
+  //   Per AS2 CtrlHumidifier (Controls.c:1500-1516): the atomizer HEAD
+  //   latches ON whenever the unit is active (runs continuously to avoid
+  //   rust/wear) and the PUMP is the duty-cycled output in ALL modes
+  //   (manual/timer/auto) — pump-on == active misting. So the mist tracks
+  //   the PUMP output (panel[17/21/25]), gated by the head proving input
+  //   (panel[15/19/23]) so an un-proven/failed unit shows no mist. The pump
+  //   cycles on a seconds-scale duty in timer/auto mode, so the mist
+  //   visibly pulses with it. (Don't gate on the head output — it stays on
+  //   through the pump's off-half, which would make the mist look constant.)
+  //     per head u: head proving in = 15+4u, head out = 16+4u, pump out = 17+4u
+  function isHumRunning(panel: string[], u: number): boolean {
+    return panel[15 + u * 4] === INPUT_GOOD
+      && panel[17 + u * 4] === OUTPUT_ON;
+  }
+  $: humOn = [0, 1, 2].map((u) => isHumRunning(humPanel, u));
+  // Close behaviour: anything EXCEPT Cancel autosaves. The X, the overlay
+  // backdrop, and the Save button all flush the form's dirty sub-forms;
+  // Cancel just closes (the form component is destroyed, discarding edits).
+  async function closeModal(persist = true) {
+    if (persist && modalForm) {
+      saving = true;
+      try { await modalForm.flush(); }
+      catch (e) { console.error('[plan3d] settings save failed:', e); }
+      finally { saving = false; }
+    }
+    activeModal = null;
+    modalUnit = null;
+  }
 
   // ─── Sensor health ────────────────────────────────────────────────
-  type Health = "ok" | "warn" | "alarm";
-  const pileHealth = (v: number): Health => (v >= 53 ? "alarm" : v >= 48 ? "warn" : "ok");
-  const co2Health = (v: number): Health => (v >= 1500 ? "alarm" : v >= 1000 ? "warn" : "ok");
-  const healthColor = (h: Health): string => (h === "alarm" ? "#ef4444" : h === "warn" ? "#f59e0b" : "#10b981");
+  type Health = "ok" | "warn" | "alarm" | "nodata";
+  const pileHealth = (v: number | null | undefined): Health =>
+    !Number.isFinite(v as number) ? "nodata" : ((v as number) >= 53 ? "alarm" : (v as number) >= 48 ? "warn" : "ok");
+  const co2Health = (v: number | null | undefined): Health =>
+    !Number.isFinite(v as number) ? "nodata" : ((v as number) >= 1500 ? "alarm" : (v as number) >= 1000 ? "warn" : "ok");
+  const healthColor = (h: Health): string =>
+    h === "alarm" ? "#ef4444" : h === "warn" ? "#f59e0b" : h === "nodata" ? "#64748b" : "#10b981";
 
   // pile probes (P1..P4 × 2 bays), live or fallback
   interface Station { id: string; bay: 1 | 2; p: 1 | 2 | 3 | 4; base: number; idx: number; }
@@ -93,16 +194,55 @@
     { id: "b2p3", bay: 2, p: 3, base: 46, idx: 6 },
     { id: "b2p4", bay: 2, p: 4, base: 54, idx: 7 },
   ];
-  $: stationVal = (s: Station): number => sensorAt(sd?.temperatures, s.idx) ?? (s.base + wob(s.base, 0.6));
+  $: stationVal = (s: Station): number | null => sensorAt(sd?.temperatures, s.idx);
 
   // concept equipment state (toggles drive the iso scene)
-  let doorsPct = 100;
-  let cavityHeat = true;
-  let refrigState: "off" | "cool" | "defrost" = "cool";
-  const cycleRefrig = () => { refrigState = refrigState === "off" ? "cool" : refrigState === "cool" ? "defrost" : "off"; };
+  // Fresh-air door output — REAL value: SystemStatus.pwm_doors_pct (field 20,
+  // 0..100, the PWM_DOORS % the engine drives). Same source the home page /
+  // equipment page use. Read-only on the dashboard; the 3D door angle (`dth`)
+  // follows it.
+  $: doorsPct = Math.round(ss?.pwmDoorsPct ?? 0);
+
+  // ─── Real equipment output state (production) ─────────────────────
+  //   plan3d is production now → plenum animations reflect REAL Nova
+  //   equipment state, not demo toggles. EquipmentStatus.items is a sparse
+  //   list keyed by eqIndex; outputOn = the firmware-driven output coil.
+  $: eqOut = (() => {
+    const m: Record<number, boolean> = {};
+    for (const it of ($equipmentStatus?.items ?? [])) m[it.eqIndex] = !!it.outputOn;
+    return m;
+  })();
+  $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
+  $: heatOn = !!eqOut[EQ.HEAT];
+  // Refrigeration cooling output %. Refrigeration can be delivered three
+  // ways (see CtrlRefrig): discrete AS2 stages, a 4-20mA AO (PWM_REFRIG,
+  // SystemStatus.pwm_refrig_pct), or a TRITON orbit. So "cooling" must check
+  // the AO %, not just the discrete stage coils — otherwise an AO/TRITON
+  // install (95% output, no stage coils) shows the coil dead.
+  $: refrigPct = ss?.pwmRefrigPct ?? 0;
+  // any defrost output → defrost; else AO output OR a cool stage / refrig
+  // master → cool; else off.
+  $: refrigState = (eqOut[EQ.REFRIG_DEFROST1] || eqOut[EQ.REFRIG_DEFROST2])
+    ? "defrost"
+    : (refrigPct > 0 || eqOut[EQ.REFRIGERATION] || eqOut[EQ.REFRIG_STAGE1]
+        || eqOut[EQ.REFRIG_STAGE2] || eqOut[EQ.REFRIG_STAGE3] || eqOut[EQ.REFRIG_STAGE4])
+      ? "cool" : "off";
   $: refrigColor = refrigState === "defrost" ? "#ef4444" : refrigState === "off" ? "#94a3b8" : "#3b82f6";
-  let humidPump = true;
-  let heatOn = false;
+
+  // ─── Fan output → blade spin speed + readout ──────────────────────
+  //   SystemStatus.fan_speed is a string ("75%" / "Manual" / "Off"). Parse
+  //   a 0..100 % for the spin; faster as % rises, blades STOP at 0 (fan off).
+  $: fanRaw = (ss?.fanSpeed ?? "").toString();
+  $: fanPct = (() => {
+    if (/off/i.test(fanRaw)) return 0;
+    const m = fanRaw.match(/(\d+(?:\.\d+)?)/);
+    if (m) return Math.round(parseFloat(m[1]));
+    return /manual/i.test(fanRaw) ? 100 : 0;
+  })();
+  $: fanSpinning = fanPct > 0;
+  // 100% → ~0.18 s/rev (fast blur); ~5% → ~2.5 s/rev (slow).
+  $: fanSpinDur = fanSpinning ? Math.max(0.18, 2.6 - (fanPct / 100) * 2.42).toFixed(2) : "1.1";
+  $: fanDisplay = fanRaw ? (/^\d+(?:\.\d+)?$/.test(fanRaw) ? fanRaw + "%" : fanRaw) : "—";
 
   // ═══ ISOMETRIC PROJECTION ═════════════════════════════════════════
   // World: x = length (0..L), y = depth/across (0..D), z = up.
@@ -130,6 +270,18 @@
   const spineCy = (SPINE.y0 + SPINE.y1) / 2;
   const finXs = Array.from({ length: 13 }, (_, i) => -34 + i * 5.7);   // refrig coil fins
   const fluteXs = Array.from({ length: 10 }, (_, i) => -33 + i * 7.3);  // climacell media flutes
+  // Climacell water = droplets raining down the media. 8 columns × 2 phases
+  // = continuous rain per column; index-based jitter in x / delay / speed so
+  // it doesn't look like a marching grid.
+  const ccDrops = Array.from({ length: 16 }, (_, i) => {
+    const col = i % 8;
+    return {
+      id: i,
+      x: -32 + col * 9.1 + ((i % 3) - 1) * 1.6,
+      delay: +(((i * 0.41) % 1.7)).toFixed(2),
+      dur: +(1.25 + (col % 4) * 0.18 + (i >= 8 ? 0.1 : 0)).toFixed(2),
+    };
+  });
   // crest/slope surface height within a bay
   function surfH(bay: { y0: number; y1: number; h: number }, y: number): number {
     const cy = (bay.y0 + bay.y1) / 2;
@@ -198,8 +350,13 @@
     const cur = svgPoint(e);
     const dxy = (cur.x - grabSvg.x) / A;     // Δ(x − y)
     const sxy = (cur.y - grabSvg.y) / B;     // Δ(x + y) — z is constant, cancels
+    // Readout cards may be placed in the FOREGROUND, past the front rim (the
+    // red building-cutaway line at y=D); equipment/sensors stay in the
+    // building footprint.
+    const isCard = dragId === 'plenum' || dragId === 'return';
+    const yMax = isCard ? D + 90 : D - 2;
     const nx = Math.max(10, Math.min(L - 10, grabWorld.x + (dxy + sxy) / 2));
-    const ny = Math.max(2,  Math.min(D - 2,  grabWorld.y + (sxy - dxy) / 2));
+    const ny = Math.max(2,  Math.min(yMax,   grabWorld.y + (sxy - dxy) / 2));
     dragPos = { ...dragPos, [dragId]: { x: nx, y: ny } };
   }
   function endDrag() {
@@ -238,6 +395,8 @@
   const doorLift = doorH3 / 2;                        // raise doors half their height above the wall top
   const doorBot = doorWallH + doorLift;
   const doorTop = doorWallH + doorH3 + doorLift;     // top-hinge line
+  // Anchor for the on-graphic door readout (billboard above the door section).
+  const doorTagPt = P(L, doorY0 + doorSpan / 2, doorTop + 24);
   $: dth = (doorsPct / 100) * (78 * Math.PI / 180);
   $: dXv = L - doorH3 * Math.sin(dth);              // leaf bottom x (inward, −x)
   $: dZv = doorTop - doorH3 * Math.cos(dth);        // leaf bottom z (= doorBot when closed)
@@ -260,50 +419,61 @@
       <span class="tb-name">Storage 1 · Building A</span>
       <span class="tb-clock">{dateStr} · {clockStr} · iso view</span>
     </div>
-    <div class="tb-mode" style="background:{mode.tint}">
-      <span class="dot" style="background:{mode.dot}"></span>
-      <span class="tb-mode-label">{mode.label}</span>
+    <div class="tb-mode" style="border-color:{mode.color}">
+      <span class="dot" style="background:{mode.color}"></span>
+      <span class="tb-mode-label" style="color:{mode.color}">{mode.label}</span>
     </div>
+    <div class="tb-right">
     <div class="tb-health" class:bad={alarmCount > 0}>
       <span class="hdot" class:ok={alarmCount === 0} class:alarm={alarmCount > 0}></span>
       {alarmCount > 0 ? `${alarmCount} Active Alarm${alarmCount > 1 ? 's' : ''}` : 'All Clear'}
+    </div>
+    <!-- language switch (top-right) — drives the app-wide locale -->
+    <div class="tb-lang">
+      <button class="lang-btn" on:click={() => (langOpen = !langOpen)} aria-haspopup="listbox" aria-expanded={langOpen}>
+        <span class="lang-flag">{curLang.tag}</span>
+        <span class="lang-name">{curLang.label}</span>
+        <span class="lang-caret">▾</span>
+      </button>
+      {#if langOpen}
+        <button class="lang-scrim" aria-label="Close language menu" on:click={() => (langOpen = false)}></button>
+        <div class="lang-menu" role="listbox">
+          {#each LANGS as l (l.code)}
+            <button class="lang-item" class:active={l.code === curLang.code} role="option"
+                    aria-selected={l.code === curLang.code} on:click={() => setLang(l.code)}>
+              <span class="lang-flag">{l.tag}</span> {l.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
     </div>
   </div>
 
   <!-- stats + a few concept controls -->
   <div class="hdr">
     <div class="hdr-stats">
-      <div class="stat"><span class="k">Outside</span><span class="v">{outsideTemp.toFixed(0)}°F</span></div>
-      <div class="stat"><span class="k">Plenum</span><span class="v">{plenumT.toFixed(1)}°</span><span class="u">SP {tempSP.toFixed(0)}</span></div>
-      <div class="stat"><span class="k">CO₂</span><span class="v">{co2v.toFixed(0)}</span><span class="u">ppm</span></div>
+      <div class="stat"><span class="k">Outside</span><span class="v">{f0(outsideTemp)}°F</span></div>
+      <div class="stat"><span class="k">Plenum</span><span class="v">{f1(plenumT)}°</span><span class="u">SP {f0(tempSP)}</span></div>
+      <div class="stat"><span class="k">CO₂</span><span class="v">{f0(co2v)}</span><span class="u">ppm</span></div>
+      <div class="stat"><span class="k">Fan</span><span class="v">{fanDisplay}</span></div>
     </div>
-    <label class="door-ctl">
-      <span class="dl">Doors</span>
-      <input type="range" min="0" max="100" bind:value={doorsPct}/>
-      <span class="dv">{doorsPct}%</span>
-    </label>
-    <button class="cavity-toggle" class:on={cavityHeat} on:click={() => cavityHeat = !cavityHeat}>
-      <span class="cdot" style={cavityHeat ? 'background:#ef4444;box-shadow:0 0 8px #ef4444' : ''}></span>
-      Cavity Heat {cavityHeat ? 'ON' : 'OFF'}
-    </button>
-    <button class="refrig-btn" data-st={refrigState} on:click={cycleRefrig}>
-      <span class="cdot" style="background:{refrigColor}"></span>
-      Refrig {refrigState === 'off' ? 'OFF' : refrigState === 'cool' ? 'COOL' : 'DEFROST'}
-    </button>
-    <button class="cavity-toggle" class:on={heatOn} on:click={() => heatOn = !heatOn}>
-      <span class="cdot" style={heatOn ? 'background:#f97316;box-shadow:0 0 8px #f97316' : ''}></span>
-      Heat {heatOn ? 'ON' : 'OFF'}
-    </button>
-    <button class="cavity-toggle" class:on={humidPump} on:click={() => humidPump = !humidPump}>
-      <span class="cdot" style={humidPump ? 'background:#38bdf8;box-shadow:0 0 8px #38bdf8' : ''}></span>
-      Humidify {humidPump ? 'ON' : 'OFF'}
-    </button>
+    <!-- Door readout moved onto the door graphic in the 3D scene. -->
+    <!-- Cavity-heat / refrigeration / heat / humidifier status pills removed —
+         those run live in the 3D scene now (wall tint, coil, flame, mist) and
+         in the center mode indicator. Header keeps only the door readout +
+         functional controls (lock, program). -->
     <button class="lock-btn" class:on={locked} on:click={() => locked = !locked}>
       {locked ? '🔒 Locked' : '🔓 Unlocked'}
+    </button>
+    <button class="prog-btn" class:on={programUnlocked} on:click={toggleProgram}
+      title="TEMPORARY: unlock program/settings editing. Production = Azure account permissions + Bluetooth auto sign-in.">
+      {programUnlocked ? '⚙ Program: ON' : '⚙ Program: OFF'}
     </button>
   </div>
 
   <svg viewBox="0 0 1200 470" class="plan" class:locked bind:this={svgEl} role="application" aria-label="Building plan 3D"
+       style="--fan-dur:{fanSpinDur}s; --fan-play:{fanSpinning ? 'running' : 'paused'}"
        on:pointermove={onDrag} on:pointerup={endDrag} on:pointerleave={endDrag}>
     <defs>
       <linearGradient id="spudA" x1="0" y1="0" x2="0" y2="1">
@@ -368,7 +538,8 @@
       <ellipse cx={base[0]} cy={base[1]} rx="18" ry="8" fill="#0f172a" opacity="0.5"/>
       <!-- shear matrix: panel stands as a wall across the plenum; draggable. -->
       <g transform="matrix({-A} {B} 0 1 {base[0]} {base[1]})" class="drag3"
-         on:pointerdown={(e) => startDrag(e, 'eq-' + eqb.type, eqb.x, spineCy)} role="button" tabindex="0">
+         on:pointerdown={(e) => startDrag(e, 'eq-' + eqb.type, eqb.x, spineCy)}
+         on:click={() => { if (eqb.type === 'refrig') openModal('refrig'); }} role="button" tabindex="0">
         {#if eqb.type === 'fan'}
           <!-- galvanized fan wall: round fans in square cells + solid lower panel -->
           <rect x="-38" y="-90" width="76" height="84" rx="2" fill="#aeb7c2" stroke="#5b6573" stroke-width="2"/>
@@ -407,8 +578,9 @@
             <line x1="-36" y1={hy} x2="36" y2={hy} stroke="#241a0f" stroke-width="1.2" opacity="0.7"/>
           {/each}
           <rect x="-38" y="-90" width="76" height="8" fill="#4a5663"/>
-          {#each [-26, -10, 6, 22] as u, k (u)}
-            <rect class="cc-drip" x={u} y="-82" width="2.4" height="12" rx="1" fill="#7dd3fc" opacity="0.8" style="animation-delay:{k * 0.4}s"/>
+          {#each ccDrops as drop (drop.id)}
+            <ellipse class="cc-drop" cx={drop.x} cy="-80" rx="1.5" ry="2.7" fill="#7dd3fc"
+                     style="animation-delay:{drop.delay}s; animation-duration:{drop.dur}s"/>
           {/each}
         {/if}
       </g>
@@ -429,27 +601,31 @@
       <polygon points={poly([L,y0,doorTop],[L,y1,doorTop],[dXv,y1,dZv],[dXv,y0,dZv])}
                fill="#cbd5e1" stroke="#475569" stroke-width="0.8" opacity="0.92"/>
     {/each}
+    <!-- live door readout ON the graphic (PWM_DOORS %) -->
+    <g transform="translate({doorTagPt[0]},{doorTagPt[1]})" class="door-tag">
+      <rect x="-30" y="-16" width="60" height="30" rx="7" fill="#0b1220"
+            stroke={doorsPct > 0 ? '#60a5fa' : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+      <text x="0" y="-4" text-anchor="middle" class="dtag-k">DOORS</text>
+      <text x="0" y="9"  text-anchor="middle" class="dtag-v"
+            fill={doorsPct > 0 ? '#bfdbfe' : '#94a3b8'}>{doorsPct}%</text>
+    </g>
 
-    <!-- ═══ DUCTING: plenum air ducted up/down into the piles ═══ -->
-    {#each [BAY1, BAY2] as bay (bay.y0)}
-      {@const cyb = (bay.y0 + bay.y1) / 2}
-      {@const sEdge = bay === BAY1 ? SPINE.y0 : SPINE.y1}
-      {#each [180, 340, 500] as x (x)}
-        {@const a = P(x, sEdge, 8)}
-        {@const c = P(x, cyb, bay.h * 0.7)}
-        <line x1={a[0]} y1={a[1]} x2={c[0]} y2={c[1]} stroke="#60a5fa" stroke-width="2"
-              stroke-dasharray="7 10" class="duct3" opacity="0.8"/>
-      {/each}
-    {/each}
-
-    <!-- ═══ HUMIDIFIERS + 3D mist on the plenum ═══ -->
-    {#each [315, 220, 125] as hx (hx)}
-      {@const hp2 = dragPos['hum-' + hx] ?? { x: hx, y: spineCy }}
+    <!-- ═══ HUMIDIFIERS + 3D mist on the plenum ═══
+         Order along the plenum (climacell media wall is at x=454, to the
+         RIGHT — screenX = OX + (x−y)·A, no x-flip): head #1 sits closest to
+         the climacell (highest x=315), then #2 (220) and #3 (125) to the
+         left. Each unit's x is fixed, so an unassigned head leaves its slot
+         empty rather than shifting the others. -->
+    {#each [{x:315,u:0},{x:220,u:1},{x:125,u:2}] as h (h.u)}
+      {#if humAssigned[h.u]}
+      {@const hp2 = dragPos['hum-' + h.x] ?? { x: h.x, y: spineCy }}
       {@const base = P(hp2.x, hp2.y, 0)}
       <ellipse cx={base[0]} cy={base[1]} rx="13" ry="6" fill="#0f172a" opacity="0.45"/>
-      <!-- aligned along the plenum; draggable. -->
+      <!-- aligned along the plenum; draggable. one hotspot per ASSIGNED head;
+           click opens that head's own control modal. -->
       <g transform="matrix({A} {B} 0 1 {base[0]} {base[1]})" class="drag3"
-         on:pointerdown={(e) => startDrag(e, 'hum-' + hx, hx, spineCy)} role="button" tabindex="0">
+         on:pointerdown={(e) => startDrag(e, 'hum-' + h.x, h.x, spineCy)}
+         on:click={() => openModal('humidifier', h.u)} role="button" tabindex="0">
         <!-- louvered sump cabinet (base) -->
         <rect x="-11" y="-17" width="22" height="17" rx="2" fill="#46566a" stroke="#1b232e" stroke-width="1"/>
         {#each [-7, -2, 3, 8] as lv (lv)}
@@ -466,8 +642,9 @@
         {#each [0, 60, 120] as a (a)}
           <line x1="-11" y1="-38" x2="-11" y2="-52" stroke="#7c8a9c" stroke-width="1" transform="rotate({a} -11 -38)"/>
         {/each}
-        <!-- mist off the disc, toward the door -->
-        {#if humidPump}
+        <!-- mist off the disc, toward the door — only when this head is
+             actually running per production logic (humOn[h.u]). -->
+        {#if humOn[h.u]}
           {#each [0, 1, 2] as k (k)}
             <g class="mistP" style="animation-delay:{k * 1.0}s" filter="url(#mist3)">
               <circle cx="-20" cy="-40" r="6"   fill="#8ba2bd"/>
@@ -477,6 +654,7 @@
           {/each}
         {/if}
       </g>
+      {/if}
     {/each}
 
     <!-- ═══ HEAT flame on the plenum ═══ -->
@@ -544,18 +722,18 @@
         <rect x="-26" y="-26" width="52" height="28" rx="7" fill="#0b1220" filter="url(#soft3)"/>
         <rect x="-26" y="-26" width="52" height="28" rx="7" fill="none" stroke={healthColor(hp)} stroke-width={hp === 'ok' ? 1 : 2.5} class:b-alarm={hp === 'alarm'}/>
         <text x="0" y="-14" text-anchor="middle" class="s-lbl">P{s.p} · B{s.bay}</text>
-        <text x="0" y="-2" text-anchor="middle" class="s-val" fill={hp === 'alarm' ? '#fecaca' : '#f8fafc'}>{v.toFixed(1)}°</text>
+        <text x="0" y="-2" text-anchor="middle" class="s-val" fill={hp === 'alarm' ? '#fecaca' : '#f8fafc'}>{f1(v)}°</text>
       </g>
     {/each}
 
     <!-- ═══ PLENUM readout card (draggable; click/tap opens setpoints) ═══ -->
     <g transform="translate({plenumPt[0]},{plenumPt[1]})" class="drag3"
        on:pointerdown={(e) => startDrag(e, 'plenum', 150, spineCy)}
-       on:click={() => { if (!justMoved) settingsOpen = true; }} role="button" tabindex="0">
+       on:click={() => openModal('plenum')} role="button" tabindex="0">
       <rect x="-36" y="-30" width="72" height="46" rx="8" fill="#0c4a6e" stroke="#0ea5e9" stroke-width="2" filter="url(#soft3)"/>
       <text x="0" y="-17" text-anchor="middle" class="card-hd">PLENUM ⚙</text>
-      <text x="0" y="0"  text-anchor="middle" class="card-big">{plenumT.toFixed(1)}°</text>
-      <text x="0" y="12" text-anchor="middle" class="card-sm">{plenumH.toFixed(0)}% RH</text>
+      <text x="0" y="0"  text-anchor="middle" class="card-big">{f1(plenumT)}°</text>
+      <text x="0" y="12" text-anchor="middle" class="card-sm">{f0(plenumH)}% RH</text>
     </g>
 
     <!-- ═══ RETURN AIR readout card (draggable) ═══ -->
@@ -563,9 +741,9 @@
        on:pointerdown={(e) => startDrag(e, 'return', 470, spineCy)} role="button" tabindex="0">
       <rect x="-42" y="-34" width="84" height="60" rx="8" fill="#0b1220" stroke="#38bdf8" stroke-width="1.5" filter="url(#soft3)"/>
       <text x="-34" y="-20" class="card-hd2">RETURN AIR</text>
-      <text x="-34" y="-5"  class="card-k">Temp</text><text x="36" y="-5" text-anchor="end" class="card-v">{returnT.toFixed(1)}°</text>
-      <text x="-34" y="8"   class="card-k">RH</text><text x="36" y="8" text-anchor="end" class="card-v">{returnH.toFixed(0)}%</text>
-      <text x="-34" y="21"  class="card-k">CO₂</text><text x="36" y="21" text-anchor="end" class="card-v" fill={healthColor(co2Health(co2v))}>{co2v.toFixed(0)}</text>
+      <text x="-34" y="-5"  class="card-k">Temp</text><text x="36" y="-5" text-anchor="end" class="card-v">{f1(returnT)}°</text>
+      <text x="-34" y="8"   class="card-k">RH</text><text x="36" y="8" text-anchor="end" class="card-v">{f0(returnH)}%</text>
+      <text x="-34" y="21"  class="card-k">CO₂</text><text x="36" y="21" text-anchor="end" class="card-v" fill={healthColor(co2Health(co2v))}>{f0(co2v)}</text>
     </g>
   </svg>
 
@@ -576,47 +754,30 @@
     <span class="hint">click the PLENUM card → setpoints · isometric prototype</span>
   </div>
 
-  <!-- ═══ MOCK SETTINGS POPUP — Plenum Setpoints & Alarms (level1/plentemp) ═══ -->
-  {#if settingsOpen}
-    <div class="ovl" role="presentation" on:click={() => settingsOpen = false}>
+  <!-- ═══ EQUIPMENT SETTINGS POPUP — shared *Form.svelte (real save path) ═══
+       Anything but Cancel autosaves: overlay / X / Save → flush, Cancel → discard. -->
+  {#if activeModal}
+    <div class="ovl" role="presentation" on:click={() => closeModal(true)}>
       <div class="dlg" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
         <header class="dlg-hd">
-          <span>Plenum Setpoints &amp; Alarms</span>
-          <button class="dlg-x" on:click={() => settingsOpen = false}>×</button>
+          <span>{modalTitle}</span>
+          <button class="dlg-x" title="Save & close" on:click={() => closeModal(true)}>×</button>
         </header>
         <div class="dlg-body">
-          <div class="fld">
-            <label for="sp-t">Plenum Temperature Setpoint</label>
-            <div class="inp"><input id="sp-t" type="number" bind:value={mSetT}/><span>°F</span></div>
-          </div>
-          <div class="fld">
-            <label for="sp-h">Plenum Humidity Setpoint</label>
-            <div class="inp"><input id="sp-h" type="number" bind:value={mSetH}/><span>%</span></div>
-          </div>
-          <label class="chk"><input type="checkbox" bind:checked={mUseRamp}/> Use ramp rate</label>
-          {#if mUseRamp}
-            <div class="ramp">
-              Change setpoint <input type="number" bind:value={mRampRate}/>°F every
-              <input type="number" bind:value={mRampHrs}/> h until it reaches
-              <input type="number" bind:value={mRampTarget}/>°F.
-            </div>
+          {#if activeModal === 'plenum'}
+            <PlenumSetpointsForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} />
+          {:else if activeModal === 'humidifier'}
+            <HumidifierControlForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} unit={modalUnit} />
+          {:else if activeModal === 'refrig'}
+            <RefrigerationForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} />
           {/if}
-
-          <div class="sec">Alarms</div>
-          <p class="alarm">
-            Alarm if plenum temperature is <strong>below</strong> setpoint by
-            <input type="number" bind:value={mAloDeg}/>°F for
-            <input type="number" bind:value={mAloMin}/> min, <em>or</em>
-            <strong>above</strong> setpoint by
-            <input type="number" bind:value={mAhiDeg}/>°F for
-            <input type="number" bind:value={mAhiMin}/> min.
-          </p>
         </div>
         <footer class="dlg-ft">
-          <span class="mock-tag">mock · not saved to controller</span>
-          {#if mSaved}<span class="saved-ok">✓ Saved</span>{/if}
-          <button class="btn ghost" on:click={() => settingsOpen = false}>Cancel</button>
-          <button class="btn save" on:click={saveMock}>Save</button>
+          <span class="ft-tag">edits autosave on close — Cancel to discard</span>
+          <button class="btn ghost" on:click={() => closeModal(false)} disabled={saving}>Cancel</button>
+          <button class="btn save" on:click={() => closeModal(true)} disabled={saving}>
+            {saving ? 'Saving…' : 'Save & Close'}
+          </button>
         </footer>
       </div>
     </div>
@@ -632,15 +793,33 @@
   .banner-actions button { background:#fff; border:1px solid #fdba74; color:#9a3412; border-radius:6px; padding:2px 10px; margin-left:8px; font-size:12px; cursor:pointer; }
   .stage { background:linear-gradient(160deg,#0b1220 0%,#1e293b 100%); min-height:calc(100vh - 30px); padding:12px 18px 20px; color:#e2e8f0; }
 
-  .titlebar { display:flex; align-items:center; gap:16px; background:#0b1220; border:1px solid #1e293b; border-radius:12px; padding:8px 16px; margin-bottom:10px; }
+  .titlebar { position:relative; display:flex; align-items:center; justify-content:space-between; gap:16px; background:#0b1220; border:1px solid #1e293b; border-radius:12px; padding:8px 16px; margin-bottom:10px; }
   .tb-id { display:flex; flex-direction:column; line-height:1.15; }
   .tb-name { font-size:16px; font-weight:800; color:#f1f5f9; }
   .tb-clock { font-size:12px; color:#94a3b8; font-variant-numeric:tabular-nums; }
-  .tb-mode { margin-left:auto; display:flex; align-items:center; gap:9px; padding:8px 18px; border-radius:999px; color:#0f172a; font-weight:700; }
-  .tb-mode-label { font-size:16px; }
+  /* center mode indicator — the color-changing centerpiece (border + dot +
+     label all driven by the live mode colour). Absolutely centred so the
+     left id-block and right health-pill don't shift it. */
+  .tb-mode { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    display:flex; align-items:center; gap:11px; padding:8px 26px; border-radius:999px;
+    background:#0b1220; border:2px solid #334155; font-weight:800; white-space:nowrap; }
+  .tb-mode .dot { width:14px; height:14px; }
+  .tb-mode-label { font-size:20px; letter-spacing:.02em; text-transform:uppercase; }
   .dot { width:10px; height:10px; border-radius:50%; box-shadow:0 0 8px currentColor; }
   .tb-health { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; padding:8px 16px; border-radius:999px; background:#052e1a; color:#86efac; border:1px solid #166534; }
   .tb-health.bad { background:#3a0d0d; color:#fecaca; border-color:#b91c1c; }
+  .tb-right { display:flex; align-items:center; gap:12px; }
+  .tb-lang { position:relative; }
+  .lang-btn { display:flex; align-items:center; gap:7px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:7px 12px; font-size:13px; font-weight:600; cursor:pointer; }
+  .lang-btn:hover { border-color:#475569; }
+  /* kiosk-safe code badge (no flag emoji — Pi Chromium can't render those) */
+  .lang-flag { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:18px; padding:0 4px; font-size:11px; font-weight:800; line-height:1; letter-spacing:0.3px; color:#93c5fd; background:#16233b; border:1px solid #334155; border-radius:5px; }
+  .lang-caret { font-size:10px; color:#64748b; }
+  .lang-scrim { position:fixed; inset:0; background:transparent; border:none; z-index:40; cursor:default; }
+  .lang-menu { position:absolute; right:0; top:calc(100% + 6px); z-index:41; background:#0f1827; border:1px solid #334155; border-radius:10px; padding:4px; min-width:148px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
+  .lang-item { display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; color:#cbd5e1; border-radius:7px; padding:8px 10px; font-size:14px; cursor:pointer; }
+  .lang-item:hover { background:#1e293b; }
+  .lang-item.active { color:#7dd3fc; font-weight:700; }
   .hdot { width:11px; height:11px; border-radius:50%; }
   .hdot.ok { background:#22c55e; box-shadow:0 0 8px #22c55e; }
   .hdot.alarm { background:#ef4444; box-shadow:0 0 8px #ef4444; animation:pulse 1.1s ease-in-out infinite; }
@@ -651,11 +830,11 @@
   .stat .k { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.05em; }
   .stat .v { font-size:18px; font-weight:700; color:#f8fafc; }
   .stat .u { font-size:11px; color:#64748b; }
-  .door-ctl { display:flex; align-items:center; gap:8px; margin-left:auto; background:#0b1220; border:1px solid #334155; border-radius:999px; padding:5px 14px; font-size:13px; color:#cbd5e1; }
-  .door-ctl .dl { color:#94a3b8; text-transform:uppercase; font-size:11px; }
-  .door-ctl .dv { font-weight:700; color:#f8fafc; min-width:38px; text-align:right; }
-  .door-ctl input[type=range] { accent-color:#60a5fa; width:110px; }
+  /* on-graphic door readout billboard */
+  :global(.plan .door-tag .dtag-k) { font-size:8px; fill:#94a3b8; font-weight:700; letter-spacing:.04em; }
+  :global(.plan .door-tag .dtag-v) { font-size:13px; font-weight:800; }
   .cavity-toggle, .refrig-btn { display:flex; align-items:center; gap:7px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+  .cavity-toggle.status, .refrig-btn.status { cursor:default; }
   .cavity-toggle.on { border-color:#ef4444; color:#fecaca; }
   .refrig-btn[data-st="cool"] { border-color:#3b82f6; color:#bfdbfe; }
   .refrig-btn[data-st="defrost"] { border-color:#ef4444; color:#fecaca; }
@@ -673,16 +852,18 @@
   :global(.plan.locked .drag3), :global(.plan.locked .pbadge3) { cursor: default; }
   .lock-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
   .lock-btn.on { border-color:#f59e0b; color:#fde68a; background:#3a2a07; }
+  /* TEMPORARY program-access toggle (see toggleProgram). */
+  .prog-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+  .prog-btn.on { border-color:#10b981; color:#bbf7d0; background:#06281d; }
   :global(.plan .card-hd)  { font-size:8px;  fill:#7dd3fc; font-weight:800; letter-spacing:.12em; }
   :global(.plan .card-big) { font-size:15px; fill:#ffffff; font-weight:800; }
   :global(.plan .card-sm)  { font-size:9px;  fill:#bae6fd; font-weight:600; }
   :global(.plan .card-hd2) { font-size:8px;  fill:#7dd3fc; font-weight:800; letter-spacing:.12em; }
   :global(.plan .card-k)   { font-size:9px;  fill:#94a3b8; }
   :global(.plan .card-v)   { font-size:11px; fill:#f8fafc; font-weight:700; }
-  :global(.plan .fan3-b) { transform-box:fill-box; transform-origin:center; animation:spin3 1.1s linear infinite; }
+  /* fan blades — spin speed driven by fan output % via --fan-dur; paused at 0 */
+  :global(.plan .fan3-b) { transform-box:fill-box; transform-origin:center; animation:spin3 var(--fan-dur,1.1s) linear infinite; animation-play-state:var(--fan-play,running); }
   @keyframes spin3 { to { transform:rotate(360deg); } }
-  :global(.plan .duct3) { animation: marchD 1.6s linear infinite; }
-  @keyframes marchD { to { stroke-dashoffset:-34; } }
   :global(.plan .cav-flow) { opacity:.2; }
   :global(.plan .cav-flow.on) { opacity:1; animation: marchR 1.5s linear infinite; }
   @keyframes marchR { to { stroke-dashoffset:-56; } }
@@ -698,34 +879,26 @@
   :global(.plan .rf-pulse) { animation: pulse 1.2s ease-in-out infinite; }
   :global(.plan .mistP) { transform-box:fill-box; animation: mistP 2.8s ease-out infinite; }
   @keyframes mistP { 0%{transform:translate(0,0) scale(.4);opacity:0} 25%{opacity:.7} 100%{transform:translate(-36px,-8px) scale(1.5);opacity:0} }
-  :global(.plan .cc-drip) { transform-box:fill-box; animation: ccdrip 1.4s linear infinite; }
-  @keyframes ccdrip { 0%{transform:translateY(0);opacity:0} 20%{opacity:.85} 100%{transform:translateY(46px);opacity:0} }
+  /* climacell water — droplets raining down the media (duration set per-drop inline) */
+  :global(.plan .cc-drop) { transform-box:fill-box; animation: ccrain 1.5s linear infinite; }
+  @keyframes ccrain { 0%{transform:translateY(0);opacity:0} 12%{opacity:.9} 80%{opacity:.85} 100%{transform:translateY(72px);opacity:0} }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
 
-  /* mock settings modal */
+  /* settings modal — hosts the shared PlenumSetpointsForm, reskinned dark
+     to match the dashboard chrome (the form stays light on its level1 page). */
   .ovl { position:fixed; inset:0; background:rgba(2,6,23,0.6); display:flex; align-items:center; justify-content:center; z-index:50; }
-  .dlg { width:440px; max-width:92vw; background:#0f1827; border:1px solid #334155; border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,0.5); overflow:hidden; }
-  .dlg-hd { display:flex; align-items:center; justify-content:space-between; padding:13px 18px; background:#0c4a6e; color:#e0f2fe; font-size:16px; font-weight:800; }
+  .dlg { width:760px; max-width:94vw; max-height:88vh; display:flex; flex-direction:column; background:#0f1827; border:1px solid #334155; border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,0.5); overflow:hidden; }
+  .dlg-hd { display:flex; align-items:center; justify-content:space-between; padding:13px 18px; background:#0c4a6e; color:#e0f2fe; font-size:16px; font-weight:800; flex:0 0 auto; }
   .dlg-x { background:none; border:none; color:#bae6fd; font-size:22px; line-height:1; cursor:pointer; }
-  .dlg-body { padding:16px 18px; color:#e2e8f0; }
-  .fld { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
-  .fld label { font-size:14px; color:#cbd5e1; }
-  .inp { display:flex; align-items:center; gap:6px; }
-  .inp input, .ramp input, .alarm input { width:62px; background:#0b1220; border:1px solid #475569; color:#f8fafc; border-radius:7px; padding:6px 8px; font-size:15px; text-align:center; }
-  .inp span { color:#64748b; font-size:13px; }
-  .chk { display:flex; align-items:center; gap:8px; font-size:14px; color:#cbd5e1; margin:4px 0 12px; }
-  .ramp { background:#0b1220; border:1px solid #1e293b; border-radius:8px; padding:10px 12px; font-size:13px; line-height:2; color:#cbd5e1; margin-bottom:12px; }
-  .ramp input { width:54px; }
-  .sec { font-size:12px; font-weight:700; color:#7dd3fc; text-transform:uppercase; letter-spacing:.08em; border-top:1px solid #1e293b; padding-top:12px; margin-bottom:8px; }
-  .alarm { font-size:13px; line-height:2.1; color:#cbd5e1; margin:0; }
-  .alarm input { width:50px; }
-  .alarm strong { color:#f8fafc; } .alarm em { color:#94a3b8; font-style:normal; }
-  .dlg-ft { display:flex; align-items:center; gap:10px; padding:12px 18px; background:#0b1220; border-top:1px solid #1e293b; }
-  .mock-tag { font-size:11px; color:#64748b; font-style:italic; margin-right:auto; }
-  .saved-ok { color:#86efac; font-size:13px; font-weight:700; }
+  .dlg-body { flex:1 1 auto; overflow:auto; background:#0f1827; padding:10px 16px 4px; }
+  .dlg-ft { display:flex; align-items:center; gap:10px; padding:12px 18px; background:#0b1220; border-top:1px solid #1e293b; flex:0 0 auto; }
+  .ft-tag { font-size:11px; color:#64748b; font-style:italic; margin-right:auto; }
   .btn { border-radius:8px; padding:8px 18px; font-size:14px; font-weight:600; cursor:pointer; border:1px solid #334155; }
+  .btn:disabled { opacity:.5; cursor:default; }
   .btn.ghost { background:#1e293b; color:#cbd5e1; }
   .btn.save { background:#0ea5e9; color:#04293b; border-color:#0ea5e9; }
+  /* The form's dark skin now lives inside PlenumSetpointsForm (theme="dark"),
+     so the modal only owns its own chrome (overlay / header / footer). */
 
   .legend { display:flex; gap:16px; align-items:center; margin-top:10px; font-size:12px; color:#94a3b8; }
   .legend .sw { display:inline-block; width:14px; height:14px; border-radius:3px; margin-right:5px; vertical-align:-2px; }

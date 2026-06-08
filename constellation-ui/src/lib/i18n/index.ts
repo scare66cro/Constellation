@@ -44,6 +44,27 @@ register('zh', async () => {
   }
 });
 
+// es/fr loaders mirror the en/zh pattern above.
+for (const lang of ['es', 'fr'] as const) {
+  register(lang, async () => {
+    if (browser) {
+      const response = await fetch(`/locales/${lang}.json`);
+      return await response.json();
+    } else {
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const filePath = path.join(process.cwd(), `src/lib/locales/${lang}.json`);
+        const content = fs.readFileSync(filePath, 'utf-8');
+        return JSON.parse(content);
+      } catch (error) {
+        console.warn(`Failed to load ${lang} locale:`, error);
+        return {};
+      }
+    }
+  });
+}
+
 init({
   fallbackLocale: defaultLocale,
   initialLocale: browser ? window.navigator.language : defaultLocale,
