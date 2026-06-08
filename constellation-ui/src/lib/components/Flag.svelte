@@ -3,7 +3,7 @@
   // shapes (NOT flag emoji) so they render identically on the Pi/Linux
   // Chromium kiosk, which has no flag-emoji font and would otherwise show
   // "US"/"CN" letterboxes. Aspect ratio is a clean 3:2 (viewBox 24×16).
-  //   en → United States, es → Spain, fr → France, zh → China
+  //   en → United States, es → Mexico, fr → France, zh → China
   export let code: string = "en";
   export let w: number = 21;
   $: h = Math.round((w * 2) / 3);
@@ -31,8 +31,24 @@
       <rect width="8" height="16" fill="#0055A4" />
       <rect x="16" width="8" height="16" fill="#EF4135" />
     {:else if c === "es"}
-      <rect width="24" height="16" fill="#AA151B" />
-      <rect y="4" width="24" height="8" fill="#F1BF00" />
+      <!-- Mexico: green-white-red tricolor + simplified central emblem
+           (eagle on a cactus) so it reads distinctly from Italy -->
+      <rect width="24" height="16" fill="#fff" />
+      <rect width="8" height="16" fill="#006847" />
+      <rect x="16" width="8" height="16" fill="#CE1126" />
+      <g>
+        <!-- green wreath / cactus base -->
+        <path d="M10.3,10.7 Q12,12.1 13.7,10.7" fill="none" stroke="#2f7d3a" stroke-width="0.5" stroke-linecap="round" />
+        <ellipse cx="12" cy="9.5" rx="0.9" ry="0.32" fill="#2f7d3a" />
+        <!-- eagle -->
+        <g fill="#6b4423">
+          <ellipse cx="12" cy="8.3" rx="1.05" ry="0.72" />
+          <path d="M12,7.9 L13.5,6.3 L13.0,8.1 Z" />
+          <path d="M12.6,8.7 L13.7,9.5 L12.4,9.0 Z" />
+          <circle cx="10.95" cy="7.75" r="0.45" />
+          <path d="M10.5,7.75 L10.95,7.55 L10.95,7.95 Z" />
+        </g>
+      </g>
     {:else if c === "zh"}
       <rect width="24" height="16" fill="#DE2910" />
       <g fill="#FFDE00">
