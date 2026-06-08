@@ -10,6 +10,29 @@ of *what* + *why*, then a bullet list of touched files.
 
 ---
 
+## 2026-06-08 — Language switcher + Spanish/French (spatial-ui)
+
+The `/dashboard/plan3d` titlebar (top-right) gained a 4-language switcher
+(en / es / fr / zh) driving the app-wide `localeStore` + svelte-i18n
+`locale`. Added full `es.json`/`fr.json` (machine-translated from `en.json`,
+exact 733-key parity, **pending native review**). Flags are **inline SVG**
+(`Flag.svelte`), not flag emoji — the Pi/Linux Chromium kiosk has no
+flag-emoji font and would render them as "US"/"CN" letterboxes. `es` uses
+the **Mexico** flag (US Spanish-speaking workforce). `level1/preferences`
+locale dropdown also extended to the 4 languages. Commits `7319d97`,
+`799df6d`, `4d31e53` on `spatial-ui` (live on the bench Pi5). Not yet
+translated: plan3d's own hardcoded-English chrome labels (separate
+follow-up); the flat `/dashboard/plan` route still has the old 2-way
+en↔zh emoji toggle.
+
+- [`constellation-ui/src/lib/components/Flag.svelte`](../constellation-ui/src/lib/components/Flag.svelte) — new inline-SVG flag component (US/MX/FR/CN).
+- [`constellation-ui/src/lib/locales/es.json`](../constellation-ui/src/lib/locales/es.json), [`fr.json`](../constellation-ui/src/lib/locales/fr.json) — new locale files.
+- [`constellation-ui/src/lib/i18n.ts`](../constellation-ui/src/lib/i18n.ts) (active) + [`lib/i18n/index.ts`](../constellation-ui/src/lib/i18n/index.ts) — registered es/fr.
+- [`constellation-ui/src/routes/dashboard/plan3d/+page.svelte`](../constellation-ui/src/routes/dashboard/plan3d/+page.svelte) — `LANGS`, switcher markup, `Flag` usage.
+- [`constellation-ui/src/routes/level1/preferences/+page.svelte`](../constellation-ui/src/routes/level1/preferences/+page.svelte) — `localeOptions` → 4 langs.
+
+---
+
 ## 2026-05-30 — Phase 5 proto-direct landing (~30 +page.ts removed)
 
 Commit `57769cd` — UI proto-direct landing (~30 per-page `+page.ts`
