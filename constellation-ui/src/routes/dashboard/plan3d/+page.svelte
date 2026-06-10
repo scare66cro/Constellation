@@ -44,6 +44,7 @@
   import AlarmHistoryForm from "$lib/components/AlarmHistoryForm.svelte";
   import AccountsForm from "$lib/components/AccountsForm.svelte";
   import AccountActivityForm from "$lib/components/AccountActivityForm.svelte";
+  import PidLogForm from "$lib/components/PidLogForm.svelte";
   import FailuresForm1 from "$lib/components/FailuresForm1.svelte";
   import FailuresForm2 from "$lib/components/FailuresForm2.svelte";
   import AlertSetupForm from "$lib/components/AlertSetupForm.svelte";
@@ -343,7 +344,7 @@
   //   SAME component its classic page uses — real writeProto save path).
   //   Adding a migrated form = one entry in MODAL_TITLES + one hotspot +
   //   one {:else if} branch. docs/spatial-ui-page-migration.md
-  type ModalKey = 'plenum' | 'humidifier' | 'refrig' | 'fan' | 'climacell' | 'door' | 'heat' | 'equipment' | 'datetime' | 'alarmhist' | 'accounts' | 'alarms' | 'alerts' | 'system' | 'analog' | 'auxiliary' | 'ioconfig' | 'version' | 'fanruntime' | 'accountactivity';
+  type ModalKey = 'plenum' | 'humidifier' | 'refrig' | 'fan' | 'climacell' | 'door' | 'heat' | 'equipment' | 'datetime' | 'alarmhist' | 'accounts' | 'alarms' | 'alerts' | 'system' | 'analog' | 'auxiliary' | 'ioconfig' | 'version' | 'fanruntime' | 'accountactivity' | 'pidlogs';
   const MODAL_TITLES: Record<ModalKey, string> = {
     plenum: 'Plenum & Run Clock',
     humidifier: 'Humidifier Control',
@@ -357,6 +358,7 @@
     alarmhist: 'Alarm History',
     accounts: 'User Accounts',
     accountactivity: 'Account Activity',
+    pidlogs: 'PID Logging',
     alarms: 'Alarms — Failure Modes',
     alerts: 'Alerts',
     system: 'Crop Type',
@@ -438,7 +440,7 @@
   // Grid-heavy forms need a wider dialog than the default 760px setpoint
   // modal. Membership here applies the `.dlg.wide` skin (≈1400px, capped at
   // 94vw). The body scrolls either way, so this only buys horizontal room.
-  const MODAL_WIDE = new Set<ModalKey>(['climacell', 'plenum', 'alarmhist', 'accounts', 'alarms', 'alerts', 'analog', 'auxiliary', 'accountactivity']);  // wide tables/forms
+  const MODAL_WIDE = new Set<ModalKey>(['climacell', 'plenum', 'alarmhist', 'accounts', 'alarms', 'alerts', 'analog', 'auxiliary', 'accountactivity', 'pidlogs']);  // wide tables/forms
   $: modalWide = !!activeModal && MODAL_WIDE.has(activeModal);
   // Full-bleed modals: the densest pages (IO Config) need to overtake the whole
   // screen (≈98vw × 94vh) — still a modal, no separate route. `.dlg.full`.
@@ -452,7 +454,7 @@
   const MODAL_LEVEL: Record<ModalKey, 1 | 2> = {
     plenum: 1, humidifier: 1, fan: 1, climacell: 1, heat: 1, equipment: 1, datetime: 1, alarmhist: 1, alerts: 1, version: 1, fanruntime: 1,
     refrig: 2, door: 2, accounts: 2, alarms: 2, system: 2, analog: 2, auxiliary: 2, ioconfig: 2,
-    accountactivity: 2,
+    accountactivity: 2, pidlogs: 2,
   };
   $: modalCanEdit = !!activeModal && programLevel >= (MODAL_LEVEL[activeModal] ?? 1);
   // ─── Setup menu (the ⚙ gear) — non-equipment / system settings ────────
@@ -1454,6 +1456,8 @@
             <AccountsForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
           {:else if activeModal === 'accountactivity'}
             <AccountActivityForm bind:this={modalForm} embedded theme={$themeStore} />
+          {:else if activeModal === 'pidlogs'}
+            <PidLogForm bind:this={modalForm} embedded theme={$themeStore} />
           {:else if activeModal === 'analog'}
             <AnalogConfigForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
           {:else if activeModal === 'auxiliary'}
@@ -1552,6 +1556,7 @@
         </header>
         <div class="setup-body">
           <div class="setup-tiles">
+            <div class="st-head">History</div>
             <button class="setup-tile" on:click={() => { historyOpen = false; openModal('alarmhist'); }}>
               <span class="st-label">🔔 Alarm History</span>
             </button>
@@ -1563,6 +1568,7 @@
             </button>
           </div>
           <div class="setup-tiles">
+            <div class="st-head">Logs</div>
             {#if programLevel >= 2}
               <button class="setup-tile" on:click={() => { historyOpen = false; openModal('accountactivity'); }}>
                 <span class="st-label">👥 Account Activity</span>
@@ -1575,6 +1581,14 @@
               <span class="st-label">👤 User Log</span><span class="st-ext">↗</span>
             </button>
           </div>
+          {#if programLevel >= 2}
+            <div class="setup-tiles">
+              <div class="st-head">PID</div>
+              <button class="setup-tile" on:click={() => { historyOpen = false; openModal('pidlogs'); }}>
+                <span class="st-label">🎛 PID Logs</span>
+              </button>
+            </div>
+          {/if}
         </div>
         <footer class="dlg-ft">
           <span class="ft-tag">↗ opens the full data viewer (page) · log data pending Pi5 logging</span>
@@ -1716,8 +1730,9 @@
   .gear-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:11px 22px; font-size:17px; font-weight:600; cursor:pointer; }
   .gear-btn:hover { border-color:#7dd3fc; color:#e0f2fe; }
   /* History hub modal body (reuses .ovl + .dlg) */
-  .setup-body { flex:1 1 auto; overflow:auto; padding:14px 18px; display:grid; grid-template-columns:repeat(2,1fr); gap:16px 22px; }
+  .setup-body { flex:1 1 auto; overflow:auto; padding:14px 18px; display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:16px 22px; align-items:start; }
   .setup-tiles { display:flex; flex-direction:column; gap:7px; }
+  .st-head { font-size:11px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; color:#64748b; padding:0 2px 5px; border-bottom:1px solid #334155; margin-bottom:2px; }
   .setup-tile { display:flex; align-items:center; gap:9px; background:#0b1220; border:1px solid #334155; border-radius:9px; padding:9px 13px; color:#e2e8f0; font-size:14px; font-weight:600; cursor:pointer; text-align:left; }
   .setup-tile:hover { border-color:#38bdf8; background:#0c2233; }
   .st-label { flex:1 1 auto; }
@@ -1764,6 +1779,7 @@
   :global([data-theme="light"] .mtab) { background:#e2e8f0; color:#475569; border-color:#cbd5e1; }
   :global([data-theme="light"] .mtab.active) { background:#ffffff; color:#0c4a6e; }
   :global([data-theme="light"] .setup-tile) { background:#f8fafc; border-color:#cbd5e1; color:#1e293b; }
+  :global([data-theme="light"] .st-head) { border-color:#e2e8f0; }
   :global([data-theme="light"] .setup-tile:hover) { background:#e0f2fe; border-color:#38bdf8; }
   :global(.plan .card-hd)  { font-size:8px;  fill:#7dd3fc; font-weight:800; letter-spacing:.12em; }
   :global(.plan .card-big) { font-size:15px; fill:#ffffff; font-weight:800; }

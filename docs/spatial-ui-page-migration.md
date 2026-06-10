@@ -218,7 +218,7 @@ toggle on (sets `canEdit`). Verify every migrated save round-trips and
 | `level1/climacell` | `ClimacellRunClockForm` | `climacell` modal — "Run Clock" tab | ✅ done (2026-06-08) — wide modal; 48-slot AM/PM RunTime grid; went **tabbed** 2026-06-09 (Run Clock · Config) |
 | `level2/climacell` | `ClimacellConfigForm` | `climacell` modal — "Config" tab | ✅ done (2026-06-09) — 2nd tab (efficiency / altitude / humidifier PIDU); **L2 tab inside an L1 modal** (per-tab level) |
 | `level2/pwm` | — | (per-channel; maybe) | ☐ maybe |
-| `level2/pid` | — | (equipment tuning; maybe) | ☐ maybe |
+| `level2/pid` | `PidLogForm` | History & Logs › **PID** | ✅ done (2026-06-10) — PID *logging* hub (record on/off per controller + Clear + overwrite-oldest, saves `PidLogSettings`) as an L2 modal under the hub's new PID section; View/Graph/Download still route to the classic table/graph/download viewers transitionally. (NB: PID *logging*, not PIDU tuning — tuning lives in the equipment forms via the `PIDU` component.) |
 
 ### B. Program / system settings forms — migratable, but no equipment anchor
 
@@ -264,7 +264,7 @@ toggle on (sets `canEdit`). Verify every migrated save round-trips and
 | `level2/remote` | remote-systems registry | swipe-between-panels nav (vision) |
 | ~~`level1/version`~~ / ~~`level1/fanruntime`~~ | `VersionForm` / `FanRuntimeForm` | ✅ both done (2026-06-09) — **version**: no-save modal (⚙ Setup → System → Software Version): readout view-only at Monitor, `.cfu` firmware updater gated to L1+. **fanruntime**: no-save modal added as a **tile in the 📜 History & Logs hub** (runtime hours = historical data); Daily/Total reset gated to L1+ |
 | `level2/graph` / `level2/table` | data views | viewer modal |
-| `level2/log` / `level2/pidlog` | log views | viewer modal |
+| `level2/log` / `level2/pidlog` | log views (`pidlog` = the record-range picker, reached from the PID modal's View/Graph/Download) | viewer modal |
 | `level2/download` | export/download | setup menu |
 | `history/alarm` | `AlarmHistoryForm` | ✅ done (2026-06-09) — read-only viewer modal (`MODAL_NOSAVE` + wide); reached from the alarm window "View history →" + ⚙ Setup → History |
 | `history/*` (activitylog, datainfo, userlog) | history viewers | viewer modals (gear "History" group; alarm done first) |
@@ -516,3 +516,15 @@ are **NOT yet migrated** and currently **have no data**:
   i.e. a log, and it's the one working entry in the hub's logs column (the
   Activity/User log route-links are still deferred on Pi5 logging). `AccountsForm`
   is now accounts/roles/cloud-links only.
+- **2026-06-10** — **PID logging → History & Logs › PID.** `level2/pid` migrated
+  to `PidLogForm` (record on/off per controller [Fresh-Air Doors / Refrigeration]
+  + Clear PID Log + overwrite-oldest, saving `PidLogSettings`) and surfaced as an
+  **L2 modal under a new "PID" section** in the History & Logs hub — which gained
+  section headers (History / Logs / PID) + a responsive auto-fit grid. PID logging
+  is backed by the real Pi5 Postgres `pid_log` table, so it's a working hub entry
+  (unlike the deferred Activity/User log links). View / Graph / Download still
+  route to the classic `/level2/table|graph|download` viewers transitionally (heavy
+  data viewers, same deferral as the activity/user log pages); when launched from
+  the dashboard the form sets `pidStore.returnPage = '/dashboard/plan3d'`. The
+  equipment-form "Logs" shortcuts (Refrigeration / Fresh-Air Door) still route to
+  `/level2/pid` (now hosting the form). NB: PID *logging*, not PIDU tuning.
