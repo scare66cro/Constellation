@@ -756,7 +756,7 @@
   const BAY1 = { y0: 0, y1: bayD, h: 98 };
   const SPINE = { y0: bayD, y1: bayD + spineD };
   const BAY2 = { y0: bayD + spineD, y1: D, h: 52 };
-  const th = 26;                     // ridge half-width (narrower crest; slopes unchanged — they still run to the bay edges)
+  const th = 20;                     // ridge half-width (narrower crest; slopes unchanged — they still run to the bay edges)
   const rim = 20;                    // perimeter rim height (cavity envelope)
   const doorWallH = 104;             // door-end wall height (x = L end, faces camera)
 
