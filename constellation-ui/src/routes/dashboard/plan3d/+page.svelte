@@ -1165,10 +1165,12 @@
     <!-- ═══ PILE MOUNDS (drawn far bay first) ═══ -->
     {#each [{bay:BAY1, spuds:spuds1}, {bay:BAY2, spuds:spuds2}] as M (M.bay.y0)}
       {@const cy = (M.bay.y0 + M.bay.y1) / 2}
-      <!-- ridge-loaf body so no floor shows through -->
-      <polygon points={poly([10,cy+th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[10,M.bay.y1,0])} fill="#48300f"/>
-      <polygon points={poly([L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[L,M.bay.y0,0])} fill="#3d2810"/>
-      <polygon points={poly([10,cy-th,M.bay.h],[L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[10,cy+th,M.bay.h])} fill="#7e5a32"/>
+      <!-- ridge-loaf body so no floor shows through. Coloured as the dark
+           russet SHADOW between potatoes (not dirt-brown) so any bare peek-
+           through reads as a gap in the pile, not exposed ground. -->
+      <polygon points={poly([10,cy+th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[10,M.bay.y1,0])} fill="#36240f"/>
+      <polygon points={poly([L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[L,M.bay.y0,0])} fill="#2c1d0b"/>
+      <polygon points={poly([10,cy-th,M.bay.h],[L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[10,cy+th,M.bay.h])} fill="#463016"/>
       <!-- scattered russet potatoes; the russetSkin filter adds a faint netted
            grain (one filtered group per bay — rasterized once, then cached) -->
       <g filter="url(#russetSkin)">
