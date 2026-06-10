@@ -19,7 +19,7 @@
   import { TAG } from "$lib/business/protoTags";
 
   // Shared body of the User Accounts page (level2/accounts): local accounts +
-  // roles, factory row, cloud links, audit log, and the DH-encrypted
+  // roles, factory row, cloud links, and the DH-encrypted
   // show-passwords / save flow. Rendered on the classic page AND as the
   // dashboard accounts modal (reached via ⚙ Setup → Accounts). The page's
   // route loader (/iot/accounts-meta) is fetched CLIENT-SIDE here, and the
@@ -48,10 +48,8 @@
   let factoryMeta: { lastLogin: string | null; loginCount: number } | null = null;
   let currentSession = { actor: 'anonymous', slot: null as number | null, level: 0 };
 
-  interface AuditEntry { ts: string; kind: string; actor: string; slot: number | null; level: number; route?: string; detail?: string; ip?: string; }
-  let auditEntries: AuditEntry[] = [];
-  let auditLoading = false;
-
+  // Account activity (audit log) moved out to AccountActivityForm in the
+  // History & Logs hub (2026-06-10) — it's account activity, i.e. a log.
   interface CloudLinkView { cloudUserId: string; username: string; displayName: string; role: SlotRole; slot: number | null; linkedAt: string; lastRemoteLogin: string | null; }
   let cloudLinks: CloudLinkView[] = [];
   let cloudLoading = false;
@@ -98,14 +96,6 @@
   async function onRoleChange(slot: number, event: Event) {
     await changeRole(slot, (event.target as HTMLSelectElement).value as SlotRole);
   }
-  async function refreshAudit() {
-    auditLoading = true;
-    try {
-      const j = await safeJsonParse(await fetch(getHttpUrl('/iot/audit?limit=50')));
-      auditEntries = (j?.entries ?? []) as AuditEntry[];
-    } catch (e) { console.error('Audit fetch failed', e); auditEntries = []; }
-    finally { auditLoading = false; }
-  }
   async function refreshCloudLinks() {
     cloudLoading = true;
     try {
@@ -124,7 +114,7 @@
       const j = await safeJsonParse(resp);
       if (!resp.ok) { linkError = j?.error ?? `Failed (${resp.status})`; return; }
       linkUsername = ''; linkPassword = ''; linkSlot = '-1'; linkRole = 'admin'; showLinkForm = false;
-      await refreshCloudLinks(); refreshAudit();
+      await refreshCloudLinks();
     } catch (e: any) { linkError = e?.message ?? 'Network error'; }
     finally { linkBusy = false; }
   }
@@ -133,7 +123,7 @@
     try {
       const resp = await fetch(getHttpUrl('/iot/cloud/unlink'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cloudUserId }) });
       if (!resp.ok) { console.error('Unlink failed', await safeJsonParse(resp)); return; }
-      await refreshCloudLinks(); refreshAudit();
+      await refreshCloudLinks();
     } catch (e) { console.error('Unlink error', e); }
   }
   async function getPasswords() {
@@ -176,9 +166,9 @@
     // Keep onMount SYNCHRONOUS: an async onMount returns a Promise, and Svelte
     // ignores a Promise return value, so the accountSettings unsub below would
     // never run → a store-subscription leak on every mount/unmount. Run the
-    // async meta/audit/cloud loads fire-and-forget (same ordering as before:
-    // audit + cloud links after meta resolves, ready in finally).
-    loadMeta().then(() => { refreshAudit(); refreshCloudLinks(); }).finally(() => { ready = true; });
+    // async meta/cloud loads fire-and-forget (cloud links after meta resolves,
+    // ready in finally). Account activity moved to the History & Logs hub.
+    loadMeta().then(() => { refreshCloudLinks(); }).finally(() => { ready = true; });
     const unsub = accountSettings.subscribe((acct) => {
       if (!acct) return;
       const slots: string[] = Array(10).fill('');
@@ -261,25 +251,6 @@
           <Row class="text-size-base font-bold"><Column class="w-[22%]">Username</Column><Column class="w-[26%]">Name</Column><Column class="w-[12%]">Role</Column><Column class="w-[10%]">Slot</Column><Column class="w-[20%]">Last Remote Login</Column><Column class="w-[10%]">&nbsp;</Column></Row>
           {#each cloudLinks as l}
             <Row class="text-size-base"><Column class="w-[22%]">{l.username}</Column><Column class="w-[26%]">{l.displayName}</Column><Column class="w-[12%]">{l.role}</Column><Column class="w-[10%]">{l.slot !== null ? l.slot + 1 : '—'}</Column><Column class="w-[20%]">{fmtTs(l.lastRemoteLogin)}</Column><Column class="w-[10%] !py-1"><div class="px-1"><Button size="sm" class="w-full !variant-ghost-error" on:click={() => unlinkCloud(l.cloudUserId, l.username)}>Unlink</Button></div></Column></Row>
-          {/each}
-        </Table>
-      {/if}
-    </div>
-
-    <div class="px-2 pt-3 pb-2">
-      <div class="flex items-center pb-1">
-        <div class="font-bold text-size-xl flex-1">Recent Activity</div>
-        <Button size="md" class="w-28" on:click={refreshAudit}>Refresh</Button>
-      </div>
-      {#if auditLoading}
-        <div class="text-size-base text-gray-500">Loading…</div>
-      {:else if auditEntries.length === 0}
-        <div class="text-size-base text-gray-500">No activity recorded yet.</div>
-      {:else}
-        <Table>
-          <Row class="text-size-base font-bold"><Column class="w-[22%]">When</Column><Column class="w-[18%]">Actor</Column><Column class="w-[12%]">Event</Column><Column class="w-[12%]">Route</Column><Column class="w-[36%]">Detail</Column></Row>
-          {#each auditEntries as e}
-            <Row class="text-size-base"><Column class="w-[22%]">{fmtTs(e.ts)}</Column><Column class="w-[18%]">{e.actor}{e.slot !== null ? ` (#${e.slot + 1})` : ''}</Column><Column class="w-[12%]">{e.kind}</Column><Column class="w-[12%]">{e.route ?? ''}</Column><Column class="w-[36%] truncate">{e.detail ?? ''}</Column></Row>
           {/each}
         </Table>
       {/if}

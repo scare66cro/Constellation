@@ -43,6 +43,7 @@
   import DateTimeForm from "$lib/components/DateTimeForm.svelte";
   import AlarmHistoryForm from "$lib/components/AlarmHistoryForm.svelte";
   import AccountsForm from "$lib/components/AccountsForm.svelte";
+  import AccountActivityForm from "$lib/components/AccountActivityForm.svelte";
   import FailuresForm1 from "$lib/components/FailuresForm1.svelte";
   import FailuresForm2 from "$lib/components/FailuresForm2.svelte";
   import AlertSetupForm from "$lib/components/AlertSetupForm.svelte";
@@ -342,7 +343,7 @@
   //   SAME component its classic page uses — real writeProto save path).
   //   Adding a migrated form = one entry in MODAL_TITLES + one hotspot +
   //   one {:else if} branch. docs/spatial-ui-page-migration.md
-  type ModalKey = 'plenum' | 'humidifier' | 'refrig' | 'fan' | 'climacell' | 'door' | 'heat' | 'equipment' | 'datetime' | 'alarmhist' | 'accounts' | 'alarms' | 'alerts' | 'system' | 'analog' | 'auxiliary' | 'ioconfig' | 'version' | 'fanruntime';
+  type ModalKey = 'plenum' | 'humidifier' | 'refrig' | 'fan' | 'climacell' | 'door' | 'heat' | 'equipment' | 'datetime' | 'alarmhist' | 'accounts' | 'alarms' | 'alerts' | 'system' | 'analog' | 'auxiliary' | 'ioconfig' | 'version' | 'fanruntime' | 'accountactivity';
   const MODAL_TITLES: Record<ModalKey, string> = {
     plenum: 'Plenum & Run Clock',
     humidifier: 'Humidifier Control',
@@ -355,6 +356,7 @@
     datetime: 'Set Date & Time',
     alarmhist: 'Alarm History',
     accounts: 'User Accounts',
+    accountactivity: 'Account Activity',
     alarms: 'Alarms — Failure Modes',
     alerts: 'Alerts',
     system: 'Crop Type',
@@ -367,7 +369,7 @@
   // No-save modals are imperative control panels (no edit buffer / flush) —
   // every action fires immediately. Their footer shows a single Close button
   // instead of Cancel / Save & Close.
-  const MODAL_NOSAVE = new Set<ModalKey>(['equipment', 'alarmhist', 'accounts', 'system', 'version', 'fanruntime']);
+  const MODAL_NOSAVE = new Set<ModalKey>(['equipment', 'alarmhist', 'accounts', 'system', 'version', 'fanruntime', 'accountactivity']);
   $: modalNoSave = !!activeModal && MODAL_NOSAVE.has(activeModal);
   // Tabbed modals: a key maps to >1 sub-form, each rendered as a tab. Single-
   // form modals just omit an entry. ONE "Save & Close" flushes EVERY tab's
@@ -436,7 +438,7 @@
   // Grid-heavy forms need a wider dialog than the default 760px setpoint
   // modal. Membership here applies the `.dlg.wide` skin (≈1400px, capped at
   // 94vw). The body scrolls either way, so this only buys horizontal room.
-  const MODAL_WIDE = new Set<ModalKey>(['climacell', 'plenum', 'alarmhist', 'accounts', 'alarms', 'alerts', 'analog', 'auxiliary']);  // wide tables/forms
+  const MODAL_WIDE = new Set<ModalKey>(['climacell', 'plenum', 'alarmhist', 'accounts', 'alarms', 'alerts', 'analog', 'auxiliary', 'accountactivity']);  // wide tables/forms
   $: modalWide = !!activeModal && MODAL_WIDE.has(activeModal);
   // Full-bleed modals: the densest pages (IO Config) need to overtake the whole
   // screen (≈98vw × 94vh) — still a modal, no separate route. `.dlg.full`.
@@ -450,6 +452,7 @@
   const MODAL_LEVEL: Record<ModalKey, 1 | 2> = {
     plenum: 1, humidifier: 1, fan: 1, climacell: 1, heat: 1, equipment: 1, datetime: 1, alarmhist: 1, alerts: 1, version: 1, fanruntime: 1,
     refrig: 2, door: 2, accounts: 2, alarms: 2, system: 2, analog: 2, auxiliary: 2, ioconfig: 2,
+    accountactivity: 2,
   };
   $: modalCanEdit = !!activeModal && programLevel >= (MODAL_LEVEL[activeModal] ?? 1);
   // ─── Setup menu (the ⚙ gear) — non-equipment / system settings ────────
@@ -1449,6 +1452,8 @@
             <AlarmHistoryForm bind:this={modalForm} embedded theme={$themeStore} />
           {:else if activeModal === 'accounts'}
             <AccountsForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'accountactivity'}
+            <AccountActivityForm bind:this={modalForm} embedded theme={$themeStore} />
           {:else if activeModal === 'analog'}
             <AnalogConfigForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
           {:else if activeModal === 'auxiliary'}
@@ -1558,6 +1563,11 @@
             </button>
           </div>
           <div class="setup-tiles">
+            {#if programLevel >= 2}
+              <button class="setup-tile" on:click={() => { historyOpen = false; openModal('accountactivity'); }}>
+                <span class="st-label">👥 Account Activity</span>
+              </button>
+            {/if}
             <button class="setup-tile" on:click={() => goto('/history/activitylog')}>
               <span class="st-label">📋 Activity Log</span><span class="st-ext">↗</span>
             </button>

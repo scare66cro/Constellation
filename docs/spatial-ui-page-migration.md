@@ -241,7 +241,7 @@ toggle on (sets `canEdit`). Verify every migrated save round-trips and
 | `level1/date` | `DateTimeForm` | ✅ done (2026-06-09) — modal opened by the **top-left titlebar clock** + the ⚙ Setup → System "Date & Time" item; L1 |
 | `level1/miscellaneous` | misc settings (heater threshold + cavity-heater controls moved out to `level1/heat` 2026-06-08; now refrig mode / enthalpy / defrost / keypad) | ☐ |
 | `history` (menu) | **📜 History & Logs** top-row button → hub modal | ✅ done (2026-06-09) — the `/history` menu page migrated to a hub modal: Alarm History + Active Alarms open in-place; Activity/User logs route (↗, heavy data-viewers pending Pi5 logging) |
-| `level2/accounts` | `AccountsForm` | ✅ done (2026-06-09) — no-save wide modal (own Save + Show-Passwords flow); meta fetched client-side; ⚙ Setup → Accounts; L2 |
+| `level2/accounts` | `AccountsForm` | ✅ done (2026-06-09) — no-save wide modal (own Save + Show-Passwords flow); meta fetched client-side; **reached via the L2 titlebar account menu → Account Setup** (2026-06-10; was ⚙ Setup → Accounts, group retired); L2. **Account activity (audit log) split out → `AccountActivityForm` in the History & Logs hub** (2026-06-10) |
 | `level2/iotclient` | cloud client config | ☐ |
 
 ### C. Won't fit cleanly — note + defer
@@ -504,3 +504,15 @@ are **NOT yet migrated** and currently **have no data**:
   network, tcpip, master, iotclient, service, analog, ioconfig, orbit-sensors,
   pwm, pid, burner, fanboost, level2/climacell, remote, datainfo + the heavy
   log viewers.
+- **2026-06-10** — **Account affordances consolidated.** (1) At Program L2 the
+  titlebar account pill (`👤 Level 2 ▾`) became a dropdown — **Account Setup**
+  (opens the accounts modal) + **Sign Out** — reusing the shared `openGroup` /
+  `.grp-menu` pattern (right-aligned for the right-edge pill). The standalone
+  **Accounts** `SETUP_GROUPS` entry was retired (no more top-bar Accounts
+  button). At L1 the pill stays a plain Sign Out. (2) The **account activity
+  (audit) log** was split out of `AccountsForm` into a new read-only
+  `AccountActivityForm` (`/iot/audit` viewer, `MODAL_NOSAVE`, wide) and added as
+  an **L2-gated tile in the 📜 History & Logs hub** — it's account *activity*,
+  i.e. a log, and it's the one working entry in the hub's logs column (the
+  Activity/User log route-links are still deferred on Pi5 logging). `AccountsForm`
+  is now accounts/roles/cloud-links only.
