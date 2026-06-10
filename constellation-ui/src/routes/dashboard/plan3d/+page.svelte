@@ -652,9 +652,12 @@
   const proveStroke = (on: boolean, proved: boolean): string => !on ? '#475569' : proved ? '#34d399' : '#ef4444';
   const proveText   = (on: boolean, proved: boolean): string => !on ? '#94a3b8' : proved ? '#bbf7d0' : '#fca5a5';
   // Bay HID high-bay lights (EQ.LIGHTS1/2 — CURRENT_SENSE): one ceiling fixture
-  // over each bay, LIT when its output is commanded OR current is sensed.
-  $: lights1On = !!eqOut[EQ.LIGHTS1] || !!eqIn[EQ.LIGHTS1];
-  $: lights2On = !!eqOut[EQ.LIGHTS2] || !!eqIn[EQ.LIGHTS2];
+  // over each bay, LIT from the CURRENT-SENSE INPUT (the lamp is actually drawing
+  // current), not the commanded output. This matches AS2's "lights on" indicator
+  // (status[36] = the current-sense DI, not the output coil) so the fixture
+  // always agrees with the input — a commanded-but-not-sensed light shows OFF.
+  $: lights1On = !!eqIn[EQ.LIGHTS1];
+  $: lights2On = !!eqIn[EQ.LIGHTS2];
   $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
   $: heatOn = !!eqOut[EQ.HEAT];
   // Climacell output coil — gates the media-wall water animation so the
