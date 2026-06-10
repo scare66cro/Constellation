@@ -785,7 +785,9 @@
   // ─── Deterministic potato scatter per bay (generated once) ────────
   let seed = 1337;
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-  interface Spud { x: number; y: number; z: number; r: number; g: 1 | 2; depth: number; }
+  // `el` = elongation (ry/rx) and `rot` = screen rotation give each tuber the
+  // oblong, randomly-angled look of a russet rather than a round ball.
+  interface Spud { x: number; y: number; z: number; r: number; g: 1 | 2; depth: number; rot: number; el: number; }
   function genSpuds(bay: { y0: number; y1: number; h: number }): Spud[] {
     const out: Spud[] = [];
     const cy = (bay.y0 + bay.y1) / 2;
@@ -800,7 +802,7 @@
         const crest = Math.max(0, 1 - Math.abs(jy - cy) / half);   // 1 at crest → 0 at base
         const bump = crest * crest * 9 + rnd() * 5;
         const z = Math.max(2, surfH(bay, jy) + bump);
-        out.push({ x: jx, y: jy, z, r: 6.5 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
+        out.push({ x: jx, y: jy, z, r: 6.5 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy, rot: rnd() * 180, el: 0.46 + rnd() * 0.2 });
       }
     }
     // Pass 2 — heavy packing on the VISIBLE FRONT SLOPE + base toe (cy → front
@@ -812,7 +814,7 @@
         const jx = x + (rnd() - 0.5) * 9;
         const jy = Math.min(bay.y1 - 1, y + (rnd() - 0.5) * 4);
         const z = Math.max(2, surfH(bay, jy) + rnd() * 4);
-        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
+        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy, rot: rnd() * 180, el: 0.46 + rnd() * 0.2 });
       }
     }
     return out.sort((a, b) => a.depth - b.depth);  // far → near (painter's order)
@@ -1068,19 +1070,20 @@
        on:pointermove={onDrag} on:pointerup={endDrag} on:pointerleave={endDrag}>
     <defs>
       <linearGradient id="spudA" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#c89863"/><stop offset="55%" stop-color="#9a6836"/><stop offset="100%" stop-color="#5e3d20"/>
+        <stop offset="0%" stop-color="#d8b076"/><stop offset="52%" stop-color="#a87a40"/><stop offset="100%" stop-color="#6b4521"/>
       </linearGradient>
       <linearGradient id="spudB" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#b3814e"/><stop offset="55%" stop-color="#855420"/><stop offset="100%" stop-color="#523618"/>
+        <stop offset="0%" stop-color="#c39a5c"/><stop offset="55%" stop-color="#8c5f2e"/><stop offset="100%" stop-color="#5a3a1c"/>
       </linearGradient>
       <!-- HID bay-light glow (halo at the bulb) + warm pool cast on the pile -->
       <radialGradient id="hidGlow">
-        <stop offset="0%" stop-color="#fffbea" stop-opacity="0.95"/>
-        <stop offset="55%" stop-color="#fde68a" stop-opacity="0.4"/>
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+        <stop offset="42%" stop-color="#fff2b8" stop-opacity="0.72"/>
         <stop offset="100%" stop-color="#fde68a" stop-opacity="0"/>
       </radialGradient>
       <radialGradient id="hidPool">
-        <stop offset="0%" stop-color="#fde68a" stop-opacity="0.5"/>
+        <stop offset="0%" stop-color="#fffbe6" stop-opacity="0.92"/>
+        <stop offset="38%" stop-color="#ffe7a0" stop-opacity="0.62"/>
         <stop offset="100%" stop-color="#fde68a" stop-opacity="0"/>
       </radialGradient>
       <filter id="soft3" x="-30%" y="-30%" width="160%" height="160%">
@@ -1116,8 +1119,9 @@
       <!-- scattered russet potatoes over the visible surface -->
       {#each M.spuds as s (s.x + '_' + s.y)}
         {@const c = P(s.x, s.y, s.z)}
-        <ellipse cx={c[0]} cy={c[1]} rx={s.r} ry={s.r * 0.9}
-                 fill={s.g === 1 ? 'url(#spudA)' : 'url(#spudB)'} stroke="#3a2510" stroke-width="0.6"/>
+        <ellipse cx={c[0]} cy={c[1]} rx={s.r} ry={s.r * s.el}
+                 transform="rotate({s.rot.toFixed(0)} {c[0].toFixed(1)} {c[1].toFixed(1)})"
+                 fill={s.g === 1 ? 'url(#spudA)' : 'url(#spudB)'} stroke="#4a3216" stroke-width="0.5"/>
       {/each}
     {/each}
 
@@ -1376,10 +1380,11 @@
         {@const lc = P(lx, ly, 130)}
         {@const pool = P(lx, ly, surfH(BL.bay, Math.max(BL.bay.y0, Math.min(BL.bay.y1, ly))))}
         {#if BL.on}
-          <!-- light shaft fanning down + warm pool on the pile (non-interactive) -->
-          <polygon points="{(lc[0]-5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(lc[0]+5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(pool[0]+46).toFixed(1)},{pool[1].toFixed(1)} {(pool[0]-46).toFixed(1)},{pool[1].toFixed(1)}"
-                   fill="#fde68a" opacity="0.10" pointer-events="none"/>
-          <ellipse cx={pool[0]} cy={pool[1]} rx="46" ry="12" fill="url(#hidPool)" pointer-events="none"/>
+          <!-- light shaft fanning down + bright warm pool on the pile (non-interactive) -->
+          <polygon points="{(lc[0]-5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(lc[0]+5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(pool[0]+54).toFixed(1)},{pool[1].toFixed(1)} {(pool[0]-54).toFixed(1)},{pool[1].toFixed(1)}"
+                   fill="#fde68a" opacity="0.18" pointer-events="none"/>
+          <ellipse cx={pool[0]} cy={pool[1]} rx="54" ry="15" fill="url(#hidPool)" pointer-events="none"/>
+          <ellipse cx={pool[0]} cy={pool[1]} rx="26" ry="7" fill="#fff7d6" opacity="0.42" pointer-events="none"/>
         {/if}
         <!-- fixture: suspension rod + bell reflector + HID bulb + bay number -->
         <g transform="translate({lc[0]},{lc[1]})" class="drag3" role="button" tabindex="0"
@@ -1397,7 +1402,7 @@
           <line x1="-9.5" y1="-7" x2="9.5" y2="-7" stroke="#1b232e" stroke-width="0.8" opacity="0.7" pointer-events="none"/>
           <!-- flared reflector skirt (warms when lit) -->
           <path d="M -9 -5 L 9 -5 L 13 2 L -13 2 Z" fill={BL.on ? '#5a5230' : '#2b3540'} stroke="#1b232e" stroke-width="1.1"/>
-          {#if BL.on}<ellipse cx="0" cy="2" rx="16" ry="6.5" fill="url(#hidGlow)" pointer-events="none"/>{/if}
+          {#if BL.on}<ellipse cx="0" cy="2" rx="20" ry="8" fill="url(#hidGlow)" pointer-events="none"/>{/if}
           <!-- lit lens at the mouth -->
           <ellipse cx="0" cy="2" rx="12" ry="3.2" fill={BL.on ? '#fff7d6' : '#0b1220'}
                    stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
