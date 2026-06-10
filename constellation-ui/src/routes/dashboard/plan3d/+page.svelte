@@ -1386,14 +1386,26 @@
            on:pointerdown={(e) => startDrag(e, 'light-' + BL.n, L / 2, defY)}
            on:click={() => openModal('equipment')}>
           <!-- enlarged transparent hit area for touch -->
-          <rect x="-18" y="-23" width="36" height="31" fill="transparent"/>
-          <line x1="0" y1="-18" x2="0" y2="-2" stroke="#475569" stroke-width="1.5"/>
-          <path d="M -15 0 Q -16 -9 0 -11 Q 16 -9 15 0 Z"
-                fill={BL.on ? '#4a4327' : '#2f3c4b'} stroke="#1b232e" stroke-width="1.2"/>
-          {#if BL.on}<circle cx="0" cy="3" r="14" fill="url(#hidGlow)" pointer-events="none"/>{/if}
-          <circle cx="0" cy="2" r="4.6" fill={BL.on ? '#fff7d6' : '#0b1220'}
-                  stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
-          <text x="0" y="-19" text-anchor="middle" font-size="9" font-weight="800"
+          <rect x="-16" y="-26" width="32" height="38" fill="transparent"/>
+          <!-- suspension rod + mount eyelet -->
+          <line x1="0" y1="-23" x2="0" y2="-13" stroke="#475569" stroke-width="1.5"/>
+          <circle cx="0" cy="-23" r="2.2" fill="none" stroke="#64748b" stroke-width="1.3"/>
+          <!-- finned aluminium heat-sink body (industrial high-bay) -->
+          <path d="M -12 -13 L 12 -13 L 9 -5 L -9 -5 Z" fill="#39434f" stroke="#1b232e" stroke-width="1.1"/>
+          <line x1="-10.5" y1="-11" x2="10.5" y2="-11" stroke="#1b232e" stroke-width="0.8" opacity="0.7" pointer-events="none"/>
+          <line x1="-10" y1="-9" x2="10" y2="-9" stroke="#1b232e" stroke-width="0.8" opacity="0.7" pointer-events="none"/>
+          <line x1="-9.5" y1="-7" x2="9.5" y2="-7" stroke="#1b232e" stroke-width="0.8" opacity="0.7" pointer-events="none"/>
+          <!-- flared reflector skirt (warms when lit) -->
+          <path d="M -9 -5 L 9 -5 L 13 2 L -13 2 Z" fill={BL.on ? '#5a5230' : '#2b3540'} stroke="#1b232e" stroke-width="1.1"/>
+          {#if BL.on}<ellipse cx="0" cy="2" rx="16" ry="6.5" fill="url(#hidGlow)" pointer-events="none"/>{/if}
+          <!-- lit lens at the mouth -->
+          <ellipse cx="0" cy="2" rx="12" ry="3.2" fill={BL.on ? '#fff7d6' : '#0b1220'}
+                   stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
+          <!-- wire guard across the lens -->
+          <line x1="-12.5" y1="2" x2="12.5" y2="2" stroke={BL.on ? '#b9962f' : '#475569'} stroke-width="0.8" opacity="0.8" pointer-events="none"/>
+          <path d="M -8 -4.5 Q 0 1.5 8 -4.5" fill="none" stroke={BL.on ? '#b9962f' : '#475569'} stroke-width="0.8" opacity="0.55" pointer-events="none"/>
+          <!-- bay number (to the side) -->
+          <text x="17" y="1" text-anchor="start" font-size="9" font-weight="800"
                 fill={BL.on ? '#fde68a' : '#64748b'} pointer-events="none">{BL.n}</text>
         </g>
       {/if}
