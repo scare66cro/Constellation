@@ -651,6 +651,10 @@
   $: fanOn = fanPct > 0 || !!eqOut[EQ.FAN];
   const proveStroke = (on: boolean, proved: boolean): string => !on ? '#475569' : proved ? '#34d399' : '#ef4444';
   const proveText   = (on: boolean, proved: boolean): string => !on ? '#94a3b8' : proved ? '#bbf7d0' : '#fca5a5';
+  // Bay HID high-bay lights (EQ.LIGHTS1/2 — CURRENT_SENSE): one ceiling fixture
+  // over each bay, LIT when its output is commanded OR current is sensed.
+  $: lights1On = !!eqOut[EQ.LIGHTS1] || !!eqIn[EQ.LIGHTS1];
+  $: lights2On = !!eqOut[EQ.LIGHTS2] || !!eqIn[EQ.LIGHTS2];
   $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
   $: heatOn = !!eqOut[EQ.HEAT];
   // Climacell output coil — gates the media-wall water animation so the
@@ -1059,6 +1063,16 @@
       <linearGradient id="spudB" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="#b3814e"/><stop offset="55%" stop-color="#855420"/><stop offset="100%" stop-color="#523618"/>
       </linearGradient>
+      <!-- HID bay-light glow (halo at the bulb) + warm pool cast on the pile -->
+      <radialGradient id="hidGlow">
+        <stop offset="0%" stop-color="#fffbea" stop-opacity="0.95"/>
+        <stop offset="55%" stop-color="#fde68a" stop-opacity="0.4"/>
+        <stop offset="100%" stop-color="#fde68a" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="hidPool">
+        <stop offset="0%" stop-color="#fde68a" stop-opacity="0.5"/>
+        <stop offset="100%" stop-color="#fde68a" stop-opacity="0"/>
+      </radialGradient>
       <filter id="soft3" x="-30%" y="-30%" width="160%" height="160%">
         <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#020617" flood-opacity="0.45"/>
       </filter>
@@ -1334,6 +1348,34 @@
         {#each [0, 90] as a (a)}
           <line x1="-14.5" y1="0" x2="14.5" y2="0" stroke="#334155" stroke-width="1" opacity="0.55" transform="rotate({a})"/>
         {/each}
+      </g>
+    {/each}
+
+    <!-- ═══ BAY HID HIGH-BAY LIGHTS (EQ.LIGHTS1/2) — one ceiling fixture per bay ═══
+         Hung at ceiling height (z=130) over each bay centre; warm glow + a light
+         pool cast on the pile crest when lit, dark grey when off. Front bay (2)
+         draws last so it sits in front. -->
+    {#each [{ bay: BAY1, n: 1, on: lights1On }, { bay: BAY2, n: 2, on: lights2On }] as BL (BL.n)}
+      {@const lx = L / 2}
+      {@const ly = (BL.bay.y0 + BL.bay.y1) / 2}
+      {@const lc = P(lx, ly, 130)}
+      {@const pool = P(lx, ly, surfH(BL.bay, ly))}
+      {#if BL.on}
+        <!-- light shaft fanning down + warm pool on the pile -->
+        <polygon points="{(lc[0]-5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(lc[0]+5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(pool[0]+46).toFixed(1)},{pool[1].toFixed(1)} {(pool[0]-46).toFixed(1)},{pool[1].toFixed(1)}"
+                 fill="#fde68a" opacity="0.10"/>
+        <ellipse cx={pool[0]} cy={pool[1]} rx="46" ry="12" fill="url(#hidPool)"/>
+      {/if}
+      <!-- fixture: suspension rod + bell reflector + HID bulb + bay number -->
+      <g transform="translate({lc[0]},{lc[1]})">
+        <line x1="0" y1="-18" x2="0" y2="-2" stroke="#475569" stroke-width="1.5"/>
+        <path d="M -15 0 Q -16 -9 0 -11 Q 16 -9 15 0 Z"
+              fill={BL.on ? '#4a4327' : '#2f3c4b'} stroke="#1b232e" stroke-width="1.2"/>
+        {#if BL.on}<circle cx="0" cy="3" r="14" fill="url(#hidGlow)"/>{/if}
+        <circle cx="0" cy="2" r="4.6" fill={BL.on ? '#fff7d6' : '#0b1220'}
+                stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
+        <text x="0" y="-19" text-anchor="middle" font-size="9" font-weight="800"
+              fill={BL.on ? '#fde68a' : '#64748b'}>{BL.n}</text>
       </g>
     {/each}
 
