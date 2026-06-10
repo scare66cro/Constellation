@@ -668,6 +668,16 @@
     const p = ($ioConfig?.outputMap as Record<number, number> | undefined)?.[EQ.HEAT];
     return p !== undefined && !UNASSIGNED_PORTS.has(p);
   })();
+  // Bay lights are gated the same way as HEAT — a fixture is only drawn when its
+  // light circuit (EQ.LIGHTS1/2) is mapped to an output in IO Config.
+  $: lights1Configured = (() => {
+    const p = ($ioConfig?.outputMap as Record<number, number> | undefined)?.[EQ.LIGHTS1];
+    return p !== undefined && !UNASSIGNED_PORTS.has(p);
+  })();
+  $: lights2Configured = (() => {
+    const p = ($ioConfig?.outputMap as Record<number, number> | undefined)?.[EQ.LIGHTS2];
+    return p !== undefined && !UNASSIGNED_PORTS.has(p);
+  })();
   // Aux outputs "show up when set in IO Config" — the Auxiliary setup item only
   // appears when at least one AUX1..AUX8 output is mapped (matches the page,
   // which otherwise just says "no auxiliary output defined").
@@ -1352,31 +1362,41 @@
     {/each}
 
     <!-- ═══ BAY HID HIGH-BAY LIGHTS (EQ.LIGHTS1/2) — one ceiling fixture per bay ═══
-         Hung at ceiling height (z=130) over each bay centre; warm glow + a light
-         pool cast on the pile crest when lit, dark grey when off. Front bay (2)
-         draws last so it sits in front. -->
-    {#each [{ bay: BAY1, n: 1, on: lights1On }, { bay: BAY2, n: 2, on: lights2On }] as BL (BL.n)}
-      {@const lx = L / 2}
-      {@const ly = (BL.bay.y0 + BL.bay.y1) / 2}
-      {@const lc = P(lx, ly, 130)}
-      {@const pool = P(lx, ly, surfH(BL.bay, ly))}
-      {#if BL.on}
-        <!-- light shaft fanning down + warm pool on the pile -->
-        <polygon points="{(lc[0]-5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(lc[0]+5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(pool[0]+46).toFixed(1)},{pool[1].toFixed(1)} {(pool[0]-46).toFixed(1)},{pool[1].toFixed(1)}"
-                 fill="#fde68a" opacity="0.10"/>
-        <ellipse cx={pool[0]} cy={pool[1]} rx="46" ry="12" fill="url(#hidPool)"/>
+         Hung at ceiling height (z=130) over each bay; warm glow + a light pool on
+         the pile when lit, dark grey when off. Only drawn when the light is mapped
+         in IO Config. DRAGGABLE when unlocked (dragPos['light-N'], persisted) and a
+         TAP opens Equipment Control (openModal guards justMoved so a drag won't
+         also open it). Front bay (2) draws last so it sits in front. -->
+    {#each [{ bay: BAY1, n: 1, on: lights1On, cfg: lights1Configured }, { bay: BAY2, n: 2, on: lights2On, cfg: lights2Configured }] as BL (BL.n)}
+      {#if BL.cfg}
+        {@const defY = (BL.bay.y0 + BL.bay.y1) / 2}
+        {@const dl = dragPos['light-' + BL.n]}
+        {@const lx = dl ? dl.x : L / 2}
+        {@const ly = dl ? dl.y : defY}
+        {@const lc = P(lx, ly, 130)}
+        {@const pool = P(lx, ly, surfH(BL.bay, Math.max(BL.bay.y0, Math.min(BL.bay.y1, ly))))}
+        {#if BL.on}
+          <!-- light shaft fanning down + warm pool on the pile (non-interactive) -->
+          <polygon points="{(lc[0]-5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(lc[0]+5).toFixed(1)},{(lc[1]+2).toFixed(1)} {(pool[0]+46).toFixed(1)},{pool[1].toFixed(1)} {(pool[0]-46).toFixed(1)},{pool[1].toFixed(1)}"
+                   fill="#fde68a" opacity="0.10" pointer-events="none"/>
+          <ellipse cx={pool[0]} cy={pool[1]} rx="46" ry="12" fill="url(#hidPool)" pointer-events="none"/>
+        {/if}
+        <!-- fixture: suspension rod + bell reflector + HID bulb + bay number -->
+        <g transform="translate({lc[0]},{lc[1]})" class="drag3" role="button" tabindex="0"
+           on:pointerdown={(e) => startDrag(e, 'light-' + BL.n, L / 2, defY)}
+           on:click={() => openModal('equipment')}>
+          <!-- enlarged transparent hit area for touch -->
+          <rect x="-18" y="-23" width="36" height="31" fill="transparent"/>
+          <line x1="0" y1="-18" x2="0" y2="-2" stroke="#475569" stroke-width="1.5"/>
+          <path d="M -15 0 Q -16 -9 0 -11 Q 16 -9 15 0 Z"
+                fill={BL.on ? '#4a4327' : '#2f3c4b'} stroke="#1b232e" stroke-width="1.2"/>
+          {#if BL.on}<circle cx="0" cy="3" r="14" fill="url(#hidGlow)" pointer-events="none"/>{/if}
+          <circle cx="0" cy="2" r="4.6" fill={BL.on ? '#fff7d6' : '#0b1220'}
+                  stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
+          <text x="0" y="-19" text-anchor="middle" font-size="9" font-weight="800"
+                fill={BL.on ? '#fde68a' : '#64748b'} pointer-events="none">{BL.n}</text>
+        </g>
       {/if}
-      <!-- fixture: suspension rod + bell reflector + HID bulb + bay number -->
-      <g transform="translate({lc[0]},{lc[1]})">
-        <line x1="0" y1="-18" x2="0" y2="-2" stroke="#475569" stroke-width="1.5"/>
-        <path d="M -15 0 Q -16 -9 0 -11 Q 16 -9 15 0 Z"
-              fill={BL.on ? '#4a4327' : '#2f3c4b'} stroke="#1b232e" stroke-width="1.2"/>
-        {#if BL.on}<circle cx="0" cy="3" r="14" fill="url(#hidGlow)"/>{/if}
-        <circle cx="0" cy="2" r="4.6" fill={BL.on ? '#fff7d6' : '#0b1220'}
-                stroke={BL.on ? '#fde68a' : '#334155'} stroke-width="1"/>
-        <text x="0" y="-19" text-anchor="middle" font-size="9" font-weight="800"
-              fill={BL.on ? '#fde68a' : '#64748b'}>{BL.n}</text>
-      </g>
     {/each}
 
     <!-- ═══ SENSOR BILLBOARDS — drag to place on the pile ═══ -->
