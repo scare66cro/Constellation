@@ -483,9 +483,9 @@
     { title: 'I/O & Sensors', items: [
       { label: 'Orbit Sensors', route: '/level2/orbit-sensors', level: 2 },
     ]},
-    { title: 'Accounts', items: [
-      { label: 'User Accounts', modal: 'accounts', level: 2 },
-    ]},
+    // 'Accounts' setup group retired 2026-06-10 — User Accounts now lives in
+    // the titlebar account menu (👤 Level 2 ▾ → Account Setup), so it's no
+    // longer a top-bar setup dropdown. The 'accounts' modal itself is unchanged.
   ];
   let historyOpen = false;   // History & Logs hub (migrated from the /history menu page)
   // Setup groups now live as per-group dropdown buttons on the top bar. Each
@@ -929,9 +929,33 @@
     </div>
     <!-- sign-in (real auth via checkPassword) — right of the weather report -->
     {#if $navigationStore.level > 0}
-      <button class="login-btn in" on:click={logout} title="Sign out">
-        👤 Level {$navigationStore.level} · Sign out
-      </button>
+      {#if programLevel >= 2}
+        <!-- L2: the account pill is a menu (Account Setup + Sign Out), which is
+             why the standalone 'Accounts' setup group was retired. Reuses the
+             shared openGroup single-open state + .grp/.grp-menu pattern. -->
+        <div class="grp">
+          <button class="login-btn in" on:click={() => openGroup = openGroup === 'account' ? null : 'account'}
+            title="Account">
+            👤 Level {$navigationStore.level} ▾
+          </button>
+          {#if openGroup === 'account'}
+            <button class="grp-scrim" aria-label="Close menu" on:click={() => openGroup = null}></button>
+            <div class="grp-menu right" role="menu">
+              <button class="grp-item" on:click={() => { openGroup = null; openModal('accounts'); }}>
+                <span class="gi-label">Account Setup</span>
+                <span class="gi-lvl l2">L2</span>
+              </button>
+              <button class="grp-item" on:click={() => { openGroup = null; logout(); }}>
+                <span class="gi-label">Sign Out</span>
+              </button>
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <button class="login-btn in" on:click={logout} title="Sign out">
+          👤 Level {$navigationStore.level} · Sign out
+        </button>
+      {/if}
     {:else}
       <button class="login-btn" class:err={loginError} on:click={openLogin} title="Sign in">
         🔐 {loginError ? 'Retry sign-in' : 'Sign In'}
@@ -1639,6 +1663,8 @@
   .grp { position:relative; display:inline-block; }
   .grp-scrim { position:fixed; inset:0; background:transparent; border:none; z-index:40; cursor:default; }
   .grp-menu { position:absolute; left:0; top:calc(100% + 6px); z-index:41; background:#0f1827; border:1px solid #334155; border-radius:10px; padding:6px; min-width:250px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
+  /* right-aligned variant for the titlebar account pill (sits on the right edge) */
+  .grp-menu.right { left:auto; right:0; }
   .grp-item { display:flex; align-items:center; gap:9px; width:100%; text-align:left; background:none; border:none; color:#cbd5e1; border-radius:7px; padding:12px 14px; font-size:17px; font-weight:600; cursor:pointer; }
   .grp-item:hover { background:#1e293b; }
   .gi-label { flex:1 1 auto; }
