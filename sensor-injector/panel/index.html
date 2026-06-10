@@ -44,6 +44,8 @@ nav.tabs button:hover { color:var(--text); }
 main.eq { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; }
 .io-card { background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:10px; }
 .io-card h2 { font-size:13px; color:var(--accent); margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
+.opto-note { font-size:11px; line-height:1.45; color:var(--text2); background:rgba(79,195,247,0.07); border-left:3px solid var(--accent); border-radius:4px; padding:8px 10px; margin:0 0 10px 0; }
+.opto-note b { color:var(--text); }
 .io-row { display:grid; grid-template-columns:80px 1fr 60px; gap:8px; align-items:center; padding:5px 0; border-top:1px dashed var(--border); }
 .io-row:first-child { border-top:none; }
 .io-row label { font-size:12px; color:var(--text2); }
@@ -61,8 +63,8 @@ main.eq { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1f
   <div class="meta">
     <span><span id="dot" class="dot off"></span><span id="target">--</span></span>
     &middot; HR <span id="hrbase">200</span>+ &middot;
-    Display:
-    <select id="unit" title="Display + slider unit for TEMP channels. Wire to LP stays °C tenths; injector converts on push.">
+    Unit:
+    <select id="unit" disabled title="Follows Level-2 Basic Settings (matches the System Monitor). Wire to LP stays °C tenths; injector converts on push.">
       <option value="C">°C</option>
       <option value="F" selected>°F</option>
     </select>
@@ -91,6 +93,13 @@ main.eq { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1f
     </div>
     <div class="io-card">
       <h2>Digital Inputs (FC02 / inject FC06)</h2>
+      <p class="opto-note">Equipment inputs 0–9 are <b>post-optocoupler</b> (PS2504-4).
+      On the real board a <b>closed field contact = proving running</b>, and the opto
+      <b>inverts</b> it to a <b>LOW at the microcontroller</b>. This panel writes the chip-level
+      DI, so <b>PROVING</b> injects DI&nbsp;<b>low</b> (closed contact); <b>FAULT</b> = contact
+      open = DI&nbsp;high. (That inversion is why "closing proves running" looks backwards as a
+      bit. E-Stop / DC24V are active-high: OK&nbsp;=&nbsp;high.) <b>Bay lights</b> are
+      <b>current-sense</b>, shown as <b>ON/OFF</b> — DI&nbsp;high = lamp drawing current = ON.</p>
       <div id="di-list"></div>
     </div>
   </main>
@@ -169,6 +178,12 @@ async function load() {
     $dot.className = 'dot ' + (state.connected ? 'on' : 'off');
     $target.textContent = state.target + (state.connected ? ' (connected)' : ' (disconnected)');
     $hrbase.textContent = state.hrBase;
+    // Temp display unit FOLLOWS Level-2 Basic Settings (reported by the server
+    // from the bridge). Matches the System Monitor — no manual override.
+    if (state.tempUnit) {
+      const u = state.tempUnit === '°C' ? 'C' : 'F';
+      if (u !== displayUnit) { displayUnit = u; $unit.value = u; }
+    }
     render();
   } catch (e) {
     $dot.className = 'dot off';
@@ -325,23 +340,58 @@ function renderDOs(list) {
     </div>`).join('');
 }
 
+// DI polarity (matches AS2 / the controller). Equipment DIs 0..9 are
+// PROVING inputs behind a PS2504-4 optocoupler on real hardware: a CLOSED
+// field contact (operator proving the equipment runs) makes the opto conduct
+// and pull the microcontroller pin LOW. So at the chip — which is where this
+// panel + the firmware both live — proving/HEALTHY = DI LOW (0), and the
+// fault (contact OPEN) = DI HIGH (1). `nova_failures.c` faults on the bit
+// being SET. E-Stop (idx 10) + DC24V (11..14) are active-high — HEALTHY =
+// HIGH (1). The panel labels equipment inputs PROVING/FAULT (and the rest
+// OK/FAULT) and translates that → the correct chip-level inject level.
+function diHealthyOn(idx, healthy) { return idx < 10 ? (healthy ? 0 : 1) : (healthy ? 1 : 0); }
+function diIsHealthy(d)            { return d.idx < 10 ? !d.on : d.on; }
+
 function renderDIs(list) {
-  // Each row: label · LED · toggle button (POST /api/eq/di).
-  $diList.innerHTML = list.map((d) => `
+  // Bay lights (current-sense) read ON/OFF; equipment proving inputs read
+  // PROVING/FAULT; E-Stop + DC24V read OK/FAULT. (POST /api/eq/di.)
+  $diList.innerHTML = list.map((d) => {
+    if (d.sense === 'current') {
+      // Bay light: DI HIGH = lamp drawing current = ON. LED lit + green when ON.
+      return `
     <div class="io-row">
       <label>${d.label}</label>
       <div class="led ${d.on ? 'on' : ''}"></div>
-      <button class="toggle ${d.on ? 'on' : ''}" data-idx="${d.idx}" data-on="${d.on ? 0 : 1}">
-        ${d.on ? 'ON' : 'off'}
+      <button class="toggle ${d.on ? 'on' : ''}" data-idx="${d.idx}" data-sense="current" data-on="${d.on ? 1 : 0}">
+        ${d.on ? 'ON' : 'OFF'}
       </button>
-    </div>`).join('');
+    </div>`;
+    }
+    const ok = diIsHealthy(d);
+    const healthyLbl = d.idx < 10 ? 'PROVING' : 'OK';
+    return `
+    <div class="io-row">
+      <label>${d.label}</label>
+      <div class="led ${ok ? 'on' : ''}"></div>
+      <button class="toggle ${ok ? 'on' : ''}" data-idx="${d.idx}" data-ok="${ok ? 1 : 0}">
+        ${ok ? healthyLbl : 'FAULT'}
+      </button>
+    </div>`;
+  }).join('');
   $diList.querySelectorAll('button.toggle').forEach((b) =>
     b.addEventListener('click', onDiToggle));
 }
 
 async function onDiToggle(ev) {
   const idx = +ev.target.dataset.idx;
-  const on  = ev.target.dataset.on === '1';
+  let on;
+  if (ev.target.dataset.sense === 'current') {
+    // Bay light: ON = drive DI HIGH (current sensed), OFF = LOW. Toggle directly.
+    on = ev.target.dataset.on !== '1';
+  } else {
+    const targetHealthy = ev.target.dataset.ok !== '1';   // toggle to the opposite state
+    on = diHealthyOn(idx, targetHealthy) === 1;
+  }
   try {
     await fetch('/api/eq/di', {
       method: 'POST', headers: { 'content-type': 'application/json' },

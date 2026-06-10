@@ -34,6 +34,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
+import WebSocket from 'ws';
 import { ModbusTcpClient } from './mbtcp.js';
 import {
   engToHrInt16, hrInt16ToEng, SENSOR_VAL_UNDEF,
@@ -45,6 +46,15 @@ const HOST       = process.env.ORBIT_HOST ?? '10.1.2.200';
 const PORT       = parseInt(process.env.ORBIT_PORT ?? '5502', 10);
 const UNIT       = parseInt(process.env.ORBIT_UNIT ?? '1', 10);
 const PANEL_PORT = parseInt(process.env.PANEL_PORT ?? '9100', 10);
+const BRIDGE     = process.env.BRIDGE_HOST ?? '10.47.27.108:9001';
+
+// Temperature display unit — FOLLOWS Level-2 Basic Settings
+// (BasicSetup.temp_type: 0 = Fahrenheit, 1 = Celsius), read live from the
+// bridge proto stream so the injector panel speaks the same unit as the
+// System Monitor. The wire/engineering is ALWAYS °C (engToHrInt16); we only
+// convert at the panel boundary. Default Fahrenheit until the bridge reports.
+let tempType = 0;
+const tempUnitSym = () => (tempType === 1 ? '°C' : '°F');
 
 const HR_SENSOR_BASE = 200;
 const N_BOARDS       = 16;
@@ -122,6 +132,85 @@ for (let b = 0; b < N_BOARDS; b++) {
 const client = new ModbusTcpClient({ host: HOST, port: PORT, unitId: UNIT });
 client.connect();
 
+/* Read a single varint protobuf field from a message buffer. */
+function readVarintField(buf: Uint8Array, field: number): number | null {
+  let o = 0;
+  const rv = (): number => { let s = 0, r = 0, b: number; do { b = buf[o++]; r |= (b & 0x7f) << s; s += 7; } while (b & 0x80); return r >>> 0; };
+  while (o < buf.length) {
+    const key = rv(); const fn = key >>> 3, wt = key & 7;
+    if (wt === 0) { const v = rv(); if (fn === field) return v; }
+    else if (wt === 2) { const len = rv(); o += len; }
+    else if (wt === 5) o += 4;
+    else if (wt === 1) o += 8;
+    else break;
+  }
+  return null;
+}
+
+/* Follow Level-2 Basic Settings: subscribe to the bridge's BasicSetup
+ * (envelope tag 20) and track temp_type (field 2). Auto-reconnects. */
+function watchBasicSetup(): void {
+  const connect = () => {
+    const ws = new WebSocket(`ws://${BRIDGE}/proto/stream`);
+    ws.binaryType = 'arraybuffer';
+    ws.on('open', () => ws.send(JSON.stringify({ action: 'subscribe', tags: [20] })));
+    ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+      if (!isBinary) return;
+      const b = new Uint8Array(data as ArrayBuffer);
+      const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+      let off = 0;
+      while (off + 6 <= b.length) {
+        const tag = dv.getUint16(off, true); const len = dv.getUint32(off + 2, true); off += 6;
+        if (tag === 20) {
+          const tt = readVarintField(b.subarray(off, off + len), 2);
+          if (tt !== null && tt !== tempType) {
+            tempType = tt;
+            console.log(`[tempUnit] follows Basic Settings: temp_type=${tt} (${tempUnitSym()})`);
+          }
+        }
+        off += len;
+      }
+    });
+    ws.on('close', () => setTimeout(connect, 3000));
+    ws.on('error', () => { try { ws.close(); } catch { /* */ } });
+  };
+  connect();
+}
+watchBasicSetup();
+
+/* ─── Bay-light (current-sense) DI detection ──────────────────────────
+ * The bay lights (EQ.LIGHTS1=23, LIGHTS2=24) are CURRENT-SENSE inputs, NOT
+ * proving/fault inputs: DI HIGH = current flowing = lamp ON (the OPPOSITE of
+ * the equipment proving DIs, where HIGH = fault). We learn which DI channels
+ * they are from the controller's IO-Config input map (IoConfigInData is indexed
+ * by input PORT, value = the equipment assigned; the DI bit the controller reads
+ * for that equipment = port - 1). With that, the panel presents the bay lights
+ * as ON/OFF instead of PROVING/FAULT. Refetched periodically (config rarely
+ * changes); if the bridge is unreachable the map stays empty and the lights fall
+ * back to the generic DI behaviour — no harm. */
+const LIGHTS1_EQ = 23, LIGHTS2_EQ = 24;
+const currentSenseDi = new Map<number, string>();   // di idx -> friendly label
+async function refreshIoConfig(): Promise<void> {
+  try {
+    const res = await fetch(`http://${BRIDGE}/iot/debug/cache`);
+    if (!res.ok) return;
+    const cache = await res.json() as Record<string, unknown>;
+    const csv = cache.IoConfigInData;
+    if (typeof csv !== 'string') return;
+    const next = new Map<number, string>();
+    csv.split(',').map((s) => parseInt(s, 10)).forEach((eq, port) => {
+      const di = port - 1;   // controller reads di_bitmap bit (input_map - 1)
+      if (di < 0 || di >= N_DO) return;
+      if (eq === LIGHTS1_EQ) next.set(di, 'Bay Light 1');
+      else if (eq === LIGHTS2_EQ) next.set(di, 'Bay Light 2');
+    });
+    currentSenseDi.clear();
+    for (const [k, v] of next) currentSenseDi.set(k, v);
+  } catch { /* bridge not up yet — retry on the timer */ }
+}
+refreshIoConfig();
+setInterval(refreshIoConfig, 30000);
+
 /* Push one channel via FC06. Returns the wire int16 on success. */
 async function pushChannel(c: Channel): Promise<number> {
   const hr  = HR_SENSOR_BASE + c.board * N_CH_PER_BOARD + c.ch;
@@ -152,6 +241,60 @@ setInterval(async () => {
   catch (e) { console.log(`[push] periodic re-push failed: ${(e as Error).message}`); }
   finally { pendingRepush = false; }
 }, REPUSH_MS);
+
+/* ─── Auto-prove ─────────────────────────────────────────────────────
+ * "Until we get hardware": drive the STORAGE orbit's digital inputs to the
+ * HEALTHY state so the controller's (now-active) failure detection is
+ * satisfied. IMPORTANT — the two input groups have OPPOSITE polarity:
+ *   • Equipment DIs 0..9 are FAULT inputs (active-high): CheckInputs(EQ)=1
+ *     ⇒ the controller reads a FAULT (nova_serialshift.c:77, used as the
+ *     failure condition in nova_failures.c). Healthy = LOW (0).
+ *   • E-Stop (idx 10) is NORMALLY-CLOSED (lp_engine_shim.c:307: di10=1
+ *     healthy, 0 tripped; orbit-unreachable also fail-safes to tripped).
+ *     Healthy = HIGH (1).
+ * So: hold 0..9 LOW and E-Stop HIGH. Manual "pins" win, so panel writes
+ * stick — pin an equipment DI HIGH to fault-test it, or pin E-Stop to 0 to
+ * trip it. (Note: the fan also fails on a faulted/absent VFD via
+ * nova_vfd_any_faulted(), independent of DI 0..9.) */
+const AUTO_PROVE   = (process.env.AUTO_PROVE ?? '1') !== '0';
+const AUTOPROVE_MS = parseInt(process.env.AUTOPROVE_MS ?? '1000', 10);
+const ESTOP_IDX    = 10;
+/** Forced overrides (idx → bool) that win over auto-prove. Set by a manual
+ *  DI write; released back to auto with { idx, auto:true }. */
+const pinned = new Map<number, boolean>();
+/** Last value written to each DI-inject reg, so we only write on change. */
+const lastDi = new Map<number, number>();
+
+async function setDi(idx: number, on: boolean): Promise<void> {
+  const v = on ? 1 : 0;
+  if (lastDi.get(idx) === v) return;
+  await client.writeRegister(HR_DI_INJECT + idx, v);
+  lastDi.set(idx, v);
+}
+
+let autoProveBusy = false;
+if (AUTO_PROVE) {
+  setInterval(async () => {
+    if (autoProveBusy || !client.isConnected()) return;
+    autoProveBusy = true;
+    try {
+      // Equipment DIs 0..9 are FAULT inputs: CheckInputs(EQ)=1 (DI high) is
+      // read as a FAULT by the controller (nova_failures.c / nova_serialshift.c:77).
+      // So "healthy" = DI LOW (0). Hold them low unless the operator pins one
+      // HIGH to fault-test that equipment. Pins win, so manual writes stick.
+      for (let i = 0; i < N_DO; i++) {
+        await setDi(i, pinned.has(i) ? pinned.get(i)! : false);
+      }
+      // E-Stop is the opposite — NORMALLY-CLOSED (lp_engine_shim.c:307:
+      // di10=1 healthy, 0 tripped). Hold HIGH unless pinned to 0 to trip it.
+      await setDi(ESTOP_IDX, pinned.has(ESTOP_IDX) ? pinned.get(ESTOP_IDX)! : true);
+    } catch {
+      /* transient (socket blip) — next tick retries */
+    } finally {
+      autoProveBusy = false;
+    }
+  }, AUTOPROVE_MS);
+}
 
 /* ─── REST + static panel ────────────────────────────────────────── */
 
@@ -187,8 +330,10 @@ function snapshot() {
     boards:    N_BOARDS,
     channelsPerBoard: N_CH_PER_BOARD,
     hrBase:    HR_SENSOR_BASE,
+    tempUnit:  tempUnitSym(),   // follows Level-2 Basic Settings
     boardLabels: Array.from({ length: N_BOARDS }, (_, b) => boardLabel(b)),
     channelLabels: Array.from({ length: N_BOARDS }, (_, b) => CH_LABELS[b]),
+    // value/wire stay canonical °C; the panel converts for display per tempUnit.
     channels:  channels.map((c) => ({
       board: c.board, ch: c.ch, type: c.type, typeName: typeName(c.type),
       value: c.value, hr: HR_SENSOR_BASE + c.board * N_CH_PER_BOARD + c.ch,
@@ -219,6 +364,8 @@ const server = http.createServer(async (req, res) => {
       const c = channels[board * N_CH_PER_BOARD + ch];
       if (!c) return jsonRes(res, 404, { error: 'channel not found' });
       if (typeof type === 'number') c.type = type as SensorType;
+      // Panel already converts to canonical °C before posting (see panel
+      // fromSlider); store as-is.
       if (typeof value === 'number') c.value = value;
       const wire = await pushChannel(c);
       return jsonRes(res, 200, { ok: true, wire });
@@ -251,22 +398,38 @@ const server = http.createServer(async (req, res) => {
       const coils     = await client.readCoils(0, N_DO);
       const discretes = await client.readDiscreteInputs(0, N_DI_TOTAL);
       return jsonRes(res, 200, {
+        autoProve: AUTO_PROVE,
         do:     coils.map((on, i)    => ({ idx: i, on, label: DO_LABELS[i] })),
-        di:     discretes.map((on, i) => ({ idx: i, on, label: DI_LABELS[i] })),
+        di:     discretes.map((on, i) => ({
+          idx: i, on, label: currentSenseDi.get(i) ?? DI_LABELS[i], pinned: pinned.has(i),
+          // 'current' = bay-light current-sense (HIGH=ON), 'proving' = equipment
+          // fault DI (HIGH=fault), 'activeHigh' = E-Stop/DC24V (HIGH=OK).
+          sense: currentSenseDi.has(i) ? 'current' : (i < N_DO ? 'proving' : 'activeHigh'),
+        })),
       });
     }
 
     if (url.pathname === '/api/eq/di' && req.method === 'POST') {
-      /* Inject a single DI / E-stop / DC24V bit into the STORAGE
-       * orbit's DI mirror. body: { idx: 0..14, on: bool } */
+      /* Inject / pin one DI / E-stop / DC24V bit on the STORAGE orbit.
+       * body: { idx: 0..14, on: bool }   → pin to that value (wins over
+       *                                     auto-prove; for fault testing)
+       *       { idx: 0..14, auto: true }  → release the pin (back to
+       *                                     auto-prove for DI 0..9 / E-stop) */
       const body = JSON.parse(await readBody(req));
       const idx = Number(body.idx);
-      const on  = Boolean(body.on);
       if (!Number.isFinite(idx) || idx < 0 || idx >= N_DI_TOTAL) {
         return jsonRes(res, 400, { error: 'idx out of range' });
       }
+      if (body.auto === true) {
+        pinned.delete(idx);
+        return jsonRes(res, 200, { ok: true, pinned: false });
+      }
+      const on = Boolean(body.on);
+      pinned.set(idx, on);
+      lastDi.delete(idx);          // force the write below + next auto tick
       await client.writeRegister(HR_DI_INJECT + idx, on ? 1 : 0);
-      return jsonRes(res, 200, { ok: true });
+      lastDi.set(idx, on ? 1 : 0);
+      return jsonRes(res, 200, { ok: true, pinned: true, on });
     }
 
     /* Static panel. */
@@ -298,4 +461,6 @@ server.listen(PANEL_PORT, () => {
   console.log(`  Panel   : http://localhost:${PANEL_PORT}/`);
   console.log(`  HR base : ${HR_SENSOR_BASE} (${N_BOARDS} boards × ${N_CH_PER_BOARD} ch = ${N_CHANNELS} regs)`);
   console.log(`  UNDEF   : 0x${SENSOR_VAL_UNDEF.toString(16).toUpperCase()}`);
+  console.log(`  AutoProve: ${AUTO_PROVE ? `ON (DI 0..9 held no-fault, E-stop healthy, every ${AUTOPROVE_MS}ms)` : 'OFF (manual DI only)'}`);
+  console.log(`  TempUnit: ${tempUnitSym()} (follows Basic Settings via bridge ${BRIDGE})`);
 });
