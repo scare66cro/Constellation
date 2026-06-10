@@ -915,6 +915,26 @@
   $: heatTagPt = P((dragPos['heat']?.x ?? 385), (dragPos['heat']?.y ?? spineCy), 0);
   $: plenumPt = P(plenumCard.x, plenumCard.y, 92);
   $: returnPt = P(returnCard.x, returnCard.y, 92);
+  $: condCard = dragPos['cond'] ?? { x: 300, y: spineCy };
+  $: condPt = P(condCard.x, condCard.y, 92);
+  // ── CONDITIONS card values ──────────────────────────────────────
+  // Cooling-available temp = AS2 "Cool Avl Temp" (SystemStatus.start_temp): the
+  // outside-air threshold below which free cooling engages.
+  $: coolAvail = ss?.startTemp;
+  // ΔT across the pile = plenum − return-air temp.
+  $: deltaT = (Number.isFinite(Number(plenumT)) && Number.isFinite(Number(returnT)))
+    ? Number(plenumT) - Number(returnT) : null;
+  // Pile temp average = mean of the live pile-probe readings.
+  $: pileAvg = (() => {
+    const vs = stations.map(stationVal).filter((v): v is number => Number.isFinite(v as number));
+    return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+  })();
+  // Moisture index = the classic "Moisture Loss" MI 1/2 (unit "mi"), same slot
+  // the home page reads (frontMatterStore.main[38]/[39]). Shows '--' until the
+  // value is computed in the proto pipeline (frontMatterComposite stubs it).
+  $: miMain = ($frontMatterStore?.main as string[]) ?? [];
+  $: mi1 = miMain[38] ?? '--';
+  $: mi2 = miMain[39] ?? '--';
 
   // equipment box helper: returns the 3 visible faces of a box at world
   // (x,y) footprint [w×d] standing height h.
@@ -1534,6 +1554,17 @@
       <text x="-34" y="-5"  class="card-k">Temp</text><text x="36" y="-5" text-anchor="end" class="card-v" style="fill:{returnTColor}">{f1(returnT)}°</text>
       <text x="-34" y="8"   class="card-k">RH</text><text x="36" y="8" text-anchor="end" class="card-v">{f0(returnH)}%</text>
       <text x="-34" y="21"  class="card-k">CO₂</text><text x="36" y="21" text-anchor="end" class="card-v" style="fill:{co2Color}">{f0(co2v)}</text>
+    </g>
+
+    <!-- ═══ CONDITIONS readout card (draggable): cool-avail / pile-avg / ΔT / moisture ═══ -->
+    <g transform="translate({condPt[0]},{condPt[1]})" class="drag3"
+       on:pointerdown={(e) => startDrag(e, 'cond', 300, spineCy)} role="button" tabindex="0">
+      <rect x="-50" y="-38" width="100" height="74" rx="8" fill="#0b1220" stroke="#a78bfa" stroke-width="1.5" filter="url(#soft3)"/>
+      <text x="-42" y="-25" class="card-hd2">CONDITIONS</text>
+      <text x="-42" y="-11" class="card-k">Cool Avl</text><text x="42" y="-11" text-anchor="end" class="card-v">{f1(coolAvail)}°</text>
+      <text x="-42" y="1"   class="card-k">Pile Avg</text><text x="42" y="1"  text-anchor="end" class="card-v">{f1(pileAvg)}°</text>
+      <text x="-42" y="13"  class="card-k">ΔT P−R</text><text x="42" y="13"  text-anchor="end" class="card-v">{f1(deltaT)}°</text>
+      <text x="-42" y="25"  class="card-k">Moist</text><text x="42" y="25"  text-anchor="end" class="card-v">{mi1}/{mi2} mi</text>
     </g>
   </svg>
 
