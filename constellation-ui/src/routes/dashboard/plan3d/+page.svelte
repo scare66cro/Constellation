@@ -1113,6 +1113,21 @@
       </linearGradient>
       <!-- reusable russet outlines (SPUD_BLOBS); fill/stroke come from each <use> -->
       {#each SPUD_BLOBS as bd, i (i)}<path id="sb{i}" d={bd}/>{/each}
+      <!-- faint netted russet-skin grain: grayscale fractal noise, compressed to
+           ~0.78..1.0 and multiplied over the spuds only. Applied once per bay to
+           the spud group (static → rasterized once, then cached). -->
+      <filter id="russetSkin" x="-5%" y="-5%" width="110%" height="110%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.55" numOctaves="2" seed="9" stitchTiles="stitch" result="n"/>
+        <feColorMatrix in="n" type="saturate" values="0" result="ng"/>
+        <feComponentTransfer in="ng" result="grain">
+          <feFuncR type="linear" slope="0.22" intercept="0.78"/>
+          <feFuncG type="linear" slope="0.22" intercept="0.78"/>
+          <feFuncB type="linear" slope="0.22" intercept="0.78"/>
+          <feFuncA type="linear" slope="0" intercept="1"/>
+        </feComponentTransfer>
+        <feComposite in="grain" in2="SourceGraphic" operator="in" result="gm"/>
+        <feBlend in="SourceGraphic" in2="gm" mode="multiply"/>
+      </filter>
       <!-- HID bay-light glow (halo at the bulb) + warm pool cast on the pile -->
       <radialGradient id="hidGlow">
         <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
@@ -1154,13 +1169,16 @@
       <polygon points={poly([10,cy+th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[10,M.bay.y1,0])} fill="#48300f"/>
       <polygon points={poly([L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[L,M.bay.y1,0],[L,M.bay.y0,0])} fill="#3d2810"/>
       <polygon points={poly([10,cy-th,M.bay.h],[L,cy-th,M.bay.h],[L,cy+th,M.bay.h],[10,cy+th,M.bay.h])} fill="#7e5a32"/>
-      <!-- scattered russet potatoes over the visible surface -->
-      {#each M.spuds as s (s.x + '_' + s.y)}
-        {@const c = P(s.x, s.y, s.z)}
-        <use href="#sb{s.blob}"
-             transform="translate({c[0].toFixed(1)} {c[1].toFixed(1)}) rotate({s.rot.toFixed(0)}) scale({s.r.toFixed(2)})"
-             fill="url(#spud{s.g})" stroke="#3f2810" stroke-width={(0.5 / s.r).toFixed(3)}/>
-      {/each}
+      <!-- scattered russet potatoes; the russetSkin filter adds a faint netted
+           grain (one filtered group per bay — rasterized once, then cached) -->
+      <g filter="url(#russetSkin)">
+        {#each M.spuds as s (s.x + '_' + s.y)}
+          {@const c = P(s.x, s.y, s.z)}
+          <use href="#sb{s.blob}"
+               transform="translate({c[0].toFixed(1)} {c[1].toFixed(1)}) rotate({s.rot.toFixed(0)}) scale({s.r.toFixed(2)})"
+               fill="url(#spud{s.g})" stroke="#3f2810" stroke-width={(0.5 / s.r).toFixed(3)}/>
+        {/each}
+      </g>
     {/each}
 
     <!-- ═══ PERIMETER RIM (low cavity-heat envelope on front edges) ═══ -->
