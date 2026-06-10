@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, createEventDispatcher } from "svelte";
   import { goto } from "$app/navigation";
   import Card from "$lib/ui/Card.svelte";
   import Column from "$lib/ui/Column.svelte";
@@ -58,7 +58,11 @@
     ready = true;
   });
 
+  const dispatch = createEventDispatcher();
   function gotoLogs() {
+    // Dashboard: open the in-place PID modal (plan3d listens for `viewlogs`);
+    // classic page: navigate to /level2/pid as before.
+    if (embedded) { dispatch('viewlogs'); return; }
     $pidStore.returnPage = '/level2/door';
     goto('/level2/pid');
   }

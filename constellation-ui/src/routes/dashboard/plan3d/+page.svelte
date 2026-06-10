@@ -572,6 +572,14 @@
     tabForms = {};
   }
 
+  // "Logs" button inside the refrig / door modals → swap to the in-place PID
+  // logs modal. Flush + close the current modal first (matches the classic
+  // page's navigate-away autosave), then open PID logs.
+  async function switchToPidLogs() {
+    await closeModal(true);
+    openModal('pidlogs');
+  }
+
   // ─── Sensor health ────────────────────────────────────────────────
   type Health = "ok" | "warn" | "alarm" | "nodata";
   const pileHealth = (v: number | null | undefined): Health =>
@@ -1414,7 +1422,7 @@
                 {:else if tab.id === 'door-co2'}
                   <Co2PurgeForm bind:this={tabForms['door-co2']} embedded theme={$themeStore} canEdit={tabCanEdit} />
                 {:else if tab.id === 'door-fresh'}
-                  <FreshAirDoorSettingsForm bind:this={tabForms['door-fresh']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                  <FreshAirDoorSettingsForm bind:this={tabForms['door-fresh']} embedded theme={$themeStore} canEdit={tabCanEdit} on:viewlogs={switchToPidLogs} />
                 {:else if tab.id === 'door-gdc'}
                   <GdcStagesForm bind:this={tabForms['door-gdc']} embedded theme={$themeStore} canEdit={tabCanEdit} />
                 {:else if tab.id === 'alarms-f1'}
@@ -1443,7 +1451,7 @@
           {:else if activeModal === 'humidifier'}
             <HumidifierControlForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} unit={modalUnit} />
           {:else if activeModal === 'refrig'}
-            <RefrigerationForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+            <RefrigerationForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} on:viewlogs={switchToPidLogs} />
           {:else if activeModal === 'heat'}
             <HeatForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
           {:else if activeModal === 'equipment'}

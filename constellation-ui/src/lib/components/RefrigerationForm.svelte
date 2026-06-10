@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, createEventDispatcher } from "svelte";
   import { goto } from "$app/navigation";
   import OnOff from "$lib/components/OnOff.svelte";
   import Card from "$lib/ui/Card.svelte";
@@ -140,7 +140,12 @@
     return () => unsub();
   });
 
+  const dispatch = createEventDispatcher();
   function gotoLogs() {
+    // On the dashboard (embedded), open the in-place PID modal instead of
+    // routing off the dashboard; plan3d listens for `viewlogs`. On the classic
+    // page, navigate to /level2/pid as before.
+    if (embedded) { dispatch('viewlogs'); return; }
     $pidStore.returnPage = '/level2/refrigeration';
     goto('/level2/pid');
   }
