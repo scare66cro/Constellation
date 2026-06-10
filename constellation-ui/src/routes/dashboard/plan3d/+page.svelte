@@ -788,9 +788,34 @@
   // ─── Deterministic potato scatter per bay (generated once) ────────
   let seed = 1337;
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-  // `el` = elongation (ry/rx) and `rot` = screen rotation give each tuber the
-  // oblong, randomly-angled look of a russet rather than a round ball.
-  interface Spud { x: number; y: number; z: number; r: number; g: 1 | 2; depth: number; rot: number; el: number; }
+  // A pool of irregular, oblong "potato" outlines generated once and reused
+  // across every spud via <use>, so the pile reads as lumpy russets instead of
+  // smooth ovals — at the SAME node count as the old ellipses. Each is a smooth
+  // closed quadratic blob of ~unit radius; the per-spud transform scales/rotates
+  // it and a russet gradient supplies the skin.
+  function makeBlob(lobes: number, aspect: number): string {
+    const pts: [number, number][] = [];
+    for (let i = 0; i < lobes; i++) {
+      const a = (i / lobes) * Math.PI * 2;
+      const r = 0.74 + rnd() * 0.4;                 // lumpy radius
+      pts.push([Math.cos(a) * r, Math.sin(a) * r * aspect]);
+    }
+    const mid = (p: [number, number], q: [number, number]): [number, number] =>
+      [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+    const f = (n: number) => n.toFixed(2);
+    const s0 = mid(pts[lobes - 1], pts[0]);
+    let d = `M${f(s0[0])},${f(s0[1])}`;
+    for (let i = 0; i < lobes; i++) {
+      const c = pts[i], m = mid(pts[i], pts[(i + 1) % lobes]);
+      d += `Q${f(c[0])},${f(c[1])} ${f(m[0])},${f(m[1])}`;
+    }
+    return d + 'Z';
+  }
+  const SPUD_BLOBS = Array.from({ length: 16 }, (_, i) =>
+    makeBlob(8 + (i % 3), 0.5 + (i % 4) * 0.08));   // varied lobe count + aspect
+  // `blob` picks one of the shapes above; `rot` = screen angle; `g` = russet
+  // skin gradient (1..4). One <use> per tuber — lumpy and tonally varied.
+  interface Spud { x: number; y: number; z: number; r: number; g: number; depth: number; rot: number; blob: number; }
   function genSpuds(bay: { y0: number; y1: number; h: number }): Spud[] {
     const out: Spud[] = [];
     const cy = (bay.y0 + bay.y1) / 2;
@@ -805,7 +830,7 @@
         const crest = Math.max(0, 1 - Math.abs(jy - cy) / half);   // 1 at crest → 0 at base
         const bump = crest * crest * 9 + rnd() * 5;
         const z = Math.max(2, surfH(bay, jy) + bump);
-        out.push({ x: jx, y: jy, z, r: 6.5 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy, rot: rnd() * 180, el: 0.46 + rnd() * 0.2 });
+        out.push({ x: jx, y: jy, z, r: 6.5 + rnd() * 5, g: 1 + Math.floor(rnd() * 4), depth: jx + jy, rot: rnd() * 360, blob: Math.floor(rnd() * SPUD_BLOBS.length) });
       }
     }
     // Pass 2 — heavy packing on the VISIBLE FRONT SLOPE + base toe (cy → front
@@ -817,7 +842,7 @@
         const jx = x + (rnd() - 0.5) * 9;
         const jy = Math.min(bay.y1 - 1, y + (rnd() - 0.5) * 4);
         const z = Math.max(2, surfH(bay, jy) + rnd() * 4);
-        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy, rot: rnd() * 180, el: 0.46 + rnd() * 0.2 });
+        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: 1 + Math.floor(rnd() * 4), depth: jx + jy, rot: rnd() * 360, blob: Math.floor(rnd() * SPUD_BLOBS.length) });
       }
     }
     return out.sort((a, b) => a.depth - b.depth);  // far → near (painter's order)
@@ -1072,12 +1097,22 @@
        style="--fan-dur:{fanSpinDur}s; --fan-play:{fanSpinning ? 'running' : 'paused'}"
        on:pointermove={onDrag} on:pointerup={endDrag} on:pointerleave={endDrag}>
     <defs>
-      <linearGradient id="spudA" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#d8b076"/><stop offset="52%" stop-color="#a87a40"/><stop offset="100%" stop-color="#6b4521"/>
+      <!-- russet skin gradients (matte tan→russet→shadow, slightly off-vertical
+           so the light reads organic; one of 4 per tuber for tonal variation) -->
+      <linearGradient id="spud1" x1="0" y1="0" x2="0.25" y2="1">
+        <stop offset="0%" stop-color="#dcb87e"/><stop offset="50%" stop-color="#a87a40"/><stop offset="100%" stop-color="#66421f"/>
       </linearGradient>
-      <linearGradient id="spudB" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#c39a5c"/><stop offset="55%" stop-color="#8c5f2e"/><stop offset="100%" stop-color="#5a3a1c"/>
+      <linearGradient id="spud2" x1="0" y1="0" x2="0.25" y2="1">
+        <stop offset="0%" stop-color="#caa05f"/><stop offset="52%" stop-color="#925f2c"/><stop offset="100%" stop-color="#583618"/>
       </linearGradient>
+      <linearGradient id="spud3" x1="0" y1="0" x2="0.25" y2="1">
+        <stop offset="0%" stop-color="#d2a866"/><stop offset="50%" stop-color="#9c6a36"/><stop offset="100%" stop-color="#5e3d1d"/>
+      </linearGradient>
+      <linearGradient id="spud4" x1="0" y1="0" x2="0.25" y2="1">
+        <stop offset="0%" stop-color="#e3c08c"/><stop offset="50%" stop-color="#b3884c"/><stop offset="100%" stop-color="#71502a"/>
+      </linearGradient>
+      <!-- reusable russet outlines (SPUD_BLOBS); fill/stroke come from each <use> -->
+      {#each SPUD_BLOBS as bd, i (i)}<path id="sb{i}" d={bd}/>{/each}
       <!-- HID bay-light glow (halo at the bulb) + warm pool cast on the pile -->
       <radialGradient id="hidGlow">
         <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
@@ -1122,9 +1157,9 @@
       <!-- scattered russet potatoes over the visible surface -->
       {#each M.spuds as s (s.x + '_' + s.y)}
         {@const c = P(s.x, s.y, s.z)}
-        <ellipse cx={c[0]} cy={c[1]} rx={s.r} ry={s.r * s.el}
-                 transform="rotate({s.rot.toFixed(0)} {c[0].toFixed(1)} {c[1].toFixed(1)})"
-                 fill={s.g === 1 ? 'url(#spudA)' : 'url(#spudB)'} stroke="#4a3216" stroke-width="0.5"/>
+        <use href="#sb{s.blob}"
+             transform="translate({c[0].toFixed(1)} {c[1].toFixed(1)}) rotate({s.rot.toFixed(0)}) scale({s.r.toFixed(2)})"
+             fill="url(#spud{s.g})" stroke="#3f2810" stroke-width={(0.5 / s.r).toFixed(3)}/>
       {/each}
     {/each}
 
