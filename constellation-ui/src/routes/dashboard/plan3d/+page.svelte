@@ -639,6 +639,11 @@
   // the Equipment Control page can never disagree. For PROVING equipment that
   // helper encodes the AS2 convention (DI asserted = FAULT, healthy = DI low).
   $: fanProved = interpretEquipmentInput(EQ.FAN, !!eqIn[EQ.FAN]).healthy;
+  // Same proving/health for the refrigeration + climacell readouts below the
+  // equipment (both are PROVING inputs in equipmentEnum) — green = proved /
+  // healthy (DI low), red = fault (DI asserted). Mirrors the fan pill.
+  $: refrigProved = interpretEquipmentInput(EQ.REFRIGERATION, !!eqIn[EQ.REFRIGERATION]).healthy;
+  $: climacellProved = interpretEquipmentInput(EQ.CLIMACELL, !!eqIn[EQ.CLIMACELL]).healthy;
   $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
   $: heatOn = !!eqOut[EQ.HEAT];
   // Climacell output coil — gates the media-wall water animation so the
@@ -1160,10 +1165,10 @@
              sheared wall group so the text stays upright). % = coolPct. -->
         <g transform="translate({base[0]},{base[1] + 24})" class="door-tag">
           <rect x="-44" y="-16" width="88" height="30" rx="7" fill="#0b1220"
-                stroke={refrigState !== 'off' ? refrigColor : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+                stroke={refrigProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
           <text x="0" y="-4" text-anchor="middle" class="dtag-k">REFRIGERATION</text>
           <text x="0" y="9"  text-anchor="middle" class="dtag-v"
-                fill={refrigState === 'defrost' ? '#fecaca' : refrigState === 'off' ? '#94a3b8' : '#bfdbfe'}>
+                fill={refrigProved ? '#bbf7d0' : '#fca5a5'}>
             {refrigState === 'defrost' ? 'DEFROST' : coolPct + '%'}
           </text>
         </g>
@@ -1186,10 +1191,10 @@
            on:click|stopPropagation={() => openModal('climacell')}
            role="button" tabindex="0">
           <rect x="-34" y="-16" width="68" height="30" rx="7" fill="#0b1220"
-                stroke={climacellOn ? '#38bdf8' : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+                stroke={climacellProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
           <text x="0" y="-4" text-anchor="middle" class="dtag-k">CLIMACELL</text>
           <text x="0" y="9"  text-anchor="middle" class="dtag-v"
-                fill={climacellOn ? '#bae6fd' : '#94a3b8'}>{climacellOn ? 'ON' : 'OFF'}</text>
+                fill={climacellProved ? '#bbf7d0' : '#fca5a5'}>{climacellOn ? 'ON' : 'OFF'}</text>
         </g>
       {/if}
     {/each}
