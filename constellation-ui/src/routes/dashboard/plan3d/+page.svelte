@@ -845,6 +845,19 @@
         out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: 1 + Math.floor(rnd() * 4), depth: jx + jy, rot: rnd() * 360, blob: Math.floor(rnd() * SPUD_BLOBS.length) });
       }
     }
+    // Pass 3 — the DOOR-END FACE (x≈L): the pile's cut end facing the camera.
+    // Plaster it floor→crest with potatoes (at each depth y the end rises to
+    // surfH(y)) so the end reads as a heap of spuds spilling to the door, not a
+    // bare sliced face. depth = x+y keeps these (front-most, x≈L) drawn on top.
+    for (let y = bay.y0 + 2; y < bay.y1; y += 5.5) {
+      const top = surfH(bay, y);
+      for (let z = 2; z < top + 2; z += 5.5) {
+        const jx = L - 1 - rnd() * 7;
+        const jy = y + (rnd() - 0.5) * 5;
+        const jz = Math.max(1, Math.min(top, z) + (rnd() - 0.5) * 4);
+        out.push({ x: jx, y: jy, z: jz, r: 5.5 + rnd() * 4, g: 1 + Math.floor(rnd() * 4), depth: jx + jy, rot: rnd() * 360, blob: Math.floor(rnd() * SPUD_BLOBS.length) });
+      }
+    }
     return out.sort((a, b) => a.depth - b.depth);  // far → near (painter's order)
   }
   const spuds1 = genSpuds(BAY1);
