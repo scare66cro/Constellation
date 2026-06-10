@@ -185,6 +185,7 @@ function buildMain(
 // looked up directly. Switches that used to be synthesized from byte
 // offsets are now read straight off `EquipState.remoteOff`.
 import { EQ, REMOTE } from './equipmentEnum.js';
+import { INPUT_GOOD, INPUT_BAD } from './mode.js';
 
 function buildPanel(
 	ss: TagPayload[typeof TAG.SystemStatus] | null,
@@ -205,6 +206,15 @@ function buildPanel(
 	if (eq) for (const it of eq.items) byIdx.set(it.eqIndex, it);
 	const outOn = (i: number): string => (byIdx.get(i)?.outputOn ? '1' : '0');
 	const inOn  = (i: number): string => (byIdx.get(i)?.inputOn  ? '1' : '0');
+	// PROVING inputs (fan, climacell, humidifier heads, …) are active-high
+	// FAULT contacts per AS2 (Failures.c:443, SerialShift.c:99-112): the field
+	// device ASSERTS the DI (input_on true) to signal a FAILURE; a healthy,
+	// proving device leaves it LOW. So normalize to a "good=INPUT_GOOD" flag —
+	// DI low ⇒ INPUT_GOOD, DI high ⇒ INPUT_BAD — so the home-page running
+	// graphics (which gate on `=== INPUT_GOOD`) light when the device is
+	// actually proving, not when it's faulted. CURRENT_SENSE inputs (bay
+	// lights) keep raw `inOn` — for those, DI high = current flowing = on.
+	const inProveGood = (i: number): string => (byIdx.get(i)?.inputOn ? INPUT_BAD : INPUT_GOOD);
 	// Software-switch render key for the panel (legacy mapping):
 	//   off   → '0' (panel shows OFF in red)
 	//   manual→ '2' (panel shows MANUAL)
@@ -258,16 +268,14 @@ function buildPanel(
 	panel[9]  = swKey(EQ.FAN);
 	panel[10] = isConfigured(EQ.CLIMACELL) || isConfigured(EQ.BURNER) ? swKey(EQ.CLIMACELL) : '0';
 	// panel[11] = climacell "proved" input. The home-page Climacell
-	// component renders the running graphic only when this is
-	// INPUT_GOOD ('1' = DI active/high — modern active-high
-	// convention, see mode.ts where the legacy '0=good' was flipped
-	// 2026-06-03). When the operator's Level 2 Failures 1
-	// ClimacellMode is 'None' (0) we force INPUT_GOOD so the graphic
-	// tracks output+switch alone. Any other failure mode passes the
-	// real DI through so a mapped proving contact (active-high when
-	// closed/proving good) gates the graphic correctly.
+	// component renders the running graphic only when this is INPUT_GOOD.
+	// Climacell is a PROVING input (active-high FAULT): healthy/proving =
+	// DI low, so `inProveGood` maps DI low → INPUT_GOOD. When the operator's
+	// Level 2 Failures 1 ClimacellMode is 'None' (0) we force INPUT_GOOD so
+	// the graphic tracks output+switch alone; otherwise the real (normalized)
+	// proving DI gates the graphic.
 	const climacellProveDisabled = (fs?.climacellMode ?? 0) === 0;
-	panel[11] = climacellProveDisabled ? '1' : inOn(EQ.CLIMACELL);
+	panel[11] = climacellProveDisabled ? INPUT_GOOD : inProveGood(EQ.CLIMACELL);
 	panel[12] = outOn(EQ.CLIMACELL);
 	// [13] = humid software-switch (head1 stands in as the family proxy)
 	panel[13] =
@@ -284,17 +292,17 @@ function buildPanel(
 		return String(p);
 	};
 	panel[14] = portForEq(EQ.HUMID_HEAD1);
-	panel[15] = inOn(EQ.HUMID_HEAD1);
+	panel[15] = inProveGood(EQ.HUMID_HEAD1);
 	panel[16] = outOn(EQ.HUMID_HEAD1);
 	panel[17] = outOn(EQ.HUMID_PUMP1);
 
 	panel[18] = portForEq(EQ.HUMID_HEAD2);
-	panel[19] = inOn(EQ.HUMID_HEAD2);
+	panel[19] = inProveGood(EQ.HUMID_HEAD2);
 	panel[20] = outOn(EQ.HUMID_HEAD2);
 	panel[21] = outOn(EQ.HUMID_PUMP2);
 
 	panel[22] = portForEq(EQ.HUMID_HEAD3);
-	panel[23] = inOn(EQ.HUMID_HEAD3);
+	panel[23] = inProveGood(EQ.HUMID_HEAD3);
 	panel[24] = outOn(EQ.HUMID_HEAD3);
 	panel[25] = outOn(EQ.HUMID_PUMP3);
 

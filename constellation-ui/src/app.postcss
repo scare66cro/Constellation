@@ -131,3 +131,71 @@ body.show-cursor * {
 .date-time-field input[type="text"] {
 	@apply !text-lg md:!text-xl xl:!text-2xl w-full;
 }
+
+/* ─── Spatial-UI shared form themes ───────────────────────────────────
+   Settings pages are extracted into shared `*Form.svelte` components that
+   render in two presentations: the classic touchscreen page (theme=light,
+   untouched) and the dashboard modal (theme=dark). The dark skin is
+   defined ONCE here, gated under `.pform--dark`, so migrating a new form
+   is just: wrap its body in `<div class="pform pform--{theme}">`. These
+   rules deliberately use `!important` to override the Skeleton utility
+   colours (bg-white / bg-gray-300 / bg-surface-100) and the responsive
+   font-size baked into the `text-size-*` utilities. Light forms get no
+   rules here, so the production pages are byte-for-byte unchanged.
+   Docs: docs/spatial-ui-page-migration.md */
+.pform--dark { color:#cbd5e1; font-size:14px; line-height:1.55; }
+.pform--dark .text-size-xl    { font-size:15px !important; line-height:1.55 !important; }
+.pform--dark .text-size-large { font-size:14px !important; line-height:1.5 !important; }
+.pform--dark .text-size       { font-size:13px !important; }
+.pform--dark .text-size-base  { font-size:13px !important; }
+/* layered panels: every Skeleton .card is a dark panel; the form's
+   OUTERMOST card (direct child of .pform) goes transparent so nested
+   panels (alarm / ramp cards) read as raised on the modal background. */
+.pform--dark .card { background:#0b1220 !important; opacity:1 !important; box-shadow:none !important; color:#cbd5e1 !important; border:1px solid #1e293b; border-radius:10px; }
+.pform--dark > .card { background:transparent !important; border:none !important; padding:0 !important; width:100% !important; }
+/* Skeleton paints tables/rows with a light surface — force dark on all. */
+.pform--dark .table,
+.pform--dark .table thead,
+.pform--dark .table tbody,
+.pform--dark .table tr,
+.pform--dark .tablerow,
+.pform--dark .table td,
+.pform--dark td { background:#0b1220 !important; border-color:#334155 !important; color:#cbd5e1 !important; box-shadow:none !important; }
+.pform--dark input.input,
+.pform--dark select.select { background:#0b1220 !important; color:#f8fafc !important; border:1px solid #475569 !important; font-size:15px !important; padding:6px 8px !important; border-radius:7px !important; }
+.pform--dark select.select option { background:#0b1220 !important; color:#f8fafc !important; }
+.pform--dark b, .pform--dark strong { color:#f8fafc !important; font-weight:700; }
+/* Equipment Control rows use a RAW <select> (no .select class) for the 3-way
+   switch — dark the field so it isn't an unreadable white box on the dark
+   modal — and use light-table status text colours that need brightening. */
+.pform--dark select { background:#0b1220 !important; color:#f8fafc !important; border-color:#475569 !important; }
+.pform--dark option { background:#0b1220 !important; color:#f8fafc !important; }
+.pform--dark .text-gray-700 { color:#94a3b8 !important; }
+.pform--dark .text-green-700 { color:#86efac !important; }
+.pform--dark .text-red-500, .pform--dark .text-red-700 { color:#fca5a5 !important; }
+.pform--dark .text-blue-500, .pform--dark .text-blue-700 { color:#93c5fd !important; }
+.pform--dark .text-black { color:#e2e8f0 !important; }
+/* Light-designed widgets (e.g. DatePicker: white input + bg-gray-200 calendar
+   dropdown + gray text) and bg-surface panels rendered inside a dark modal —
+   darken the raw Tailwind utilities so they aren't unreadable white boxes. */
+.pform--dark .bg-white { background:#0b1220 !important; color:#f8fafc !important; }
+.pform--dark .bg-surface-100 { background:#0b1220 !important; }
+.pform--dark .bg-gray-200 { background:#0f1827 !important; color:#e2e8f0 !important; }
+.pform--dark .text-gray-800, .pform--dark .text-gray-600 { color:#cbd5e1 !important; }
+.pform--dark .border-gray-300, .pform--dark .border-gray-400 { border-color:#475569 !important; }
+.pform--dark .hover\:bg-gray-300:hover { background:#1e293b !important; }
+.pform--dark .checkbox { accent-color:#0ea5e9; }
+.pform--dark button.btn { background:#0ea5e9 !important; color:#04293b !important; border-color:#0ea5e9 !important; font-size:14px !important; }
+/* Some forms paint buttons with semantic bg colours via Tailwind !bg-*
+   utilities (e.g. the climacell run-clock slot grid + operation selector:
+   off=red / on=green / auto=lime / cooling=blue). The blanket button.btn
+   rule above would wash them all to sky-blue in the dark modal — re-assert
+   the semantic colours here (equal specificity, later source order wins) so
+   they light up the same as on the classic page. */
+.pform--dark button.\!bg-red-500    { background:#ef4444 !important; border-color:#ef4444 !important; color:#000 !important; }
+.pform--dark button.\!bg-green-500  { background:#22c55e !important; border-color:#22c55e !important; color:#000 !important; }
+.pform--dark button.\!bg-lime-300   { background:#bef264 !important; border-color:#bef264 !important; color:#000 !important; }
+.pform--dark button.\!bg-blue-400   { background:#60a5fa !important; border-color:#60a5fa !important; color:#000 !important; }
+.pform--dark button.\!bg-purple-500 { background:#a855f7 !important; border-color:#a855f7 !important; color:#000 !important; }
+.pform--dark button.\!bg-yellow-500 { background:#eab308 !important; border-color:#eab308 !important; color:#000 !important; }
+.pform--dark button.\!bg-orange-500 { background:#f97316 !important; border-color:#f97316 !important; color:#000 !important; }

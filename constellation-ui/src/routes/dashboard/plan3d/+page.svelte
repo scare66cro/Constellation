@@ -11,14 +11,42 @@
   // ═══════════════════════════════════════════════════════════════════
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
-  import { systemStatus, sensorData, warningReport, plenumSettings, equipmentStatus } from "$lib/business/protoStores";
-  import { navigationStore, frontMatterStore, modeToColorStore, localeStore } from "$lib/store";
+  import { systemStatus, sensorData, warningReport, plenumSettings, equipmentStatus, ioConfig, co2Settings, fanSpeedSettings, basicSetup, burnerSettings } from "$lib/business/protoStores";
+  import { navigationStore, frontMatterStore, modeToColorStore, localeStore, themeStore, keysStore, keyboardStore } from "$lib/store";
+  import { getHttpUrl, checkPassword } from "$lib/business/util";
+  import { writeProto } from "$lib/business/protoWrite";
+  import { TAG } from "$lib/business/protoTags";
+  import { KeyboardTypes } from "$lib/ui/Keyboard.svelte";
   import { locale } from "svelte-i18n";
   import { INPUT_GOOD, OUTPUT_ON } from "$lib/business/mode";
-  import { EQ } from "$lib/business/equipmentEnum";
+  import { EQ, REMOTE, interpretEquipmentInput } from "$lib/business/equipmentEnum";
   import PlenumSetpointsForm from "$lib/components/PlenumSetpointsForm.svelte";
   import HumidifierControlForm from "$lib/components/HumidifierControlForm.svelte";
   import RefrigerationForm from "$lib/components/RefrigerationForm.svelte";
+  import FanSpeedForm from "$lib/components/FanSpeedForm.svelte";
+  import FanBoostForm from "$lib/components/FanBoostForm.svelte";
+  import ClimacellRunClockForm from "$lib/components/ClimacellRunClockForm.svelte";
+  import ClimacellConfigForm from "$lib/components/ClimacellConfigForm.svelte";
+  import FreshAirDoorSettingsForm from "$lib/components/FreshAirDoorSettingsForm.svelte";
+  import GdcStagesForm from "$lib/components/GdcStagesForm.svelte";
+  import OutsideAirForm from "$lib/components/OutsideAirForm.svelte";
+  import Co2PurgeForm from "$lib/components/Co2PurgeForm.svelte";
+  import HeatForm from "$lib/components/HeatForm.svelte";
+  import BurnerForm from "$lib/components/BurnerForm.svelte";
+  import AnalogConfigForm from "$lib/components/AnalogConfigForm.svelte";
+  import AuxiliaryForm from "$lib/components/AuxiliaryForm.svelte";
+  import IoConfigForm from "$lib/components/IoConfigForm.svelte";
+  import VersionForm from "$lib/components/VersionForm.svelte";
+  import FanRuntimeForm from "$lib/components/FanRuntimeForm.svelte";
+  import RunClockForm from "$lib/components/RunClockForm.svelte";
+  import EquipmentControlForm from "$lib/components/EquipmentControlForm.svelte";
+  import DateTimeForm from "$lib/components/DateTimeForm.svelte";
+  import AlarmHistoryForm from "$lib/components/AlarmHistoryForm.svelte";
+  import AccountsForm from "$lib/components/AccountsForm.svelte";
+  import FailuresForm1 from "$lib/components/FailuresForm1.svelte";
+  import FailuresForm2 from "$lib/components/FailuresForm2.svelte";
+  import AlertSetupForm from "$lib/components/AlertSetupForm.svelte";
+  import EmailForm from "$lib/components/EmailForm.svelte";
   import Flag from "$lib/components/Flag.svelte";
 
   // ─── Language switch — reuses the app's svelte-i18n + persisted localeStore.
@@ -36,17 +64,14 @@
   $: curLang = LANGS.find((l) => ($locale ?? "en").toLowerCase().startsWith(l.code)) ?? LANGS[0];
   function setLang(code: string) { localeStore.set(code); locale.set(code); langOpen = false; }
 
-  // ─── TEMPORARY access unlock ──────────────────────────────────────
-  // The form gates editing on `navigationStore.level > 0`; the dashboard
-  // runs at level 0, so program/settings fields are read-only. This
-  // button bumps the level directly so equipment can be programmed from
-  // the spatial UI during bring-up.
-  // TODO(auth): replace with Azure website account permissions + auto
-  //   sign-in over Bluetooth — no manual unlock button in production.
-  $: programUnlocked = $navigationStore.level > 0;
-  function toggleProgram() {
-    $navigationStore.level = programUnlocked ? 0 : 2;
-  }
+  // ─── Access level ─────────────────────────────────────────────────
+  //   `navigationStore.level` (0 = Monitor/view-only, 1, 2) is now set by the
+  //   real Sign In flow (checkPassword → the controller's account level).
+  //   Each modal form is gated on `programLevel >= MODAL_LEVEL[key]` (see
+  //   modalCanEdit). (The temp ⚙ Program cycle button was removed 2026-06-09
+  //   once real login landed; level → edit is the contract Azure roles plug
+  //   into.)
+  $: programLevel = ($navigationStore.level ?? 0) as 0 | 1 | 2;
 
   // ─── Live controller data (read-only). Production: real values only —
   //   no fabricated/demo fallbacks. Missing value → "—" (see f0/f1). ──
@@ -69,8 +94,11 @@
   let clk: ReturnType<typeof setInterval> | null = null;
   onMount(() => { clk = setInterval(() => (now = new Date()), 1000); });
   onDestroy(() => { if (clk) clearInterval(clk); });
-  $: clockStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  $: clockStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   $: dateStr  = now.toLocaleDateString([], { month: "short", day: "numeric" });
+  // Title from Level 2 → Basic Settings (BasicSetup.storageName); fall back
+  // to a generic label until the controller reports one.
+  $: storageName = (($basicSetup as any)?.storageName ?? '').trim() || 'Storage';
 
   // Canonical mode label + color — the SAME map the production header uses
   //   ($modeToColorStore[currentMode], populated in +layout, potato/onion
@@ -94,20 +122,219 @@
     dot: mc.color || "#94a3b8",
     color: brighten(mc.color || "#94a3b8"),
   };
-  $: wr = $warningReport;
-  $: alarms = (wr as any)?.entries ?? (wr as any)?.alarms ?? [];
-  $: alarmCount = Array.isArray(alarms) ? alarms.length : 0;
+  // Active alarms come from the COMPOSED, translated AlarmData on the front-
+  // matter store (`['WARN_KEY=Human text', …]`, built in frontMatterComposite
+  // from WarningReport — same source the classic Alarms.svelte uses), NOT the
+  // raw $warningReport (which isn't shaped as entries[] and stayed empty, so
+  // the old pill never went red). Each entry's human text is after the '='.
+  $: alarms = ($frontMatterStore?.AlarmData as string[]) ?? [];
+  $: alarmTexts = alarms
+    .map((a) => (a.includes('=') ? a.split('=').slice(1).join('=') : a).trim())
+    .filter(Boolean);
+  $: alarmCount = alarmTexts.length;
+  // Top-center indicator text: the specific alarm(s) when any are active
+  // (first + "+N more"), otherwise the normal operating mode.
+  $: alarmLabel = alarmCount === 0 ? ''
+    : alarmCount === 1 ? alarmTexts[0]
+    : `${alarmTexts[0]} +${alarmCount - 1} more`;
+
+  // ─── Login (real auth) — reuses checkPassword + the keyboard's
+  //   loginPassword mode (same path as GellertFooter's program button).
+  //   On success the controller returns the account's access level, which we
+  //   write to navigationStore.level (the same level the dashboard gates on).
+  //   The temp ⚙ Program button stays as a dev override for now.
+  let loginError = false;
+  function navigateLevel(level: number) { $navigationStore.level = level; }
+  function openLogin() {
+    $keyboardStore.keyboardType = KeyboardTypes.Alpha;
+    $keyboardStore.label = 'Sign In';
+    $keyboardStore.start = '';
+    $keyboardStore.inputType = 'loginPassword';
+    $keyboardStore.resultReady = async (data: string) => {
+      const u = (data as string).split(':');
+      await checkPassword(
+        u.length > 1 ? u[0] : '',
+        u.length > 1 ? u[1] : u[0],
+        () => {}, (e) => { loginError = e; }, async (level) => navigateLevel(level),
+      );
+    };
+    $keyboardStore.hidden = false;
+    $keyboardStore = $keyboardStore;
+  }
+  async function logout() {
+    try {
+      await fetch(getHttpUrl('/iot/logout'), { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    } catch (e) { console.error('[plan3d] logout failed:', e); }
+    navigateLevel(0);
+  }
+
+  // ─── System Start / Stop ──────────────────────────────────────────
+  //   Software stop, same path as the classic home page Start/Stop button:
+  //   POST /iot/button {tag:'button2', remoteStop:'Stop'|'Start'}. 'Stop'
+  //   engages SYSTEM_STOP (firmware CurrentMode=20 / SYSTEM_REMOTEOFF), 'Start'
+  //   clears it. We do NOT level-gate it — a physical E-Stop on the panel front
+  //   is the hard cutoff; this on-screen control must always be reachable.
+  $: stopped = Number(ss?.currentMode) === 20;
+  let runBusy = false;
+  async function toggleRun() {
+    if (runBusy) return;
+    runBusy = true;
+    const next = stopped ? 'Start' : 'Stop';
+    try {
+      await fetch(getHttpUrl('/iot/button'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: 'button2', remoteStop: next }),
+      });
+    } catch (e) { console.error('[plan3d] start/stop failed:', e); }
+    // The mode flips in via the proto stream; brief debounce against double-tap.
+    setTimeout(() => { runBusy = false; }, 1500);
+  }
+
+  // ─── Basic settings (distributed) — storage name, temp scale, crop type ──
+  //   These three live spread across the dashboard (name on the titlebar, °F/°C
+  //   by the weather, crop under ⚙ Setup → System) instead of one Basic page.
+  //   The legacy shared password is GONE — remote access is Azure cloud accounts
+  //   via the Accounts modal. Home-page selector / animations / multi-view: dropped.
+  //
+  //   ⚠ All five force-registered BasicSetup varints (tempType, systemMode,
+  //   multiView, localLogin, animations) are force-emitted by writeProto whether
+  //   present or not — an ABSENT one goes out as 0 and CLOBBERS the stored value
+  //   (resolveForceFields, forceFieldRegistry.ts). So every partial write must
+  //   carry all five at their current values; `writeBasic` does that.
+  function writeBasic(patch: Record<string, unknown>) {
+    const b = ($basicSetup as any) ?? {};
+    return writeProto(TAG.BasicSetup, {
+      tempType:   Number(b.tempType   ?? 0),
+      systemMode: Number(b.systemMode ?? 0),
+      multiView:  Number(b.multiView  ?? 0),
+      localLogin: Number(b.localLogin ?? 0),
+      animations: Number(b.animations ?? 0),
+      ...patch,
+    } as any);
+  }
+
+  // Temperature scale (BasicSetup.tempType: 0 = °F, 1 = °C) — toggle by weather.
+  $: tempIsC = Number(($basicSetup as any)?.tempType) === 1;
+  let unitBusy = false;
+  async function setTempUnit(c: boolean) {
+    if (unitBusy || programLevel < 2 || c === tempIsC) return;
+    unitBusy = true;
+    try { await writeBasic({ tempType: c ? 1 : 0 }); }
+    catch (e) { console.error('[plan3d] temp unit save failed:', e); }
+    setTimeout(() => { unitBusy = false; }, 800);
+  }
+
+  // Storage name — click the titlebar name to edit (on-screen keyboard). L2.
+  function editName() {
+    if (programLevel < 2) return;
+    $keyboardStore.keyboardType = KeyboardTypes.Alpha;
+    $keyboardStore.label = 'Storage Name';
+    $keyboardStore.start = storageName === 'Storage' ? '' : storageName;
+    $keyboardStore.inputType = 'text';
+    $keyboardStore.resultReady = async (val: string) => {
+      const name = String(val ?? '').trim();
+      try { await writeBasic({ storageName: name }); }
+      catch (e) { console.error('[plan3d] storage name save failed:', e); }
+    };
+    $keyboardStore.hidden = false;
+    $keyboardStore = $keyboardStore;
+  }
+
+  // Crop type (BasicSetup.systemMode) — ⚙ Setup → System modal. Changing it
+  // reshapes which equipment is active (onion adds burner/cure, etc.), so it's
+  // a deliberate select-then-Apply, not a one-tap. Bee/Pecan are in the enum
+  // ready for the cross-software merge.
+  const CROPS = [
+    { value: 0, label: 'Potato' },
+    { value: 1, label: 'Onion' },
+    { value: 2, label: 'Bee' },
+    { value: 3, label: 'Pecan' },
+  ];
+  $: cropMode = Number(($basicSetup as any)?.systemMode ?? 0);
+  let pendingCrop = 0;
+  let cropBusy = false;
+  async function applyCrop() {
+    if (cropBusy || programLevel < 2 || pendingCrop === cropMode) return;
+    cropBusy = true;
+    try { await writeBasic({ systemMode: pendingCrop }); closeModal(false); }
+    catch (e) { console.error('[plan3d] crop type save failed:', e); }
+    cropBusy = false;
+  }
+
+  // Alarm window — opened by clicking the center indicator. Lists the active
+  // alarms and offers Clear (same /iot/button {ClearAlarm} the classic
+  // Alarms.svelte uses).
+  let alarmOpen = false;
+  let clearingAlarm = false;
+  async function clearAlarms() {
+    clearingAlarm = true;
+    try {
+      await fetch(getHttpUrl('/iot/button'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: 'button2', ClearAlarm: 'ClearAlarm' }),
+      });
+    } catch (e) { console.error('[plan3d] clear alarm failed:', e); }
+    finally { clearingAlarm = false; alarmOpen = false; }
+  }
   $: pls = $plenumSettings;
   $: tempSP = (pls as any)?.tempSetpoint;
+  $: humidSP = (pls as any)?.humidSetpoint;
 
   // readouts
   $: outsideTemp = ss?.outsideTemp;
+  $: outsideHumid = ss?.outsideHumid;
   $: plenumT = ss?.plenumTemp;
   $: plenumH = ss?.plenumHumid;
+  // Plenum-temp at-a-glance colour vs setpoint (1:1 with the classic home
+  // page `plenumTempColor`): within ±0.2° = green, ±0.5° = yellow, beyond =
+  // red. Light variants for the dark card; white until temp/SP load.
+  $: plenumTColor = (() => {
+    const v = Number(plenumT), sp = Number(tempSP);
+    if (!Number.isFinite(v) || !Number.isFinite(sp)) return '#ffffff';
+    const d = Math.abs(v - sp);
+    return d > 0.5 ? '#fca5a5' : d > 0.2 ? '#fde047' : '#86efac';
+  })();
+  // Plenum-humidity colour (1:1 with classic `plenumHumidColor`): green
+  // normally, red when it drops more than 4% below the humidity setpoint.
+  $: plenumHColor = (() => {
+    const v = Number(plenumH), sp = Number(humidSP);
+    if (!Number.isFinite(v) || !Number.isFinite(sp)) return '#bae6fd';
+    return v < sp - 4 ? '#fca5a5' : '#86efac';
+  })();
+  // CO₂ colour vs the purge setpoint: anything under the setpoint is green,
+  // at/above is red. The purge setpoint (CO2 level that triggers a purge) is
+  // Co2Settings.cycleOrSet, which is only a CO2 level in AUTOMATIC mode (2);
+  // otherwise default green.
+  $: co2SP = Number(($co2Settings as any)?.cycleOrSet);
+  $: co2Mode = Number(($co2Settings as any)?.mode);
+  $: co2Color = (() => {
+    const v = Number(co2v);
+    if (!Number.isFinite(v)) return '#94a3b8';
+    if (co2Mode === 2 && Number.isFinite(co2SP) && co2SP > 0) return v >= co2SP ? '#fca5a5' : '#86efac';
+    return '#86efac';
+  })();
+  // Return-air colour vs the fan-speed temperature differential. The fan
+  // modulates to hold a `tempDiff` (default 1°) between the Plenum Setpoint
+  // and Return Air Temp. Colour by how close the ACTUAL differential is to
+  // that target: within 0.2° = green, within 0.4° = yellow, beyond = red.
+  $: fanTempDiff = Number(($fanSpeedSettings as any)?.tempDiff);
+  $: returnTColor = (() => {
+    const rt = Number(returnT), sp = Number(tempSP);
+    const td = (Number.isFinite(fanTempDiff) && fanTempDiff > 0) ? fanTempDiff : 1;
+    if (!Number.isFinite(rt) || !Number.isFinite(sp)) return '#f8fafc';
+    const err = Math.abs(Math.abs(rt - sp) - td);
+    return err > 0.4 ? '#fca5a5' : err > 0.2 ? '#fde047' : '#86efac';
+  })();
   $: returnT = ss?.returnTemp;
   $: returnH = ss?.returnHumid;
   $: co2v = ss?.co2Level;
-  let locked = false;   // edit-lock: when on, pieces can't be dragged
+  let locked = true;   // edit-lock: when on, pieces can't be dragged (starts locked)
+  // Rearranging the layout is gated behind Program Level 1: below L1 the scene
+  // is always locked and the Lock/Unlock button is hidden, so Monitor can't
+  // drag pieces. At L1+ the operator can unlock to rearrange.
+  $: effLocked = programLevel < 1 || locked;
 
   // ─── Equipment settings modal ─────────────────────────────────────
   //   Generic dispatcher: clicking an equipment hotspot sets `activeModal`
@@ -115,20 +342,176 @@
   //   SAME component its classic page uses — real writeProto save path).
   //   Adding a migrated form = one entry in MODAL_TITLES + one hotspot +
   //   one {:else if} branch. docs/spatial-ui-page-migration.md
-  type ModalKey = 'plenum' | 'humidifier' | 'refrig';
+  type ModalKey = 'plenum' | 'humidifier' | 'refrig' | 'fan' | 'climacell' | 'door' | 'heat' | 'equipment' | 'datetime' | 'alarmhist' | 'accounts' | 'alarms' | 'alerts' | 'system' | 'analog' | 'auxiliary' | 'ioconfig' | 'version' | 'fanruntime';
   const MODAL_TITLES: Record<ModalKey, string> = {
-    plenum: 'Plenum Setpoints & Alarms',
+    plenum: 'Plenum & Run Clock',
     humidifier: 'Humidifier Control',
     refrig: 'Refrigeration Setup',
+    fan: 'Fan Control',
+    climacell: 'Climacell',
+    door: 'Air & Doors',
+    heat: 'Heat Control',
+    equipment: 'Equipment Control',
+    datetime: 'Set Date & Time',
+    alarmhist: 'Alarm History',
+    accounts: 'User Accounts',
+    alarms: 'Alarms — Failure Modes',
+    alerts: 'Alerts',
+    system: 'Crop Type',
+    analog: 'Analog Board Setup',
+    auxiliary: 'Auxiliary Output Programming',
+    ioconfig: 'System I/O Configuration',
+    version: 'Software Versions & Firmware Update',
+    fanruntime: 'Fan Runtimes',
   };
+  // No-save modals are imperative control panels (no edit buffer / flush) —
+  // every action fires immediately. Their footer shows a single Close button
+  // instead of Cancel / Save & Close.
+  const MODAL_NOSAVE = new Set<ModalKey>(['equipment', 'alarmhist', 'accounts', 'system', 'version', 'fanruntime']);
+  $: modalNoSave = !!activeModal && MODAL_NOSAVE.has(activeModal);
+  // Tabbed modals: a key maps to >1 sub-form, each rendered as a tab. Single-
+  // form modals just omit an entry. ONE "Save & Close" flushes EVERY tab's
+  // dirty form (see closeModal). A tab may carry its OWN access `level` —
+  // tabs can mix levels (e.g. the door modal groups the level-1 Outside-Air
+  // control with the level-2 door/GDC settings); when omitted a tab inherits
+  // MODAL_LEVEL[key]. Build new multi-page hotspots this way.
+  type Tab = { id: string; label: string; level?: 1 | 2 };
+  const MODAL_TABS: Partial<Record<ModalKey, Tab[]>> = {
+    plenum: [
+      { id: 'plenum-setpoints', label: 'Setpoints & Alarms', level: 1 },
+      { id: 'plenum-runclock',  label: 'Run Clock',          level: 1 },
+    ],
+    fan: [
+      { id: 'fan-speed', label: 'Fan Speed', level: 1 },
+      { id: 'fan-boost', label: 'Fan Boost', level: 1 },
+    ],
+    climacell: [
+      { id: 'cell-runclock', label: 'Run Clock', level: 1 },
+      { id: 'cell-config',   label: 'Config',    level: 2 },
+    ],
+    // The Burner tab is ONLY surfaced in ONION mode (filtered into modalTabs
+    // below) — burner is an onion-cure subsystem. In Potato/Bee/Pecan the heat
+    // modal stays a single HeatForm (no tab strip).
+    heat: [
+      { id: 'heat-main',   label: 'Heat',   level: 1 },
+      { id: 'heat-burner', label: 'Burner', level: 2 },
+    ],
+    door: [
+      { id: 'door-outside', label: 'Outside Air',     level: 1 },
+      { id: 'door-co2',     label: 'CO₂ Purge',       level: 1 },
+      { id: 'door-fresh',   label: 'Fresh-Air Door',  level: 2 },
+      { id: 'door-gdc',     label: 'GDC Stages',      level: 2 },
+    ],
+    alarms: [
+      { id: 'alarms-f1', label: 'Failures 1', level: 2 },
+      { id: 'alarms-f2', label: 'Failures 2', level: 2 },
+    ],
+    alerts: [
+      { id: 'alerts-setup', label: 'Alert Setup',   level: 1 },
+      { id: 'alerts-email', label: 'Email Server',  level: 1 },
+    ],
+  };
+  // ── Burner availability — 1:1 port of AS2 `BurnerAvailable` (States.c:1091-
+  //    1097) so the Burner tab appears exactly when AS2 showed the burner:
+  //      Settings.SystemMode == SM_ONION                              (config)
+  //   && SystemState ∈ {ST_AIRCURE, ST_BURNERCURE}                    (in cure)
+  //   && CheckInputs(SW_BURNER_AUTO)                                  (switch on)
+  //   && Settings.Burner.Mode != BURNER_OFF
+  //   && Settings.RemoteOff[RO_BURNER] != 1
+  //    UI mapping: onion = BasicSetup.systemMode==1; "in cure" = the UI mode
+  //    code currentMode ∈ {16 air-cure, 17 burner-cure} (same map the header
+  //    uses); "burner switch on" = burner RemoteOff == Auto (Nova synthesizes
+  //    SW_BURNER_AUTO from RemoteOff; Auto already excludes Off=1); Burner.Mode
+  //    != 0 from BurnerSettings.mode. AS2Archaeologist 2026-06-09.
+  $: isOnion = Number(($basicSetup as any)?.systemMode) === 1;
+  $: inCure = [16, 17].includes(Number(ss?.currentMode));
+  $: burnerSwitchOn = eqRemote[EQ.BURNER] === REMOTE.AUTO
+    && Number(($burnerSettings as any)?.mode) !== 0;
+  $: burnerAvailable = isOnion && inCure && burnerSwitchOn;
+  $: modalTabs = !activeModal ? []
+    // Heat modal is tabbed (Heat · Burner) ONLY while the burner is available
+    // per AS2; otherwise a single HeatForm (empty tabs → single-form path).
+    : activeModal === 'heat' ? (burnerAvailable ? (MODAL_TABS.heat ?? []) : [])
+    : (MODAL_TABS[activeModal] ?? []);
+  // Grid-heavy forms need a wider dialog than the default 760px setpoint
+  // modal. Membership here applies the `.dlg.wide` skin (≈1400px, capped at
+  // 94vw). The body scrolls either way, so this only buys horizontal room.
+  const MODAL_WIDE = new Set<ModalKey>(['climacell', 'plenum', 'alarmhist', 'accounts', 'alarms', 'alerts', 'analog', 'auxiliary']);  // wide tables/forms
+  $: modalWide = !!activeModal && MODAL_WIDE.has(activeModal);
+  // Full-bleed modals: the densest pages (IO Config) need to overtake the whole
+  // screen (≈98vw × 94vh) — still a modal, no separate route. `.dlg.full`.
+  const MODAL_FULL = new Set<ModalKey>(['ioconfig']);
+  $: modalFull = !!activeModal && MODAL_FULL.has(activeModal);
+
+  // Access level each modal requires to be editable: level-1 pages unlock at
+  // Program L1, level-2 pages at Program L2. The form opens read-only below
+  // that and editable at/above it. (Maps to the route's level1/ vs level2/
+  // origin — keep in sync when migrating a new page.)
+  const MODAL_LEVEL: Record<ModalKey, 1 | 2> = {
+    plenum: 1, humidifier: 1, fan: 1, climacell: 1, heat: 1, equipment: 1, datetime: 1, alarmhist: 1, alerts: 1, version: 1, fanruntime: 1,
+    refrig: 2, door: 2, accounts: 2, alarms: 2, system: 2, analog: 2, auxiliary: 2, ioconfig: 2,
+  };
+  $: modalCanEdit = !!activeModal && programLevel >= (MODAL_LEVEL[activeModal] ?? 1);
+  // ─── Setup menu (the ⚙ gear) — non-equipment / system settings ────────
+  //   The classic page menu is being retired, so these pages need a home on
+  //   the dashboard. Data-driven launcher: each item opens an in-place modal
+  //   once it's migrated to a `*Form.svelte` (set `modal`), else navigates to
+  //   the classic route transitionally (`route`). As pages migrate, flip
+  //   `route` → `modal`; the gear is the permanent entry point. `level` is the
+  //   page's access tier (badge only — the target enforces its own edit gate).
+  type SetupItem = { label: string; route?: string; modal?: ModalKey; level: 1 | 2; flag?: 'aux' };
+  type SetupGroup = { title: string; items: SetupItem[] };
+  const SETUP_GROUPS: SetupGroup[] = [
+    { title: 'System', items: [
+      { label: 'IO Config',         modal: 'ioconfig',           level: 2 },
+      { label: 'Equipment Control', modal: 'equipment',          level: 1 },
+      { label: 'Crop Type',         modal: 'system',             level: 2 },
+      { label: 'Analog Boards',     modal: 'analog',             level: 2 },
+      { label: 'Date & Time',       modal: 'datetime',           level: 1 },
+      { label: 'Software Version',  modal: 'version',            level: 1 },
+      { label: 'Service Info',      route: '/level1/service',    level: 1 },
+    ]},
+    { title: 'Program', items: [
+      { label: 'Auxiliary Outputs', modal: 'auxiliary', level: 2, flag: 'aux' },
+    ]},
+    { title: 'Network', items: [
+      { label: 'Network',     route: '/level1/network', level: 1 },
+      { label: 'TCP / IP',    route: '/level2/tcpip',   level: 2 },
+      { label: 'Master / Slave', route: '/level2/master', level: 2 },
+      { label: 'IoT Client',  route: '/level2/iotclient', level: 2 },
+    ]},
+    { title: 'I/O & Sensors', items: [
+      { label: 'Orbit Sensors', route: '/level2/orbit-sensors', level: 2 },
+    ]},
+    { title: 'Accounts', items: [
+      { label: 'User Accounts', modal: 'accounts', level: 2 },
+    ]},
+  ];
+  let historyOpen = false;   // History & Logs hub (migrated from the /history menu page)
+  // Setup groups now live as per-group dropdown buttons on the top bar. Each
+  // dropdown lists only the items the current login level grants (item.level
+  // <= programLevel); a group with no accessible items is hidden. So Monitor
+  // sees no setup, L1 sees level-1 items, L2 sees everything.
+  let openGroup: string | null = null;
+  function openSetupItem(it: SetupItem) {
+    openGroup = null;
+    if (it.modal) openModal(it.modal);
+    else if (it.route) goto(it.route);   // transitional until migrated to a modal
+  }
+
   let activeModal: ModalKey | null = null;
   let modalUnit: number | null = null;  // for per-unit forms (e.g. humidifier head)
   let justMoved = false;   // distinguishes a tap (open) from a drag (move)
-  let modalForm: { flush: () => Promise<void> } | undefined;
+  let modalForm: { flush: () => Promise<void> } | undefined;       // single-form modals
+  let tabForms: Record<string, { flush: () => Promise<void> } | undefined> = {};  // tabbed
+  let activeTab = '';      // current tab id (tabbed modals only)
   let saving = false;
   function openModal(key: ModalKey, unit: number | null = null) {
     if (justMoved) return;   // a drag just ended — don't treat as a tap
     modalUnit = unit;
+    tabForms = {};
+    activeTab = MODAL_TABS[key]?.[0]?.id ?? '';   // land on the first tab
+    if (key === 'system') pendingCrop = cropMode;  // crop picker starts on current
     activeModal = key;
   }
   // Per-unit modal title (humidifier #1/#2/#3); static otherwise.
@@ -165,14 +548,23 @@
   // backdrop, and the Save button all flush the form's dirty sub-forms;
   // Cancel just closes (the form component is destroyed, discarding edits).
   async function closeModal(persist = true) {
-    if (persist && modalForm) {
+    if (persist) {
       saving = true;
-      try { await modalForm.flush(); }
-      catch (e) { console.error('[plan3d] settings save failed:', e); }
+      try {
+        if (modalTabs.length) {
+          // ONE Save & Close flushes EVERY tab — each form's flush() is a
+          // no-op when its sub-form isn't dirty, so this is safe to fan out.
+          await Promise.all(Object.values(tabForms).map((f) => f?.flush()));
+        } else {
+          await modalForm?.flush();
+        }
+      } catch (e) { console.error('[plan3d] settings save failed:', e); }
       finally { saving = false; }
     }
     activeModal = null;
     modalUnit = null;
+    activeTab = '';
+    tabForms = {};
   }
 
   // ─── Sensor health ────────────────────────────────────────────────
@@ -214,8 +606,51 @@
     for (const it of ($equipmentStatus?.items ?? [])) m[it.eqIndex] = !!it.outputOn;
     return m;
   })();
+  // Same, for the equipment INPUT (proving/status DI). inputOn = the input
+  // contact closed (proved/running). Used to drive the fan pill border red
+  // the instant the fan status input opens.
+  $: eqIn = (() => {
+    const m: Record<number, boolean> = {};
+    for (const it of ($equipmentStatus?.items ?? [])) m[it.eqIndex] = !!it.inputOn;
+    return m;
+  })();
+  // Per-equipment RemoteOff (Auto/Off/Manual/SysStop) — the software switch
+  // state. Used to evaluate the AS2 "burner switch on" term (Auto).
+  $: eqRemote = (() => {
+    const m: Record<number, number> = {};
+    for (const it of ($equipmentStatus?.items ?? [])) m[it.eqIndex] = Number(it.remoteOff ?? 0);
+    return m;
+  })();
+  // Fan proving delegates to the shared interpretEquipmentInput helper — the
+  // single source of truth for per-equipment input polarity — so plan3d and
+  // the Equipment Control page can never disagree. For PROVING equipment that
+  // helper encodes the AS2 convention (DI asserted = FAULT, healthy = DI low).
+  $: fanProved = interpretEquipmentInput(EQ.FAN, !!eqIn[EQ.FAN]).healthy;
   $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
   $: heatOn = !!eqOut[EQ.HEAT];
+  // Climacell output coil — gates the media-wall water animation so the
+  // droplets only rain while the pad is actually being wetted.
+  $: climacellOn = !!eqOut[EQ.CLIMACELL];
+  // Is the HEAT output actually mapped in IO Config? (Same test as
+  // frontMatterComposite.isConfigured.) When unprogrammed, hide the HEAT
+  // tag/hotspot entirely rather than showing a permanently-OFF banner.
+  const UNASSIGNED_PORTS = new Set([0, 255, 0xffff, 0xffffffff]);
+  $: heatConfigured = (() => {
+    const p = ($ioConfig?.outputMap as Record<number, number> | undefined)?.[EQ.HEAT];
+    return p !== undefined && !UNASSIGNED_PORTS.has(p);
+  })();
+  // Aux outputs "show up when set in IO Config" — the Auxiliary setup item only
+  // appears when at least one AUX1..AUX8 output is mapped (matches the page,
+  // which otherwise just says "no auxiliary output defined").
+  $: anyAuxConfigured = (() => {
+    const om = $ioConfig?.outputMap as Record<number, number> | undefined;
+    if (!om) return false;
+    for (let eq = EQ.AUX1; eq <= EQ.AUX8; eq++) {
+      const p = om[eq];
+      if (p !== undefined && !UNASSIGNED_PORTS.has(p)) return true;
+    }
+    return false;
+  })();
   // Refrigeration cooling output %. Refrigeration can be delivered three
   // ways (see CtrlRefrig): discrete AS2 stages, a 4-20mA AO (PWM_REFRIG,
   // SystemStatus.pwm_refrig_pct), or a TRITON orbit. So "cooling" must check
@@ -229,7 +664,22 @@
     : (refrigPct > 0 || eqOut[EQ.REFRIGERATION] || eqOut[EQ.REFRIG_STAGE1]
         || eqOut[EQ.REFRIG_STAGE2] || eqOut[EQ.REFRIG_STAGE3] || eqOut[EQ.REFRIG_STAGE4])
       ? "cool" : "off";
-  $: refrigColor = refrigState === "defrost" ? "#ef4444" : refrigState === "off" ? "#94a3b8" : "#3b82f6";
+  // Unified cooling intensity 0..100 for the coil tint. AO/TRITON installs
+  // report it directly (pwm_refrig_pct); discrete-stage installs have no AO
+  // %, so derive it from the fraction of active cool stages (master-only
+  // with no stage info → full).
+  $: coolPct = (() => {
+    if (refrigPct > 0) return Math.min(100, refrigPct);
+    const stages = [EQ.REFRIG_STAGE1, EQ.REFRIG_STAGE2, EQ.REFRIG_STAGE3, EQ.REFRIG_STAGE4];
+    const active = stages.filter((s) => eqOut[s]).length;
+    if (active > 0) return Math.round((active / stages.length) * 100);
+    return eqOut[EQ.REFRIGERATION] ? 100 : 0;
+  })();
+  // Cool coil tint scales with output: dark blue (#1e3a8a) at full, brightening
+  // toward light blue as the output drops. Defrost = red, off = grey.
+  $: refrigColor = refrigState === "defrost" ? "#ef4444"
+    : refrigState === "off" ? "#94a3b8"
+    : brighten("#1e3a8a", (1 - coolPct / 100) * 0.75);
 
   // ─── Fan output → blade spin speed + readout ──────────────────────
   //   SystemStatus.fan_speed is a string ("75%" / "Manual" / "Off"). Parse
@@ -300,24 +750,33 @@
   function genSpuds(bay: { y0: number; y1: number; h: number }): Spud[] {
     const out: Spud[] = [];
     const cy = (bay.y0 + bay.y1) / 2;
-    for (let x = 6; x < L - 1; x += 15) {
-      for (let y = cy - th - 16; y < bay.y1 + 16; y += 12) {   // light cover over the top (slope loop below packs the faces)
-        const jx = x + (rnd() - 0.5) * 14;
-        const jy = y + (rnd() - 0.5) * 9;
-        const z = surfH(bay, jy) + (rnd() - 0.5) * 4;
-        out.push({ x: jx, y: jy, z, r: 7 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
+    const half = bay.y1 - cy;                  // half bay depth (crest → front base)
+    // Pass 1 — dome cover (crest → base). Each spud is LIFTED off the surface
+    // by a "mound bump" that peaks at the crest and tapers to the base, so the
+    // heap has real volume and the top doesn't foreshorten into flat pancakes.
+    for (let x = 2; x < L - 1; x += 11) {
+      for (let y = cy - th - 6; y < bay.y1 - 1; y += 7) {
+        const jx = x + (rnd() - 0.5) * 11;
+        const jy = Math.min(bay.y1 - 1, Math.max(cy - th - 8, y + (rnd() - 0.5) * 6));
+        const crest = Math.max(0, 1 - Math.abs(jy - cy) / half);   // 1 at crest → 0 at base
+        const bump = crest * crest * 9 + rnd() * 5;
+        const z = Math.max(2, surfH(bay, jy) + bump);
+        out.push({ x: jx, y: jy, z, r: 6.5 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
       }
     }
-    // extra fill packed onto the steep front slope (crest → base)
-    for (let x = 12; x < L - 1; x += 13) {
-      for (let y = cy + th - 2; y < bay.y1 + 14; y += 6) {
-        const jx = x + (rnd() - 0.5) * 13;
-        const jy = y + (rnd() - 0.5) * 6;
-        const z = surfH(bay, jy) + (rnd() - 0.5) * 3;
-        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
+    // Pass 2 — heavy packing on the VISIBLE FRONT SLOPE + base toe (cy → front
+    // base), hugging the slope surface with low clustered spuds so the brown
+    // body never shows ("potatoes on dirt") and the pile reads as a solid mass
+    // right down to the floor instead of a sparse single row.
+    for (let x = 5; x < L - 1; x += 8) {
+      for (let y = cy + th * 0.3; y < bay.y1; y += 5) {
+        const jx = x + (rnd() - 0.5) * 9;
+        const jy = Math.min(bay.y1 - 1, y + (rnd() - 0.5) * 4);
+        const z = Math.max(2, surfH(bay, jy) + rnd() * 4);
+        out.push({ x: jx, y: jy, z, r: 6 + rnd() * 4.5, g: rnd() > 0.5 ? 1 : 2, depth: jx + jy });
       }
     }
-    return out.sort((a, b) => a.depth - b.depth);  // far → near
+    return out.sort((a, b) => a.depth - b.depth);  // far → near (painter's order)
   }
   const spuds1 = genSpuds(BAY1);
   const spuds2 = genSpuds(BAY2);
@@ -341,7 +800,7 @@
   // Generic drag: any element by id, with a default ground (x,y).
   function startDrag(e: PointerEvent, id: string, dx: number, dy: number) {
     justMoved = false;
-    if (locked) return;
+    if (effLocked) return;
     dragId = id; grabWorld = dragPos[id] ?? { x: dx, y: dy }; grabSvg = svgPoint(e);
     (e.target as Element).setPointerCapture?.(e.pointerId);
     e.stopPropagation(); e.preventDefault();
@@ -369,6 +828,9 @@
   // Draggable readout cards (plenum + return air), projected billboards.
   $: plenumCard = dragPos['plenum'] ?? { x: 150, y: spineCy };
   $: returnCard = dragPos['return'] ?? { x: 470, y: spineCy };
+  // Ground point under the HEAT flame — anchors the always-visible HEAT tag
+  // (follows the flame when dragged).
+  $: heatTagPt = P((dragPos['heat']?.x ?? 385), (dragPos['heat']?.y ?? spineCy), 0);
   $: plenumPt = P(plenumCard.x, plenumCard.y, 92);
   $: returnPt = P(returnCard.x, returnCard.y, 92);
 
@@ -414,22 +876,26 @@
   </div>
 </div>
 
-<div class="stage">
+<div class="stage" data-theme={$themeStore}>
   <!-- title bar -->
   <div class="titlebar">
-    <div class="tb-id">
-      <span class="tb-name">Storage 1 · Building A</span>
-      <span class="tb-clock">{dateStr} · {clockStr} · iso view</span>
+    <div class="tb-left">
+      <img class="tb-logo" src="/gellert-logo.png" alt="Gellert Certified Systems" draggable="false" />
+      <div class="tb-id">
+        <button class="tb-name" class:editable={programLevel >= 2} on:click={editName}
+          title={programLevel >= 2 ? 'Rename storage' : ''}>{storageName}{#if programLevel >= 2}<span class="tb-name-pen"> ✎</span>{/if}</button>
+        <button class="tb-clock tb-clock-btn" on:click={() => openModal('datetime')} title="Set controller date &amp; time">{dateStr} · {clockStr} · iso view</button>
+      </div>
     </div>
-    <div class="tb-mode" style="border-color:{mode.color}">
-      <span class="dot" style="background:{mode.color}"></span>
-      <span class="tb-mode-label" style="color:{mode.color}">{mode.label}</span>
-    </div>
+    <!-- Center indicator: shows the SPECIFIC active alarm (red, pulsing) when
+         any are raised, otherwise the live operating mode. Click → alarm
+         window (list + Clear). -->
+    <button class="tb-mode" class:alarming={alarmCount > 0} style="border-color:{alarmCount > 0 ? '#ef4444' : mode.color}"
+      on:click={() => alarmOpen = true} title="View alarms">
+      <span class="dot" style="background:{alarmCount > 0 ? '#ef4444' : mode.color}"></span>
+      <span class="tb-mode-label" style="color:{alarmCount > 0 ? '#fecaca' : mode.color}">{alarmCount > 0 ? alarmLabel : mode.label}</span>
+    </button>
     <div class="tb-right">
-    <div class="tb-health" class:bad={alarmCount > 0}>
-      <span class="hdot" class:ok={alarmCount === 0} class:alarm={alarmCount > 0}></span>
-      {alarmCount > 0 ? `${alarmCount} Active Alarm${alarmCount > 1 ? 's' : ''}` : 'All Clear'}
-    </div>
     <!-- language switch (top-right) — drives the app-wide locale -->
     <div class="tb-lang">
       <button class="lang-btn" on:click={() => (langOpen = !langOpen)} aria-haspopup="listbox" aria-expanded={langOpen}>
@@ -449,32 +915,92 @@
         </div>
       {/if}
     </div>
+    <!-- little outside-air "weather report" — live OutsideAir temp + humidity -->
+    <div class="tb-wx" title="Outside air">
+      <span class="wx-ico">⛅</span>
+      <span class="wx-t">{f0(outsideTemp)}°</span>
+      <span class="wx-h">{f0(outsideHumid)}%</span>
+    </div>
+    <!-- Temperature scale (BasicSetup.tempType) — °F / °C segmented toggle by
+         the weather. Editable at Program L2; a read-only indicator below. -->
+    <div class="tb-units" class:locked={programLevel < 2} title="Temperature units">
+      <button class="unit" class:on={!tempIsC} on:click={() => setTempUnit(false)} disabled={programLevel < 2 || unitBusy}>°F</button>
+      <button class="unit" class:on={tempIsC}  on:click={() => setTempUnit(true)}  disabled={programLevel < 2 || unitBusy}>°C</button>
+    </div>
+    <!-- sign-in (real auth via checkPassword) — right of the weather report -->
+    {#if $navigationStore.level > 0}
+      <button class="login-btn in" on:click={logout} title="Sign out">
+        👤 Level {$navigationStore.level} · Sign out
+      </button>
+    {:else}
+      <button class="login-btn" class:err={loginError} on:click={openLogin} title="Sign in">
+        🔐 {loginError ? 'Retry sign-in' : 'Sign In'}
+      </button>
+    {/if}
     </div>
   </div>
 
   <!-- stats + a few concept controls -->
   <div class="hdr">
+    <!-- Stat tiles removed 2026-06-09 (readings live in the 3D scene + weather
+         pill). Top-row action buttons go here. -->
     <div class="hdr-stats">
-      <div class="stat"><span class="k">Outside</span><span class="v">{f0(outsideTemp)}°F</span></div>
-      <div class="stat"><span class="k">Plenum</span><span class="v">{f1(plenumT)}°</span><span class="u">SP {f0(tempSP)}</span></div>
-      <div class="stat"><span class="k">CO₂</span><span class="v">{f0(co2v)}</span><span class="u">ppm</span></div>
-      <div class="stat"><span class="k">Fan</span><span class="v">{fanDisplay}</span></div>
+      <button class="gear-btn" on:click={() => historyOpen = true} title="History &amp; logs">
+        📜 History &amp; Logs
+      </button>
+      {#if programLevel >= 1}
+        <button class="gear-btn" on:click={() => openModal('alerts')} title="Email alert setup">
+          🔔 Alerts
+        </button>
+      {/if}
+      {#if programLevel >= 2}
+        <button class="gear-btn" on:click={() => openModal('alarms')} title="Failure-mode setup">
+          🚨 Alarms
+        </button>
+      {/if}
     </div>
     <!-- Door readout moved onto the door graphic in the 3D scene. -->
     <!-- Cavity-heat / refrigeration / heat / humidifier status pills removed —
          those run live in the 3D scene now (wall tint, coil, flame, mist) and
          in the center mode indicator. Header keeps only the door readout +
          functional controls (lock, program). -->
-    <button class="lock-btn" class:on={locked} on:click={() => locked = !locked}>
-      {locked ? '🔒 Locked' : '🔓 Unlocked'}
-    </button>
-    <button class="prog-btn" class:on={programUnlocked} on:click={toggleProgram}
-      title="TEMPORARY: unlock program/settings editing. Production = Azure account permissions + Bluetooth auto sign-in.">
-      {programUnlocked ? '⚙ Program: ON' : '⚙ Program: OFF'}
+    {#if programLevel >= 1}
+      <button class="lock-btn" class:on={locked} on:click={() => locked = !locked}>
+        {locked ? '🔒 Locked' : '🔓 Unlocked'}
+      </button>
+    {/if}
+    <!-- Setup groups as level-gated dropdown buttons (replaces the single
+         ⚙ Setup modal). A group only shows if the logged-in level can reach
+         at least one of its items. -->
+    {#each SETUP_GROUPS as g (g.title)}
+      {@const items = g.items.filter((it) => programLevel >= it.level && (it.flag !== 'aux' || anyAuxConfigured))}
+      {#if items.length}
+        <div class="grp">
+          <button class="gear-btn" on:click={() => openGroup = openGroup === g.title ? null : g.title}>
+            {g.title} ▾
+          </button>
+          {#if openGroup === g.title}
+            <button class="grp-scrim" aria-label="Close menu" on:click={() => openGroup = null}></button>
+            <div class="grp-menu" role="menu">
+              {#each items as it (it.label)}
+                <button class="grp-item" on:click={() => openSetupItem(it)}>
+                  <span class="gi-label">{it.label}</span>
+                  <span class="gi-lvl" class:l2={it.level === 2}>L{it.level}</span>
+                  {#if !it.modal}<span class="st-ext">↗</span>{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+    {/each}
+    <button class="gear-btn" on:click={() => themeStore.set($themeStore === 'dark' ? 'light' : 'dark')}
+      title="Toggle light / dark theme">
+      {$themeStore === 'dark' ? '☀ Light' : '🌙 Dark'}
     </button>
   </div>
 
-  <svg viewBox="0 0 1200 470" class="plan" class:locked bind:this={svgEl} role="application" aria-label="Building plan 3D"
+  <svg viewBox="0 0 1200 470" class="plan" class:locked={effLocked} bind:this={svgEl} role="application" aria-label="Building plan 3D"
        style="--fan-dur:{fanSpinDur}s; --fan-play:{fanSpinning ? 'running' : 'paused'}"
        on:pointermove={onDrag} on:pointerup={endDrag} on:pointerleave={endDrag}>
     <defs>
@@ -517,8 +1043,8 @@
       <!-- scattered russet potatoes over the visible surface -->
       {#each M.spuds as s (s.x + '_' + s.y)}
         {@const c = P(s.x, s.y, s.z)}
-        <ellipse cx={c[0]} cy={c[1]} rx={s.r} ry={s.r * 0.82}
-                 fill={s.g === 1 ? 'url(#spudA)' : 'url(#spudB)'} stroke="#3a2510" stroke-width="0.5"/>
+        <ellipse cx={c[0]} cy={c[1]} rx={s.r} ry={s.r * 0.9}
+                 fill={s.g === 1 ? 'url(#spudA)' : 'url(#spudB)'} stroke="#3a2510" stroke-width="0.6"/>
       {/each}
     {/each}
 
@@ -541,7 +1067,11 @@
       <!-- shear matrix: panel stands as a wall across the plenum; draggable. -->
       <g transform="matrix({-A} {B} 0 1 {base[0]} {base[1]})" class="drag3"
          on:pointerdown={(e) => startDrag(e, 'eq-' + eqb.type, eqb.x, spineCy)}
-         on:click={() => { if (eqb.type === 'refrig') openModal('refrig'); }} role="button" tabindex="0">
+         on:click={() => {
+           if (eqb.type === 'refrig') openModal('refrig');
+           else if (eqb.type === 'fan') openModal('fan');
+           else if (eqb.type === 'cell') openModal('climacell');
+         }} role="button" tabindex="0">
         {#if eqb.type === 'fan'}
           <!-- galvanized fan wall: round fans in square cells + solid lower panel -->
           <rect x="-38" y="-90" width="76" height="84" rx="2" fill="#aeb7c2" stroke="#5b6573" stroke-width="2"/>
@@ -580,12 +1110,51 @@
             <line x1="-36" y1={hy} x2="36" y2={hy} stroke="#241a0f" stroke-width="1.2" opacity="0.7"/>
           {/each}
           <rect x="-38" y="-90" width="76" height="8" fill="#4a5663"/>
-          {#each ccDrops as drop (drop.id)}
-            <ellipse class="cc-drop" cx={drop.x} cy="-80" rx="1.5" ry="2.7" fill="#7dd3fc"
-                     style="animation-delay:{drop.delay}s; animation-duration:{drop.dur}s"/>
-          {/each}
+          {#if climacellOn}
+            {#each ccDrops as drop (drop.id)}
+              <ellipse class="cc-drop" cx={drop.x} cy="-80" rx="1.5" ry="2.7" fill="#7dd3fc"
+                       style="animation-delay:{drop.delay}s; animation-duration:{drop.dur}s"/>
+            {/each}
+          {/if}
         {/if}
       </g>
+      {#if eqb.type === 'refrig'}
+        <!-- live cooling-output readout UNDER the coil (drawn outside the
+             sheared wall group so the text stays upright). % = coolPct. -->
+        <g transform="translate({base[0]},{base[1] + 24})" class="door-tag">
+          <rect x="-44" y="-16" width="88" height="30" rx="7" fill="#0b1220"
+                stroke={refrigState !== 'off' ? refrigColor : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+          <text x="0" y="-4" text-anchor="middle" class="dtag-k">REFRIGERATION</text>
+          <text x="0" y="9"  text-anchor="middle" class="dtag-v"
+                fill={refrigState === 'defrost' ? '#fecaca' : refrigState === 'off' ? '#94a3b8' : '#bfdbfe'}>
+            {refrigState === 'defrost' ? 'DEFROST' : coolPct + '%'}
+          </text>
+        </g>
+      {/if}
+      {#if eqb.type === 'fan'}
+        <!-- live fan-speed readout UNDER the fan wall (drawn outside the
+             sheared wall group so the text stays upright). -->
+        <g transform="translate({base[0]},{base[1] + 24})" class="door-tag">
+          <rect x="-32" y="-16" width="64" height="30" rx="7" fill="#0b1220"
+                stroke={fanProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
+          <text x="0" y="-4" text-anchor="middle" class="dtag-k">FAN</text>
+          <text x="0" y="9"  text-anchor="middle" class="dtag-v"
+                fill={fanProved ? '#bbf7d0' : '#fca5a5'}>{fanDisplay}</text>
+        </g>
+      {/if}
+      {#if eqb.type === 'cell'}
+        <!-- climacell media wall → opens its run-clock schedule (48-slot AM/PM
+             grid) in a WIDE modal. Tag is the visible affordance. -->
+        <g transform="translate({base[0]},{base[1] + 24})" class="door-tag link-tag"
+           on:click|stopPropagation={() => openModal('climacell')}
+           role="button" tabindex="0">
+          <rect x="-34" y="-16" width="68" height="30" rx="7" fill="#0b1220"
+                stroke={climacellOn ? '#38bdf8' : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+          <text x="0" y="-4" text-anchor="middle" class="dtag-k">CLIMACELL</text>
+          <text x="0" y="9"  text-anchor="middle" class="dtag-v"
+                fill={climacellOn ? '#bae6fd' : '#94a3b8'}>{climacellOn ? 'ON' : 'OFF'}</text>
+        </g>
+      {/if}
     {/each}
 
     <!-- ═══ FRESH-AIR DOORS — top-hinged, swing inward, at the TOP of the
@@ -603,8 +1172,9 @@
       <polygon points={poly([L,y0,doorTop],[L,y1,doorTop],[dXv,y1,dZv],[dXv,y0,dZv])}
                fill="#cbd5e1" stroke="#475569" stroke-width="0.8" opacity="0.92"/>
     {/each}
-    <!-- live door readout ON the graphic (PWM_DOORS %) -->
-    <g transform="translate({doorTagPt[0]},{doorTagPt[1]})" class="door-tag">
+    <!-- live door readout ON the graphic (PWM_DOORS %); click → door modal -->
+    <g transform="translate({doorTagPt[0]},{doorTagPt[1]})" class="door-tag link-tag"
+       on:click|stopPropagation={() => openModal('door')} role="button" tabindex="0">
       <rect x="-30" y="-16" width="60" height="30" rx="7" fill="#0b1220"
             stroke={doorsPct > 0 ? '#60a5fa' : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
       <text x="0" y="-4" text-anchor="middle" class="dtag-k">DOORS</text>
@@ -659,10 +1229,9 @@
       {/if}
     {/each}
 
-    <!-- ═══ HEAT flame on the plenum ═══ -->
+    <!-- ═══ HEAT flame on the plenum (shows only while the HEAT output is on) ═══ -->
     {#if heatOn}
-      {@const he = dragPos['heat'] ?? { x: 385, y: spineCy }}
-      {@const fp = P(he.x, he.y, 16)}
+      {@const fp = P((dragPos['heat']?.x ?? 385), (dragPos['heat']?.y ?? spineCy), 16)}
       <g transform="translate({fp[0]},{fp[1]})" class="drag3"
          on:pointerdown={(e) => startDrag(e, 'heat', 385, spineCy)} role="button" tabindex="0">
         <g class="heat3">
@@ -670,6 +1239,19 @@
           <path class="flame3 f2" d="M0,0 C-6,-7 -4,-15 0,-21 C4,-15 6,-7 0,0 Z" fill="#fb923c"/>
           <path class="flame3 f3" d="M0,0 C-3,-4 -2,-9 0,-13 C3,-9 3,-4 0,0 Z" fill="#fde68a"/>
         </g>
+      </g>
+    {/if}
+    <!-- HEAT status tag + hotspot — only when a HEAT output is mapped in IO
+         Config (no permanently-OFF banner for unprogrammed heat). Glows orange
+         while heating → click opens the Heat Control modal. -->
+    {#if heatConfigured}
+      <g transform="translate({heatTagPt[0]},{heatTagPt[1] + 24})" class="door-tag link-tag"
+         on:click|stopPropagation={() => openModal('heat')} role="button" tabindex="0">
+        <rect x="-32" y="-16" width="64" height="30" rx="7" fill="#0b1220"
+              stroke={heatOn ? '#f97316' : '#475569'} stroke-width="1.5" filter="url(#soft3)"/>
+        <text x="0" y="-4" text-anchor="middle" class="dtag-k">HEAT</text>
+        <text x="0" y="9"  text-anchor="middle" class="dtag-v"
+              fill={heatOn ? '#fed7aa' : '#94a3b8'}>{heatOn ? 'ON' : 'OFF'}</text>
       </g>
     {/if}
 
@@ -716,15 +1298,20 @@
       {@const base = P(wx, wy, wsurf)}
       {@const top  = P(wx, wy, wsurf + 14)}
       {@const v = stationVal(s)}
-      {@const hp = pileHealth(v)}
+      <!-- Pile-sensor status border: GREEN by default (most piles aren't fully
+           sensored, so a disabled / not-deployed sensor reads "--" and stays
+           green — no false alarm). RED only when a sensor IS reading (enabled)
+           but the value is OUT OF SCALE — i.e. it errors but isn't disabled.
+           (`v` is null for a "--"/invalid reading.) -->
+      {@const pileErr = v != null && (v < -40 || v > 200)}
       <line x1={base[0]} y1={base[1]} x2={top[0]} y2={top[1]} stroke="#0f172a" stroke-width="1.5" opacity="0.6"/>
-      <circle cx={base[0]} cy={base[1]} r="3" fill={healthColor(hp)}/>
+      <circle cx={base[0]} cy={base[1]} r="3" fill={pileErr ? '#ef4444' : '#22c55e'}/>
       <g transform="translate({top[0]},{top[1]})" class="pbadge3" class:dragging={dragId === s.id}
          on:pointerdown={(e) => startDrag(e, s.id, 72 + (s.p - 1) * (L - 150) / 3, bayCenterY(s.bay))} role="button" tabindex="0">
         <rect x="-26" y="-26" width="52" height="28" rx="7" fill="#0b1220" filter="url(#soft3)"/>
-        <rect x="-26" y="-26" width="52" height="28" rx="7" fill="none" stroke={healthColor(hp)} stroke-width={hp === 'ok' ? 1 : 2.5} class:b-alarm={hp === 'alarm'}/>
+        <rect x="-26" y="-26" width="52" height="28" rx="7" fill="none" stroke={pileErr ? '#ef4444' : '#22c55e'} stroke-width={pileErr ? 2.5 : 1.5} class:b-alarm={pileErr}/>
         <text x="0" y="-14" text-anchor="middle" class="s-lbl">P{s.p} · B{s.bay}</text>
-        <text x="0" y="-2" text-anchor="middle" class="s-val" fill={hp === 'alarm' ? '#fecaca' : '#f8fafc'}>{f1(v)}°</text>
+        <text x="0" y="-2" text-anchor="middle" class="s-val" style={pileErr ? 'fill:#fecaca' : ''}>{f1(v)}°</text>
       </g>
     {/each}
 
@@ -732,10 +1319,12 @@
     <g transform="translate({plenumPt[0]},{plenumPt[1]})" class="drag3"
        on:pointerdown={(e) => startDrag(e, 'plenum', 150, spineCy)}
        on:click={() => openModal('plenum')} role="button" tabindex="0">
-      <rect x="-36" y="-30" width="72" height="46" rx="8" fill="#0c4a6e" stroke="#0ea5e9" stroke-width="2" filter="url(#soft3)"/>
-      <text x="0" y="-17" text-anchor="middle" class="card-hd">PLENUM ⚙</text>
-      <text x="0" y="0"  text-anchor="middle" class="card-big">{f1(plenumT)}°</text>
-      <text x="0" y="12" text-anchor="middle" class="card-sm">{f0(plenumH)}% RH</text>
+      <rect x="-40" y="-32" width="80" height="64" rx="8" fill="#000000" stroke={plenumTColor} stroke-width="2.5" filter="url(#soft3)"/>
+      <text x="0" y="-21" text-anchor="middle" class="card-hd">PLENUM ⚙</text>
+      <text x="0" y="-6" text-anchor="middle" class="card-big" style="fill:{plenumTColor}">{f1(plenumT)}°</text>
+      <text x="0" y="4"  text-anchor="middle" class="card-sp">SP {f1(tempSP)}°</text>
+      <text x="0" y="16" text-anchor="middle" class="card-sm" style="fill:{plenumHColor}">{f0(plenumH)}% RH</text>
+      <text x="0" y="26" text-anchor="middle" class="card-sp">SP {f0(humidSP)}%</text>
     </g>
 
     <!-- ═══ RETURN AIR readout card (draggable) ═══ -->
@@ -743,9 +1332,9 @@
        on:pointerdown={(e) => startDrag(e, 'return', 470, spineCy)} role="button" tabindex="0">
       <rect x="-42" y="-34" width="84" height="60" rx="8" fill="#0b1220" stroke="#38bdf8" stroke-width="1.5" filter="url(#soft3)"/>
       <text x="-34" y="-20" class="card-hd2">RETURN AIR</text>
-      <text x="-34" y="-5"  class="card-k">Temp</text><text x="36" y="-5" text-anchor="end" class="card-v">{f1(returnT)}°</text>
+      <text x="-34" y="-5"  class="card-k">Temp</text><text x="36" y="-5" text-anchor="end" class="card-v" style="fill:{returnTColor}">{f1(returnT)}°</text>
       <text x="-34" y="8"   class="card-k">RH</text><text x="36" y="8" text-anchor="end" class="card-v">{f0(returnH)}%</text>
-      <text x="-34" y="21"  class="card-k">CO₂</text><text x="36" y="21" text-anchor="end" class="card-v" fill={healthColor(co2Health(co2v))}>{f0(co2v)}</text>
+      <text x="-34" y="21"  class="card-k">CO₂</text><text x="36" y="21" text-anchor="end" class="card-v" style="fill:{co2Color}">{f0(co2v)}</text>
     </g>
   </svg>
 
@@ -756,30 +1345,206 @@
     <span class="hint">click the PLENUM card → setpoints · isometric prototype</span>
   </div>
 
+  <!-- System Start/Stop — fixed bottom-right. Software stop (NOT level-gated;
+       the panel-front E-Stop is the hard cutoff). Red ■ Stop while running,
+       green ▶ Start when stopped (CurrentMode=20). -->
+  <button class="run-btn" class:stopped on:click={toggleRun} disabled={runBusy}
+    title={stopped ? 'Start the system' : 'Stop the system'}>
+    {stopped ? '▶ Start' : '■ Stop'}
+  </button>
+
   <!-- ═══ EQUIPMENT SETTINGS POPUP — shared *Form.svelte (real save path) ═══
        Anything but Cancel autosaves: overlay / X / Save → flush, Cancel → discard. -->
   {#if activeModal}
     <div class="ovl" role="presentation" on:click={() => closeModal(true)}>
-      <div class="dlg" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+      <div class="dlg" class:wide={modalWide} class:full={modalFull} role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
         <header class="dlg-hd">
           <span>{modalTitle}</span>
           <button class="dlg-x" title="Save & close" on:click={() => closeModal(true)}>×</button>
         </header>
+        {#if modalTabs.length}
+          <div class="modal-tabs">
+            {#each modalTabs as tab (tab.id)}
+              <button class="mtab" class:active={activeTab === tab.id} on:click={() => activeTab = tab.id}>{tab.label}</button>
+            {/each}
+          </div>
+        {/if}
         <div class="dlg-body">
-          {#if activeModal === 'plenum'}
-            <PlenumSetpointsForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} />
+          {#if modalTabs.length}
+            <!-- All tabs stay MOUNTED (hidden, not destroyed) so edits survive
+                 a tab switch and one Save & Close flushes every dirty form. -->
+            {#each modalTabs as tab (tab.id)}
+              {@const tabCanEdit = programLevel >= (tab.level ?? MODAL_LEVEL[activeModal] ?? 1)}
+              <div class="tab-panel" class:hidden={activeTab !== tab.id}>
+                {#if tab.id === 'plenum-setpoints'}
+                  <PlenumSetpointsForm bind:this={tabForms['plenum-setpoints']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'plenum-runclock'}
+                  <RunClockForm bind:this={tabForms['plenum-runclock']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'door-outside'}
+                  <OutsideAirForm bind:this={tabForms['door-outside']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'door-co2'}
+                  <Co2PurgeForm bind:this={tabForms['door-co2']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'door-fresh'}
+                  <FreshAirDoorSettingsForm bind:this={tabForms['door-fresh']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'door-gdc'}
+                  <GdcStagesForm bind:this={tabForms['door-gdc']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'alarms-f1'}
+                  <FailuresForm1 bind:this={tabForms['alarms-f1']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'alarms-f2'}
+                  <FailuresForm2 bind:this={tabForms['alarms-f2']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'alerts-setup'}
+                  <AlertSetupForm bind:this={tabForms['alerts-setup']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'alerts-email'}
+                  <EmailForm bind:this={tabForms['alerts-email']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'fan-speed'}
+                  <FanSpeedForm bind:this={tabForms['fan-speed']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'fan-boost'}
+                  <FanBoostForm bind:this={tabForms['fan-boost']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'cell-runclock'}
+                  <ClimacellRunClockForm bind:this={tabForms['cell-runclock']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'cell-config'}
+                  <ClimacellConfigForm bind:this={tabForms['cell-config']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'heat-main'}
+                  <HeatForm bind:this={tabForms['heat-main']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {:else if tab.id === 'heat-burner'}
+                  <BurnerForm bind:this={tabForms['heat-burner']} embedded theme={$themeStore} canEdit={tabCanEdit} />
+                {/if}
+              </div>
+            {/each}
           {:else if activeModal === 'humidifier'}
-            <HumidifierControlForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} unit={modalUnit} />
+            <HumidifierControlForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} unit={modalUnit} />
           {:else if activeModal === 'refrig'}
-            <RefrigerationForm bind:this={modalForm} embedded theme="dark" canEdit={programUnlocked} />
+            <RefrigerationForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'heat'}
+            <HeatForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'equipment'}
+            <EquipmentControlForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'datetime'}
+            <DateTimeForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'alarmhist'}
+            <AlarmHistoryForm bind:this={modalForm} embedded theme={$themeStore} />
+          {:else if activeModal === 'accounts'}
+            <AccountsForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'analog'}
+            <AnalogConfigForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'auxiliary'}
+            <AuxiliaryForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'ioconfig'}
+            <IoConfigForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'version'}
+            <VersionForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'fanruntime'}
+            <FanRuntimeForm bind:this={modalForm} embedded theme={$themeStore} canEdit={modalCanEdit} />
+          {:else if activeModal === 'system'}
+            <div class="pform pform--{$themeStore}">
+              <div class="crop-pick">
+                <p class="crop-warn">⚠ Crop type sets which equipment + control logic are active
+                  (onion enables burner &amp; cure, etc.). Change it only when reconfiguring the
+                  system — not during a run.</p>
+                <div class="crop-grid">
+                  {#each CROPS as c (c.value)}
+                    <button class="crop-opt" class:current={cropMode === c.value}
+                      class:pending={pendingCrop === c.value && pendingCrop !== cropMode}
+                      disabled={programLevel < 2}
+                      on:click={() => pendingCrop = c.value}>
+                      {c.label}{#if cropMode === c.value} <span class="crop-now">(current)</span>{/if}
+                    </button>
+                  {/each}
+                </div>
+                <div class="crop-apply">
+                  <button class="btn save" on:click={applyCrop} disabled={programLevel < 2 || pendingCrop === cropMode || cropBusy}>
+                    {cropBusy ? 'Applying…' : pendingCrop === cropMode ? 'No change' : `Apply ${CROPS[pendingCrop]?.label ?? ''}`}
+                  </button>
+                </div>
+                {#if programLevel < 2}<p class="crop-note">Sign in at Program Level 2 to change crop type.</p>{/if}
+              </div>
+            </div>
           {/if}
         </div>
         <footer class="dlg-ft">
-          <span class="ft-tag">edits autosave on close — Cancel to discard</span>
-          <button class="btn ghost" on:click={() => closeModal(false)} disabled={saving}>Cancel</button>
-          <button class="btn save" on:click={() => closeModal(true)} disabled={saving}>
-            {saving ? 'Saving…' : 'Save & Close'}
-          </button>
+          {#if modalNoSave}
+            <span class="ft-tag">live control — changes apply immediately</span>
+            <button class="btn save" on:click={() => closeModal(false)}>Close</button>
+          {:else}
+            <span class="ft-tag">edits autosave on close — Cancel to discard</span>
+            <button class="btn ghost" on:click={() => closeModal(false)} disabled={saving}>Cancel</button>
+            <button class="btn save" on:click={() => closeModal(true)} disabled={saving}>
+              {saving ? 'Saving…' : 'Save & Close'}
+            </button>
+          {/if}
+        </footer>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ═══ ALARM WINDOW — opened by clicking the center indicator ═══ -->
+  {#if alarmOpen}
+    <div class="ovl" role="presentation" on:click={() => alarmOpen = false}>
+      <div class="dlg" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+        <header class="dlg-hd" class:alarm-hd={alarmCount > 0}>
+          <span>{alarmCount > 0 ? `Active Alarms (${alarmCount})` : 'Alarms'}</span>
+          <button class="dlg-x" title="Close" on:click={() => alarmOpen = false}>×</button>
+        </header>
+        <div class="dlg-body">
+          {#if alarmCount === 0}
+            <p class="alarm-none">✓ No active alarms.</p>
+          {:else}
+            <ul class="alarm-list">
+              {#each alarmTexts as a (a)}
+                <li><span class="alarm-dot"></span>{a}</li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+        <footer class="dlg-ft">
+          <span class="ft-tag">live from the controller warning report</span>
+          <button class="btn ghost" on:click={() => { alarmOpen = false; openModal('alarmhist'); }}>View history →</button>
+          <button class="btn ghost" on:click={() => alarmOpen = false}>Close</button>
+          {#if alarmCount > 0}
+            <button class="btn save" on:click={clearAlarms} disabled={clearingAlarm}>
+              {clearingAlarm ? 'Clearing…' : 'Clear Alarms'}
+            </button>
+          {/if}
+        </footer>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ═══ HISTORY & LOGS hub — migrated from the /history menu page ═══
+       Alarm History + Active Alarms open in-place; the heavy data-download
+       log viewers (Activity / User) route to their pages (↗) until Pi5-side
+       logging is built. -->
+  {#if historyOpen}
+    <div class="ovl" role="presentation" on:click={() => historyOpen = false}>
+      <div class="dlg" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+        <header class="dlg-hd">
+          <span>📜 History &amp; Logs</span>
+          <button class="dlg-x" title="Close" on:click={() => historyOpen = false}>×</button>
+        </header>
+        <div class="setup-body">
+          <div class="setup-tiles">
+            <button class="setup-tile" on:click={() => { historyOpen = false; openModal('alarmhist'); }}>
+              <span class="st-label">🔔 Alarm History</span>
+            </button>
+            <button class="setup-tile" on:click={() => { historyOpen = false; alarmOpen = true; }}>
+              <span class="st-label">⚠ Active Alarms</span>
+            </button>
+            <button class="setup-tile" on:click={() => { historyOpen = false; openModal('fanruntime'); }}>
+              <span class="st-label">🌀 Fan Runtimes</span>
+            </button>
+          </div>
+          <div class="setup-tiles">
+            <button class="setup-tile" on:click={() => goto('/history/activitylog')}>
+              <span class="st-label">📋 Activity Log</span><span class="st-ext">↗</span>
+            </button>
+            <button class="setup-tile" on:click={() => goto('/history/userlog')}>
+              <span class="st-label">👤 User Log</span><span class="st-ext">↗</span>
+            </button>
+          </div>
+        </div>
+        <footer class="dlg-ft">
+          <span class="ft-tag">↗ opens the full data viewer (page) · log data pending Pi5 logging</span>
+          <button class="btn save" on:click={() => historyOpen = false}>Close</button>
         </footer>
       </div>
     </div>
@@ -795,24 +1560,73 @@
   .banner-actions button { background:#fff; border:1px solid #fdba74; color:#9a3412; border-radius:6px; padding:2px 10px; margin-left:8px; font-size:12px; cursor:pointer; }
   .stage { background:linear-gradient(160deg,#0b1220 0%,#1e293b 100%); min-height:calc(100vh - 30px); padding:12px 18px 20px; color:#e2e8f0; }
 
-  .titlebar { position:relative; display:flex; align-items:center; justify-content:space-between; gap:16px; background:#0b1220; border:1px solid #1e293b; border-radius:12px; padding:8px 16px; margin-bottom:10px; }
+  .titlebar { position:relative; display:flex; align-items:center; justify-content:space-between; gap:18px; background:#0b1220; border:1px solid #1e293b; border-radius:12px; padding:14px 24px; margin-bottom:12px; }
+  .tb-left { display:flex; align-items:center; gap:18px; min-width:0; }
+  .tb-logo { height:60px; width:auto; display:block; background:#fff; border-radius:8px; padding:6px 12px; box-shadow:0 1px 3px rgba(0,0,0,0.35); user-select:none; }
   .tb-id { display:flex; flex-direction:column; line-height:1.15; }
-  .tb-name { font-size:16px; font-weight:800; color:#f1f5f9; }
-  .tb-clock { font-size:12px; color:#94a3b8; font-variant-numeric:tabular-nums; }
+  .tb-name { font-size:30px; font-weight:800; color:#f1f5f9; background:none; border:none; padding:0; margin:0; font-family:inherit; text-align:left; cursor:default; line-height:1.05; }
+  .tb-name.editable { cursor:pointer; }
+  .tb-name.editable:hover { color:#7dd3fc; }
+  .tb-name-pen { font-size:16px; color:#64748b; font-weight:400; vertical-align:middle; }
+  .tb-name.editable:hover .tb-name-pen { color:#7dd3fc; }
+  .tb-clock { font-size:15px; color:#94a3b8; font-variant-numeric:tabular-nums; }
+  /* temperature scale segmented toggle (by the weather pill) */
+  .tb-units { display:flex; border:1px solid #334155; border-radius:999px; overflow:hidden; background:#0b1220; }
+  .tb-units .unit { background:none; border:none; color:#64748b; padding:8px 14px; font-size:16px; font-weight:800; cursor:pointer; font-family:inherit; }
+  .tb-units .unit.on { background:#1e3a5f; color:#bae6fd; }
+  .tb-units.locked .unit { cursor:default; }
+  .tb-units .unit:disabled { cursor:default; }
+  /* crop-type picker (⚙ Setup → System) */
+  .crop-pick { padding:6px 4px; max-width:560px; }
+  .crop-warn { font-size:15px; line-height:1.5; color:#fcd34d; background:rgba(245,158,11,0.1); border-left:3px solid #f59e0b; border-radius:6px; padding:10px 12px; margin:0 0 14px 0; }
+  .crop-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .crop-opt { background:#0f1827; border:2px solid #334155; color:#e2e8f0; border-radius:10px; padding:18px; font-size:20px; font-weight:800; cursor:pointer; font-family:inherit; }
+  .crop-opt:hover:not(:disabled) { border-color:#475569; }
+  .crop-opt.current { border-color:#10b981; }
+  .crop-opt.pending { border-color:#38bdf8; background:#13263b; }
+  .crop-opt:disabled { opacity:.55; cursor:default; }
+  .crop-now { font-size:13px; font-weight:600; color:#86efac; }
+  .crop-apply { display:flex; justify-content:flex-end; margin-top:16px; }
+  .crop-note { text-align:right; font-size:13px; color:#94a3b8; margin:8px 0 0; }
+  .tb-clock-btn { background:none; border:none; padding:0; text-align:left; cursor:pointer; }
+  .tb-clock-btn:hover { color:#7dd3fc; }
   /* center mode indicator — the color-changing centerpiece (border + dot +
      label all driven by the live mode colour). Absolutely centred so the
      left id-block and right health-pill don't shift it. */
   .tb-mode { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-    display:flex; align-items:center; gap:11px; padding:8px 26px; border-radius:999px;
-    background:#0b1220; border:2px solid #334155; font-weight:800; white-space:nowrap; }
-  .tb-mode .dot { width:14px; height:14px; }
-  .tb-mode-label { font-size:20px; letter-spacing:.02em; text-transform:uppercase; }
+    display:flex; align-items:center; gap:13px; padding:12px 36px; border-radius:999px;
+    background:#0b1220; border:2px solid #334155; font-weight:800; white-space:nowrap;
+    cursor:pointer; font-family:inherit; }
+  .alarm-hd { background:#7f1d1d !important; }
+  .alarm-none { text-align:center; padding:18px; color:#86efac; font-size:16px; font-weight:700; }
+  .alarm-list { list-style:none; margin:0; padding:6px 4px; display:flex; flex-direction:column; gap:8px; }
+  .alarm-list li { display:flex; align-items:center; gap:10px; padding:10px 14px; background:#3a0d0d; border:1px solid #b91c1c; border-radius:9px; color:#fecaca; font-size:15px; font-weight:600; }
+  .alarm-dot { width:10px; height:10px; border-radius:50%; background:#ef4444; box-shadow:0 0 8px #ef4444; flex:0 0 auto; }
+  .tb-mode .dot { width:18px; height:18px; }
+  .tb-mode-label { font-size:27px; letter-spacing:.02em; text-transform:uppercase; }
   .dot { width:10px; height:10px; border-radius:50%; box-shadow:0 0 8px currentColor; }
-  .tb-health { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; padding:8px 16px; border-radius:999px; background:#052e1a; color:#86efac; border:1px solid #166534; }
-  .tb-health.bad { background:#3a0d0d; color:#fecaca; border-color:#b91c1c; }
-  .tb-right { display:flex; align-items:center; gap:12px; }
+  .tb-right { display:flex; align-items:center; gap:14px; }
+  /* System Start/Stop — fixed bottom-right floating control (ungated). */
+  .run-btn { position:fixed; right:24px; bottom:22px; z-index:30;
+    background:#dc2626; border:2px solid #f87171; color:#fff; border-radius:999px;
+    padding:14px 30px; font-size:20px; font-weight:800; letter-spacing:.03em;
+    cursor:pointer; white-space:nowrap; box-shadow:0 6px 20px rgba(0,0,0,0.45);
+    font-family:inherit; transition:filter .12s; }
+  .run-btn:hover { filter:brightness(1.08); }
+  .run-btn:active { transform:translateY(1px); }
+  .run-btn.stopped { background:#16a34a; border-color:#4ade80; }
+  .run-btn:disabled { opacity:.6; cursor:default; }
+  /* outside-air weather report (right of the language switcher) */
+  .tb-wx { display:flex; align-items:center; gap:9px; background:#0b1220; border:1px solid #334155; border-radius:999px; padding:10px 20px; font-weight:700; white-space:nowrap; }
+  .tb-wx .wx-ico { font-size:19px; }
+  .tb-wx .wx-t { color:#fde68a; font-size:19px; }
+  .tb-wx .wx-h { color:#7dd3fc; font-size:17px; }
+  .login-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:11px 22px; font-size:17px; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .login-btn:hover { border-color:#7dd3fc; color:#e0f2fe; }
+  .login-btn.in { border-color:#10b981; color:#bbf7d0; background:#06281d; }
+  .login-btn.err { border-color:#ef4444; color:#fecaca; background:#3a0d0d; }
   .tb-lang { position:relative; }
-  .lang-btn { display:flex; align-items:center; gap:7px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:7px 12px; font-size:13px; font-weight:600; cursor:pointer; }
+  .lang-btn { display:flex; align-items:center; gap:8px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:11px 18px; font-size:17px; font-weight:600; cursor:pointer; }
   .lang-btn:hover { border-color:#475569; }
   /* flag chips (inline SVG via Flag.svelte — see lang-btn / lang-item) */
   .lang-caret { font-size:10px; color:#64748b; }
@@ -821,12 +1635,20 @@
   .lang-item { display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; color:#cbd5e1; border-radius:7px; padding:8px 10px; font-size:14px; cursor:pointer; }
   .lang-item:hover { background:#1e293b; }
   .lang-item.active { color:#7dd3fc; font-weight:700; }
-  .hdot { width:11px; height:11px; border-radius:50%; }
-  .hdot.ok { background:#22c55e; box-shadow:0 0 8px #22c55e; }
-  .hdot.alarm { background:#ef4444; box-shadow:0 0 8px #ef4444; animation:pulse 1.1s ease-in-out infinite; }
+  /* top-bar setup-group dropdowns */
+  .grp { position:relative; display:inline-block; }
+  .grp-scrim { position:fixed; inset:0; background:transparent; border:none; z-index:40; cursor:default; }
+  .grp-menu { position:absolute; left:0; top:calc(100% + 6px); z-index:41; background:#0f1827; border:1px solid #334155; border-radius:10px; padding:6px; min-width:250px; box-shadow:0 10px 30px rgba(0,0,0,0.5); }
+  .grp-item { display:flex; align-items:center; gap:9px; width:100%; text-align:left; background:none; border:none; color:#cbd5e1; border-radius:7px; padding:12px 14px; font-size:17px; font-weight:600; cursor:pointer; }
+  .grp-item:hover { background:#1e293b; }
+  .gi-label { flex:1 1 auto; }
+  .gi-lvl { font-size:11px; font-weight:800; color:#fde68a; border:1px solid #b45309; border-radius:6px; padding:1px 6px; }
+  .gi-lvl.l2 { color:#bbf7d0; border-color:#15803d; }
+  /* center indicator pulses red while an alarm is active */
+  .tb-mode.alarming { animation:pulse 1.1s ease-in-out infinite; }
 
-  .hdr { display:flex; align-items:center; gap:14px; margin-bottom:10px; flex-wrap:wrap; }
-  .hdr-stats { display:flex; gap:10px; }
+  .hdr { display:flex; align-items:center; gap:18px; margin-bottom:12px; flex-wrap:wrap; }
+  .hdr-stats { display:flex; gap:14px; }
   .stat { display:flex; align-items:baseline; gap:5px; background:#0b1220; border:1px solid #334155; border-radius:8px; padding:5px 12px; }
   .stat .k { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:.05em; }
   .stat .v { font-size:18px; font-weight:700; color:#f8fafc; }
@@ -834,6 +1656,8 @@
   /* on-graphic door readout billboard */
   :global(.plan .door-tag .dtag-k) { font-size:8px; fill:#94a3b8; font-weight:700; letter-spacing:.04em; }
   :global(.plan .door-tag .dtag-v) { font-size:13px; font-weight:800; }
+  :global(.plan .link-tag) { cursor:pointer; }
+  :global(.plan .link-tag:hover rect) { stroke:#7dd3fc; }
   .cavity-toggle, .refrig-btn { display:flex; align-items:center; gap:7px; background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
   .cavity-toggle.status, .refrig-btn.status { cursor:default; }
   .cavity-toggle.on { border-color:#ef4444; color:#fecaca; }
@@ -851,14 +1675,64 @@
   :global(.plan .drag3) { cursor: grab; touch-action: none; }
   :global(.plan .drag3:active) { cursor: grabbing; }
   :global(.plan.locked .drag3), :global(.plan.locked .pbadge3) { cursor: default; }
-  .lock-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+  .lock-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:11px 22px; font-size:17px; font-weight:600; cursor:pointer; }
   .lock-btn.on { border-color:#f59e0b; color:#fde68a; background:#3a2a07; }
-  /* TEMPORARY program-access toggle (see toggleProgram). */
-  .prog-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; }
-  .prog-btn.on { border-color:#10b981; color:#bbf7d0; background:#06281d; }
+  .gear-btn { background:#0b1220; border:1px solid #334155; color:#cbd5e1; border-radius:999px; padding:11px 22px; font-size:17px; font-weight:600; cursor:pointer; }
+  .gear-btn:hover { border-color:#7dd3fc; color:#e0f2fe; }
+  /* History hub modal body (reuses .ovl + .dlg) */
+  .setup-body { flex:1 1 auto; overflow:auto; padding:14px 18px; display:grid; grid-template-columns:repeat(2,1fr); gap:16px 22px; }
+  .setup-tiles { display:flex; flex-direction:column; gap:7px; }
+  .setup-tile { display:flex; align-items:center; gap:9px; background:#0b1220; border:1px solid #334155; border-radius:9px; padding:9px 13px; color:#e2e8f0; font-size:14px; font-weight:600; cursor:pointer; text-align:left; }
+  .setup-tile:hover { border-color:#38bdf8; background:#0c2233; }
+  .st-label { flex:1 1 auto; }
+  .st-ext { color:#64748b; font-size:13px; }
+
+  /* ═══ LIGHT THEME — chrome only ═══════════════════════════════════════
+     The .plan 3D canvas (and its SVG scene, text, and readout tags) stays
+     DARK in both themes — a dark viewport inside a light app — so none of
+     the scene colours need a light variant. Toggled by data-theme on .stage
+     (see themeStore). :global so the override isn't pruned. */
+  :global(.stage[data-theme="light"]) { background:linear-gradient(160deg,#eef2f7 0%,#d7e0ea 100%); color:#1e293b; }
+  :global([data-theme="light"] .titlebar) { background:#ffffff; border-color:#cbd5e1; }
+  :global([data-theme="light"] .tb-name)  { color:#0f172a; }
+  :global([data-theme="light"] .tb-clock) { color:#64748b; }
+  :global([data-theme="light"] .tb-clock-btn:hover) { color:#0284c7; }
+  :global([data-theme="light"] .tb-mode)  { background:#ffffff; }
+  :global([data-theme="light"] .lock-btn),
+  :global([data-theme="light"] .gear-btn),
+  :global([data-theme="light"] .lang-btn),
+  :global([data-theme="light"] .stat) { background:#ffffff; border-color:#cbd5e1; color:#334155; }
+  :global([data-theme="light"] .stat .v) { color:#0f172a; }
+  :global([data-theme="light"] .tb-wx) { background:#ffffff; border-color:#cbd5e1; }
+  :global([data-theme="light"] .tb-wx .wx-t) { color:#b45309; }
+  :global([data-theme="light"] .tb-wx .wx-h) { color:#0369a1; }
+  :global([data-theme="light"] .login-btn) { background:#ffffff; border-color:#cbd5e1; color:#334155; }
+  :global([data-theme="light"] .login-btn.in) { background:#dcfce7; border-color:#22c55e; color:#15803d; }
+  :global([data-theme="light"] .login-btn.err) { background:#fee2e2; border-color:#ef4444; color:#b91c1c; }
+  :global([data-theme="light"] .stat .k), :global([data-theme="light"] .lang-caret) { color:#64748b; }
+  /* keep the lock status tint legible on a light pill */
+  :global([data-theme="light"] .lock-btn.on) { background:#fef3c7; border-color:#f59e0b; color:#b45309; }
+  :global([data-theme="light"] .lang-menu) { background:#ffffff; border-color:#cbd5e1; }
+  :global([data-theme="light"] .lang-item) { color:#334155; }
+  :global([data-theme="light"] .lang-item:hover) { background:#e2e8f0; }
+  :global([data-theme="light"] .lang-item.active) { color:#0284c7; }
+  :global([data-theme="light"] .grp-menu) { background:#ffffff; border-color:#cbd5e1; }
+  :global([data-theme="light"] .grp-item) { color:#334155; }
+  :global([data-theme="light"] .grp-item:hover) { background:#e2e8f0; }
+  :global([data-theme="light"] .legend) { color:#475569; }
+  /* modals — dlg header band + tab strip keep the teal accent in both themes */
+  :global([data-theme="light"] .dlg) { background:#ffffff; border-color:#cbd5e1; }
+  :global([data-theme="light"] .dlg-body) { background:#ffffff; }
+  :global([data-theme="light"] .dlg-ft) { background:#f1f5f9; border-color:#e2e8f0; }
+  :global([data-theme="light"] .ft-tag) { color:#64748b; }
+  :global([data-theme="light"] .mtab) { background:#e2e8f0; color:#475569; border-color:#cbd5e1; }
+  :global([data-theme="light"] .mtab.active) { background:#ffffff; color:#0c4a6e; }
+  :global([data-theme="light"] .setup-tile) { background:#f8fafc; border-color:#cbd5e1; color:#1e293b; }
+  :global([data-theme="light"] .setup-tile:hover) { background:#e0f2fe; border-color:#38bdf8; }
   :global(.plan .card-hd)  { font-size:8px;  fill:#7dd3fc; font-weight:800; letter-spacing:.12em; }
   :global(.plan .card-big) { font-size:15px; fill:#ffffff; font-weight:800; }
   :global(.plan .card-sm)  { font-size:9px;  fill:#bae6fd; font-weight:600; }
+  :global(.plan .card-sp)  { font-size:8px;  fill:#7dd3fc; font-weight:700; letter-spacing:.04em; }
   :global(.plan .card-hd2) { font-size:8px;  fill:#7dd3fc; font-weight:800; letter-spacing:.12em; }
   :global(.plan .card-k)   { font-size:9px;  fill:#94a3b8; }
   :global(.plan .card-v)   { font-size:11px; fill:#f8fafc; font-weight:700; }
@@ -889,8 +1763,15 @@
      to match the dashboard chrome (the form stays light on its level1 page). */
   .ovl { position:fixed; inset:0; background:rgba(2,6,23,0.6); display:flex; align-items:center; justify-content:center; z-index:50; }
   .dlg { width:760px; max-width:94vw; max-height:88vh; display:flex; flex-direction:column; background:#0f1827; border:1px solid #334155; border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,0.5); overflow:hidden; }
+  .dlg.wide { width:1400px; }
+  /* full-bleed: overtakes the screen (densest pages, e.g. IO Config) */
+  .dlg.full { width:98vw; max-width:98vw; height:94vh; max-height:94vh; }
   .dlg-hd { display:flex; align-items:center; justify-content:space-between; padding:13px 18px; background:#0c4a6e; color:#e0f2fe; font-size:16px; font-weight:800; flex:0 0 auto; }
   .dlg-x { background:none; border:none; color:#bae6fd; font-size:22px; line-height:1; cursor:pointer; }
+  .modal-tabs { display:flex; gap:4px; padding:8px 14px 0; background:#0c4a6e; flex:0 0 auto; }
+  .mtab { background:#0b1220; border:1px solid #334155; border-bottom:none; color:#94a3b8; font-size:13px; font-weight:700; padding:7px 16px; border-radius:8px 8px 0 0; cursor:pointer; }
+  .mtab.active { background:#0f1827; color:#e0f2fe; border-color:#334155; }
+  .tab-panel.hidden { display:none; }
   .dlg-body { flex:1 1 auto; overflow:auto; background:#0f1827; padding:10px 16px 4px; }
   .dlg-ft { display:flex; align-items:center; gap:10px; padding:12px 18px; background:#0b1220; border-top:1px solid #1e293b; flex:0 0 auto; }
   .ft-tag { font-size:11px; color:#64748b; font-style:italic; margin-right:auto; }
@@ -898,7 +1779,7 @@
   .btn:disabled { opacity:.5; cursor:default; }
   .btn.ghost { background:#1e293b; color:#cbd5e1; }
   .btn.save { background:#0ea5e9; color:#04293b; border-color:#0ea5e9; }
-  /* The form's dark skin now lives inside PlenumSetpointsForm (theme="dark"),
+  /* The form's dark skin now lives inside PlenumSetpointsForm (theme={$themeStore}),
      so the modal only owns its own chrome (overlay / header / footer). */
 
   .legend { display:flex; gap:16px; align-items:center; margin-top:10px; font-size:12px; color:#94a3b8; }

@@ -28,8 +28,10 @@
 
   const dispatch = createEventDispatcher<{ select: Date }>();
 
-  // State
-  let isOpen = false;
+  // State. `isOpen` is exported so a host (e.g. the dashboard date/time modal)
+  // can react to the calendar opening — it reserves room so the dropdown
+  // isn't clipped. Internal open/close/toggle still drive it.
+  export let isOpen = false;
   let viewingMonth: Date = startOfMonth(value || new Date());
   let focusedDate: Date = value || new Date();
   let lastValueTime = value ? value.getTime() : undefined;

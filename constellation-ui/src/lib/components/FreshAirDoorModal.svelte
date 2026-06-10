@@ -86,11 +86,11 @@
     role="dialog"
     tabindex="-1"
   >
-    <div class="bg-white rounded-lg p-6 shadow-2xl min-w-[26rem]">
-      <h2 class="text-size-xl font-bold mb-4">
+    <div class="rounded-lg p-6 shadow-2xl min-w-[26rem] bg-[#0f1827] border border-slate-600 text-slate-100">
+      <h2 class="text-size-xl font-bold mb-4 text-sky-100">
         {$t('level2.pid.fresh-air-doors')} — {$t('global.manual')}
       </h2>
-      <label class="block mb-3 text-size-xl">
+      <label class="block mb-3 text-size-xl text-slate-200">
         {$t('global.target')} % (0 – 100)
         <input
           type="number"
@@ -98,12 +98,12 @@
           max="100"
           step="1"
           bind:value={pctInput}
-          class="w-full mt-1 px-3 py-2 border rounded text-size-xl"
+          class="w-full mt-1 px-3 py-2 rounded text-size-xl bg-[#0b1220] text-slate-100 border border-slate-600"
           disabled={saving}
           autofocus
         />
       </label>
-      <label class="block mb-3 text-size-xl">
+      <label class="block mb-3 text-size-xl text-slate-200">
         Auto-revert to AUTO after (minutes, 0 = stay manual)
         <input
           type="number"
@@ -111,12 +111,12 @@
           max="1440"
           step="1"
           bind:value={timeoutInput}
-          class="w-full mt-1 px-3 py-2 border rounded text-size-xl"
+          class="w-full mt-1 px-3 py-2 rounded text-size-xl bg-[#0b1220] text-slate-100 border border-slate-600"
           disabled={saving}
         />
       </label>
       {#if error}
-        <p class="text-red-600 text-sm mb-3">{error}</p>
+        <p class="text-red-400 text-sm mb-3">{error}</p>
       {/if}
       <div class="flex justify-end gap-2 mt-4">
         <Button size="xl" on:click={cancel} disabled={saving}>

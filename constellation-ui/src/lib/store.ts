@@ -454,6 +454,10 @@ const history: HistoryState = {
 
 export const backgroundStore = createBackgroundStore();
 export const localeStore = createPersistedStore('locale', locale)
+// Spatial-dashboard colour theme: 'dark' (default) | 'light'. Persisted so the
+// kiosk keeps the operator's choice; read by plan3d (data-theme on .stage),
+// the embedded *Form.svelte skins, and the on-screen Keyboard overlay.
+export const themeStore = createPersistedStore('dashTheme', 'dark');
 export const headersStore = writable(headers);
 export const navigationStore = writable(navigation);
 export const frontMatterStore = writable(frontMatter);

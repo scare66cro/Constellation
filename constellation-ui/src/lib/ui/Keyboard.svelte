@@ -12,7 +12,8 @@
   import Keyboard from 'simple-keyboard';
   import { onMount, tick, createEventDispatcher } from 'svelte';
   import { t } from "svelte-i18n";
-  import { frontMatterStore } from '$lib/store';
+  import { page } from '$app/stores';
+  import { frontMatterStore, themeStore } from '$lib/store';
   import { accountSettings } from '$lib/business/protoStores';
 	import Select from './Select.svelte';
 	import { getHttpUrl, safeJsonParse, isRebooting } from '$lib/business/util';
@@ -30,6 +31,13 @@
   export let inputType = 'text';
 
   $: input = (inputType === 'text' && keyboardType === KeyboardTypes.Alpha) ? start : '';
+
+  // The on-screen keyboard follows the spatial-dashboard colour theme ONLY
+  // while the dashboard is on screen. themeStore ('dashTheme') defaults to
+  // 'dark' and is never written on the classic /levelN kiosk, so binding the
+  // overlay straight to $themeStore would render every classic page's keyboard
+  // dark. Gate on the route: dashboard → follow the toggle; classic → white.
+  $: kbTheme = $page.url?.pathname?.startsWith('/dashboard') ? $themeStore : 'light';
 
   let alphaKeyboard: Keyboard;
 
@@ -386,10 +394,10 @@
 
 </script>
 
-<div class:hidden={hidden} class="min-w-screen h-screen animated fadeIn faster fixed left-0 top-0 flex justify-center items-center inset-0 z-50 outline-none focus:outline-none">
-  <div class="relative mx-auto my-auto rounded-md shadow-md bg-primary-900 text-white" class:alpha={keyboardType === KeyboardTypes.Alpha}>
-    <div class="w-full px-3 py-2 text-size-large">{label}</div>
-    <div class="rounded-md shadow-md rounded-t-none bg-white text-black p-4">
+<div class:hidden={hidden} data-theme={kbTheme} class="min-w-screen h-screen animated fadeIn faster fixed left-0 top-0 flex justify-center items-center inset-0 z-50 outline-none focus:outline-none">
+  <div class="relative mx-auto my-auto rounded-md shadow-md text-white kbd-shell" class:alpha={keyboardType === KeyboardTypes.Alpha}>
+    <div class="w-full px-3 py-2 text-size-large kbd-title">{label}</div>
+    <div class="rounded-md shadow-md rounded-t-none p-4 kbd-body">
       <div class="w-full flex flex-row">
         {#if !hiddenNum || !hiddenFloat}
             <input name="Previous Value"
@@ -486,5 +494,28 @@
   /* Remove fixed height from simple-keyboard buttons */
   :global(.hg-theme-default .hg-button) {
     @apply !h-auto;
+  }
+
+  /* Title band — teal accent in both themes. */
+  .kbd-shell { background:#0c4a6e; }
+  .kbd-title { color:#e0f2fe; }
+  /* LIGHT (default): white body, library-default key faces. */
+  .kbd-body { background:#ffffff; color:#0f172a; }
+  .kbd-body :global(input) { background:#ffffff !important; color:#0f172a !important; border:1px solid #cbd5e1 !important; border-radius:7px; }
+
+  /* DARK — gated on the overlay's data-theme; matches the dashboard modals. */
+  [data-theme="dark"] .kbd-body { background:#0f1827; color:#e2e8f0; }
+  [data-theme="dark"] .kbd-body :global(input) {
+    background:#0b1220 !important; color:#f8fafc !important;
+    border:1px solid #475569 !important;
+  }
+  :global([data-theme="dark"] .hg-theme-default) { background:#0f1827 !important; }
+  :global([data-theme="dark"] .hg-theme-default .hg-button) {
+    background:#0b1220 !important; color:#e2e8f0 !important;
+    border:1px solid #334155 !important; box-shadow:none !important;
+  }
+  :global([data-theme="dark"] .hg-theme-default .hg-button:active),
+  :global([data-theme="dark"] .hg-theme-default .hg-button.hg-activeButton) {
+    background:#1e293b !important; color:#7dd3fc !important;
   }
 </style>

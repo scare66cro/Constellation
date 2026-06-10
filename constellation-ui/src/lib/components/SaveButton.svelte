@@ -116,7 +116,11 @@
     });
   };
 
-  async function save() {
+  // Exported so a parent can flush this save imperatively (e.g. a modal
+  // that saves on close-without-cancel, where there's no route navigation
+  // for the autoSave `beforeNavigate` hook to fire on). Reuses the full
+  // validation / wait / original-update path — no logic duplicated.
+  export async function save() {
     wait = true;
     error = false;
     if (autoSave) autoSaveStatus = 'saving';

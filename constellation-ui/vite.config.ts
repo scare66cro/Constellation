@@ -7,6 +7,15 @@ import { defineConfig, type UserConfig } from 'vite';
 // nominally distinct from our root vite 6 — using vitest/config triggers
 // a sveltekit() plugin overload mismatch. The `test` block is still
 // honored by vitest at runtime; we widen UserConfig to include it.
+// Dev-proxy bridge target. Defaults to a bridge on localhost:9001 (the
+// usual local/tunnelled setup). Point at the bench Pi5 to pull live Nova
+// data into a local `npm run dev` session, e.g.:
+//   BRIDGE_HOST=10.47.27.108:9001 npm run dev
+// (bench Pi5 is dual-homed at .108 for dev convenience — see CLAUDE.md #12).
+const BRIDGE_HOST = process.env.BRIDGE_HOST ?? 'localhost:9001';
+const BRIDGE_HTTP = `http://${BRIDGE_HOST}`;
+const BRIDGE_WS = `ws://${BRIDGE_HOST}`;
+
 export default defineConfig({
 	plugins: [sveltekit(), purgeCss()],
 	// JSON named exports cause a conflict because our locale file has a top-level key named "global".
@@ -35,28 +44,30 @@ export default defineConfig({
 		proxy: {
 			// Forward /iot/* requests to the bridge server during development
 			'/iot/ws': {
-				target: 'ws://localhost:9001',
+				target: BRIDGE_WS,
 				ws: true,
+				changeOrigin: true,
 			},
 			// Phase 0.3+ proto-direct binary stream (see docs/proto-direct-redesign-plan.md)
 			'/proto/stream': {
-				target: 'ws://localhost:9001',
+				target: BRIDGE_WS,
 				ws: true,
+				changeOrigin: true,
 			},
 			// Phase 0.4+ proto-direct typed write path (`POST /proto/write/<field>`).
 			// Must be registered AFTER `/proto/stream` so the WS entry matches first.
 			// Without this, UI POSTs return 404 from Vite and saves silently fail.
 			'/proto': {
-				target: 'http://localhost:9001',
+				target: BRIDGE_HTTP,
 				changeOrigin: true,
 			},
 			'/iot': {
-				target: 'http://localhost:9001',
+				target: BRIDGE_HTTP,
 				changeOrigin: true,
 			},
 			// Forward /vfd/* to bridge (rewritten to /iot/*)
 			'/vfd': {
-				target: 'http://localhost:9001',
+				target: BRIDGE_HTTP,
 				changeOrigin: true,
 				rewrite: (path: string) => path.replace(/^\/vfd/, '/iot'),
 			},

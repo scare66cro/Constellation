@@ -135,6 +135,7 @@ mechanical, not a research project.
 - [`docs/ioconfig-architecture.md`](docs/ioconfig-architecture.md) — IO Config wire layout, slot invariants.
 - [`docs/triton-grc-port-plan.md`](docs/triton-grc-port-plan.md) — TRITON refrigeration GPIO/EPWM (Phase 17 LANDED).
 - [`docs/ui-changes.md`](docs/ui-changes.md) — UI page moves, swipe-nav, menu changes.
+- [`docs/spatial-ui-page-migration.md`](docs/spatial-ui-page-migration.md) — spatial-UI (`spatial-ui` branch): page→shared-`*Form.svelte`+modal migration recipe, catalog, checklist.
 - [`docs/swipe-navigation.md`](docs/swipe-navigation.md), [`docs/touch-slider-fix.md`](docs/touch-slider-fix.md), [`docs/version-page-refactor.md`](docs/version-page-refactor.md).
 
 ## Hardware / bringup

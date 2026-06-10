@@ -209,9 +209,16 @@ export function interpretEquipmentInput(eqIndex: number, inputOn: boolean): Inpu
 	const cat = inputCategoryFor(eqIndex);
 	switch (cat) {
 		case InputCategory.PROVING:
+			// AS2 ground truth (Failures.c:443, SerialShift.c:99-112): the
+			// equipment proving DI is an active-high FAULT contact — the field
+			// device ASSERTS it (DI high → input_on true) to report a failure;
+			// a healthy, proving fan leaves CheckInputs(EQ)==0 (DI low). So
+			// healthy = !input_on. (This case was previously inverted, which
+			// disagreed with the firmware/injector and showed healthy as red;
+			// fixed 2026-06-09 — see memories/repo INDEX.)
 			return inputOn
-				? { healthy: true,  statusKey: 'global.on',  color: COLOR_GOOD }
-				: { healthy: false, statusKey: 'global.off', color: COLOR_BAD  };
+				? { healthy: false, statusKey: 'global.off', color: COLOR_BAD  }
+				: { healthy: true,  statusKey: 'global.on',  color: COLOR_GOOD };
 		case InputCategory.CURRENT_SENSE:
 			return inputOn
 				? { healthy: true,  statusKey: 'global.on',  color: COLOR_GOOD }
