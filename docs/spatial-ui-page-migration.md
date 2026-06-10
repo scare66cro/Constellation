@@ -169,6 +169,27 @@ For each migratable page:
      `.pform--dark button.\!bg-<colour> { background:… !important }` (equal
      specificity, later source order wins). Added 2026-06-08 for the four
      run-clock colours; reuse for any future colour-coded buttons.
+   - **⚠ Gotcha — `$themeStore` defaults to dark; classic pages never set it.**
+     `themeStore` (`store.ts`, persisted key `dashTheme`) defaults to `'dark'`
+     and is ONLY ever written by the `/dashboard/plan3d` ☀/🌙 toggle. A classic
+     `/levelN` kiosk never writes `dashTheme`, so any **shared component**
+     rendered on both the dashboard and classic pages that binds `data-theme`
+     (or a skin) straight to `$themeStore` will render **dark on every classic
+     page** — including the global on-screen `Keyboard` (it regressed white→dark
+     this way; fixed 2026-06-10 by gating on the route:
+     `$: kbTheme = $page.url?.pathname?.startsWith('/dashboard') ? $themeStore
+     : 'light'`). Rule: shared/global components must derive their theme from
+     **route context** (dashboard → follow `$themeStore`; classic → `'light'`)
+     or take an explicit `theme` prop — never bind a globally-rendered element
+     to `$themeStore` directly. (Embedded `*Form`s are safe: the modal passes
+     `theme="dark"` and the classic route passes nothing → `'light'`.)
+   - **⚠ Gotcha — `async onMount` silently drops its cleanup return.** A form
+     that does `onMount(async () => { … return () => unsub(); })` returns a
+     `Promise`, which Svelte ignores — so the cleanup never runs and any
+     `store.subscribe()` inside leaks on every mount/unmount (hit on
+     `AccountsForm`, fixed 2026-06-10). Keep `onMount` **synchronous**: run the
+     async loads fire-and-forget (`loadX().then(…).finally(() => ready = true)`)
+     and `return () => unsub()` synchronously.
 
 **Save semantics in the modal:** overlay-click / X / "Save & Close" →
 `flush()` (autosave); **Cancel** → close without saving (form destroyed,
