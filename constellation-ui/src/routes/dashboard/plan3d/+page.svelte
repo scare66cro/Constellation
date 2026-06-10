@@ -644,6 +644,13 @@
   // healthy (DI low), red = fault (DI asserted). Mirrors the fan pill.
   $: refrigProved = interpretEquipmentInput(EQ.REFRIGERATION, !!eqIn[EQ.REFRIGERATION]).healthy;
   $: climacellProved = interpretEquipmentInput(EQ.CLIMACELL, !!eqIn[EQ.CLIMACELL]).healthy;
+  // FAN/REFRIG/CLIMACELL readout colour is three-state: GRAY when the output is
+  // OFF (not commanded), GREEN when commanded ON and the proving input is
+  // healthy, RED when commanded ON but the proving/fault input asserts. (When
+  // off the proving DI reads healthy, so we must gate on the output first.)
+  $: fanOn = fanPct > 0 || !!eqOut[EQ.FAN];
+  const proveStroke = (on: boolean, proved: boolean): string => !on ? '#475569' : proved ? '#34d399' : '#ef4444';
+  const proveText   = (on: boolean, proved: boolean): string => !on ? '#94a3b8' : proved ? '#bbf7d0' : '#fca5a5';
   $: cavityHeat = !!eqOut[EQ.CAVITY_HEAT];
   $: heatOn = !!eqOut[EQ.HEAT];
   // Climacell output coil — gates the media-wall water animation so the
@@ -1165,10 +1172,10 @@
              sheared wall group so the text stays upright). % = coolPct. -->
         <g transform="translate({base[0]},{base[1] + 24})" class="door-tag">
           <rect x="-44" y="-16" width="88" height="30" rx="7" fill="#0b1220"
-                stroke={refrigProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
+                stroke={proveStroke(refrigState !== 'off', refrigProved)} stroke-width="1.5" filter="url(#soft3)"/>
           <text x="0" y="-4" text-anchor="middle" class="dtag-k">REFRIGERATION</text>
           <text x="0" y="9"  text-anchor="middle" class="dtag-v"
-                fill={refrigProved ? '#bbf7d0' : '#fca5a5'}>
+                fill={proveText(refrigState !== 'off', refrigProved)}>
             {refrigState === 'defrost' ? 'DEFROST' : coolPct + '%'}
           </text>
         </g>
@@ -1178,10 +1185,10 @@
              sheared wall group so the text stays upright). -->
         <g transform="translate({base[0]},{base[1] + 24})" class="door-tag">
           <rect x="-32" y="-16" width="64" height="30" rx="7" fill="#0b1220"
-                stroke={fanProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
+                stroke={proveStroke(fanOn, fanProved)} stroke-width="1.5" filter="url(#soft3)"/>
           <text x="0" y="-4" text-anchor="middle" class="dtag-k">FAN</text>
           <text x="0" y="9"  text-anchor="middle" class="dtag-v"
-                fill={fanProved ? '#bbf7d0' : '#fca5a5'}>{fanDisplay}</text>
+                fill={proveText(fanOn, fanProved)}>{fanDisplay}</text>
         </g>
       {/if}
       {#if eqb.type === 'cell'}
@@ -1191,10 +1198,10 @@
            on:click|stopPropagation={() => openModal('climacell')}
            role="button" tabindex="0">
           <rect x="-34" y="-16" width="68" height="30" rx="7" fill="#0b1220"
-                stroke={climacellProved ? '#34d399' : '#ef4444'} stroke-width="1.5" filter="url(#soft3)"/>
+                stroke={proveStroke(climacellOn, climacellProved)} stroke-width="1.5" filter="url(#soft3)"/>
           <text x="0" y="-4" text-anchor="middle" class="dtag-k">CLIMACELL</text>
           <text x="0" y="9"  text-anchor="middle" class="dtag-v"
-                fill={climacellProved ? '#bbf7d0' : '#fca5a5'}>{climacellOn ? 'ON' : 'OFF'}</text>
+                fill={proveText(climacellOn, climacellProved)}>{climacellOn ? 'ON' : 'OFF'}</text>
         </g>
       {/if}
     {/each}
