@@ -255,40 +255,67 @@
   async function saveAnalog(arr: string[]): Promise<void> {
     if (!Array.isArray(arr) || arr.length < 25) return;
     const boardIdx = parseInt(arr[0] ?? '0', 10) || 0;
+
+    // Build the NESTED message the firmware decoder expects
+    // (lp_settings.c: LpSettings_ApplyAnalogBoard → apply_analog_board_one →
+    // apply_sensor_config). Wire shape (settings.proto numbering — the side
+    // the firmware actually decodes):
+    //   payload = { board@1 (submsg) }
+    //   board   = { address@1 varint, sensors@4 (repeated submsg) }
+    //   sensor  = { slot@1, label@2 string, offset@3 float, disabled@4, type@5 }
+    // Earlier this emitted a FLAT { boardIdx@1 varint, sensor@6 } shape with
+    // io.proto-style field numbers, which the firmware skipped wholesale — so
+    // NO per-sensor config (incl. type) ever persisted (gap #4). Fixed
+    // 2026-06-10 with the static-pressure port. (The status read-back still
+    // decodes via io.proto AnalogSensor — a separate numbering mismatch that
+    // is the remaining gap-#4 display work; it does NOT affect whether the
+    // firmware resolves/acts on the saved type.)
     const sensorParts: Uint8Array[] = [];
     for (let s = 0; s < 4; s++) {
       const base = 5 + s * 5;
+      // arr[base] = the sensor "type" selector — the AS2 ROLE enum
+      // (PileTemp/PileHumidOptions values), NOT the firmware
+      // ANALOG_SENSOR_TYPE_* hardware enum. They coincide only for
+      // STATIC_PRESS (11). Map just that case so the firmware's
+      // SetAnalogBoardTypes resolves the static-pressure sensor; every other
+      // role → 0, which the firmware's resolve_sensor_type treats as "unset →
+      // historical fixed-slot role" (preserves today's temp/humid/CO2
+      // behavior). Full role→type mapping for the dual-bay sensors is the
+      // remaining gap #4/#5 work.
+      const uiRole = String(arr[base] ?? '');
+      const fwType = uiRole === '11' ? 11 : 0;
       const label = String(arr[base + 1] ?? '');
       const offset = parseFloat(arr[base + 2] ?? '0') || 0;
       const disabled = parseInt(arr[base + 3] ?? '0', 10) || 0;
-      const cfg = customConfigs[s] ?? EMPTY_CFG;
       const labelBytes = new TextEncoder().encode(label);
-      const slot = buildForceVarintBytes({ 1: s });
-      const labelTLV = wrapAsLengthDelim(3, labelBytes);
-      const off = buildForceFloatBytes({ 4: offset });
-      const dis = buildForceVarintBytes({ 5: disabled });
-      const dispU = cfg.displayUnit !== 0 ? buildForceVarintBytes({ 7: cfg.displayUnit }) : new Uint8Array(0);
-      const eMin = (cfg.engMin !== 0 || cfg.engMax !== 0) ? buildForceFloatBytes({ 8: cfg.engMin }) : new Uint8Array(0);
-      const eMax = (cfg.engMin !== 0 || cfg.engMax !== 0) ? buildForceFloatBytes({ 9: cfg.engMax }) : new Uint8Array(0);
-      const total = slot.length + labelTLV.length + off.length + dis.length
-                  + dispU.length + eMin.length + eMax.length;
-      const sensor = new Uint8Array(total);
+
+      const slot   = buildForceVarintBytes({ 1: s });
+      const labelT = wrapAsLengthDelim(2, labelBytes);
+      const off    = buildForceFloatBytes({ 3: offset });
+      const dis    = buildForceVarintBytes({ 4: disabled });
+      const typeB  = buildForceVarintBytes({ 5: fwType });
+
+      const sLen = slot.length + labelT.length + off.length + dis.length + typeB.length;
+      const sensor = new Uint8Array(sLen);
       let p = 0;
-      sensor.set(slot, p); p += slot.length;
-      sensor.set(labelTLV, p); p += labelTLV.length;
-      sensor.set(off, p); p += off.length;
-      sensor.set(dis, p); p += dis.length;
-      if (dispU.length) { sensor.set(dispU, p); p += dispU.length; }
-      if (eMin.length)  { sensor.set(eMin,  p); p += eMin.length; }
-      if (eMax.length)  { sensor.set(eMax,  p); p += eMax.length; }
-      sensorParts.push(wrapAsLengthDelim(6, sensor));
+      sensor.set(slot, p);   p += slot.length;
+      sensor.set(labelT, p); p += labelT.length;
+      sensor.set(off, p);    p += off.length;
+      sensor.set(dis, p);    p += dis.length;
+      sensor.set(typeB, p);  p += typeB.length;
+      sensorParts.push(wrapAsLengthDelim(4, sensor));   // board.sensors @ field 4
     }
-    const board = buildForceVarintBytes({ 1: boardIdx });
-    const totalLen = board.length + sensorParts.reduce((n, p) => n + p.length, 0);
-    const buf = new Uint8Array(totalLen);
-    let off2 = 0;
-    buf.set(board, off2); off2 += board.length;
-    for (const sp of sensorParts) { buf.set(sp, off2); off2 += sp.length; }
+
+    // board submsg: address@1 + each sensor@4
+    const addr = buildForceVarintBytes({ 1: boardIdx });
+    const bLen = addr.length + sensorParts.reduce((n, x) => n + x.length, 0);
+    const boardInner = new Uint8Array(bLen);
+    let bp = 0;
+    boardInner.set(addr, bp); bp += addr.length;
+    for (const sp of sensorParts) { boardInner.set(sp, bp); bp += sp.length; }
+
+    // top-level: one board wrapped at field 1
+    const buf = wrapAsLengthDelim(1, boardInner);
     await writeProtoRaw(TAG.AnalogBoard, buf);
 
     try {

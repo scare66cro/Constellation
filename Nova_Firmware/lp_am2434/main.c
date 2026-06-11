@@ -3217,6 +3217,25 @@ static size_t pb_encode_float_field(uint8_t *buf, uint32_t field_no, float v)
     return 5U;
 }
 
+/* FORCE-encode a float field, even when the value is 0.0f. SystemStatus
+ * floats are never proto3-suppressed here anyway (pb_encode_float_field
+ * always writes the tag+4 bytes), but the explicit name documents intent
+ * at the static_pressure call site: 0.00"wc is a VALID live reading and
+ * MUST appear on the wire so the UI renders "0.00" rather than "--".
+ * Handles field numbers ≥ 16 with a varint tag (static_pressure = 24). */
+static size_t pb_encode_float_field_force(uint8_t *buf, uint32_t field_no,
+                                          float v)
+{
+    size_t pos = pb_encode_varint(buf, (field_no << 3) | 5U);  /* fixed32 */
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    buf[pos++] = (uint8_t)(bits & 0xFFU);
+    buf[pos++] = (uint8_t)((bits >>  8) & 0xFFU);
+    buf[pos++] = (uint8_t)((bits >> 16) & 0xFFU);
+    buf[pos++] = (uint8_t)((bits >> 24) & 0xFFU);
+    return pos;
+}
+
 /* AS2 sensor-board layout constants (Analog_Input.h). Local to this
  * helper so they don't bleed into the rest of the firmware as a global
  * "topology table" — Phase D replaces them with an IoConfig lookup. */
@@ -3295,11 +3314,13 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
                                            uint32_t seq)
 {
     /* Build the inner SystemStatus body first into a scratch buffer,
-     * then wrap with the envelope header. Sized for 8 floats × 5 B,
-     * one current_mode varint, one start_temp float, the diagnostic
-     * fields 18-23 (~20 B), plus the cool_output / cool_label /
-     * burner_output strings (~30 B). 128 B leaves comfortable headroom. */
-    uint8_t inner[128];
+     * then wrap with the envelope header. Sized for ~9 floats × 5 B (the
+     * sensor block + static_pressure field 24 at 6 B), one current_mode
+     * varint, one start_temp float, the diagnostic fields 18-26 (~50 B),
+     * plus the cool_output / cool_label / burner_output strings (~30 B).
+     * 160 B leaves comfortable headroom after the static-pressure add
+     * (newer Mini_IO 2.0.1.b). */
+    uint8_t inner[160];
     size_t  ilen = 0;
 
     OrbitSample sample;
@@ -3360,6 +3381,23 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
         /* co2_level (field 10) */
         if (ss_decode_co2_ppm(sample.sensorHr[LP_SS_HUMID_BOARD_HR_BASE + 3], &v)) {
             ilen += pb_encode_float_field(&inner[ilen], 10U, v);
+        }
+
+        /* static_pressure (field 24) — newer Mini_IO 2.0.1.b. Emit the
+         * live reading in "wc ONLY when a static-pressure sensor is
+         * resolved (SENSOR_STATIC_PRESSURE != -1) and the configured
+         * sensor is enabled; skip the field entirely otherwise so the UI
+         * shows "--". The value comes from the engine's
+         * Settings.AnalogBoard[].Sensor[].Value (already descaled ÷100
+         * from the orbit's int16 "wc × 100 wire encoding by
+         * mirror_sensors). FORCE-encode: 0.00"wc is a valid reading. */
+        if (SENSOR_STATIC_PRESSURE != -1) {
+            const ANALOG_SENSOR *sps =
+                &Settings.AnalogBoard[SENSOR_STATIC_PRESSURE / ANALOG_SENSORS_PER_BOARD]
+                         .Sensor[SENSOR_STATIC_PRESSURE % ANALOG_SENSORS_PER_BOARD];
+            if (sps->Disabled == 0 && sps->Value != (float)SENSOR_VAL_UNDEFINED) {
+                ilen += pb_encode_float_field_force(&inner[ilen], 24U, sps->Value);
+            }
         }
     }
 
@@ -3457,9 +3495,13 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
         DIAG_EMIT_VARINT(0xB0, 0x01, (uint32_t)Nova_GetEStopActive()); /* field 22 */
         DIAG_EMIT_VARINT(0xB8, 0x01, ro_bits);
 
-        /* Field 24: refrigeration-gate trace. Packed view of every input
+        /* Field 50: refrigeration-gate trace. Packed view of every input
          * SetStateRefrig / SetStateCooling read on this tick, so the
-         * probe can replay the gate without flashing diag-only firmware. */
+         * probe can replay the gate without flashing diag-only firmware.
+         * MOVED 24→50 (2026-06-11): field 24 is now the typed
+         * `static_pressure` float (system.proto:67). These raw diag varints
+         * must live above the schema'd typed range — see
+         * firmware-bridge-protocol §16. */
         {
             uint32_t gate = 0U;
             gate |= ((uint32_t)(CheckInputs(SW_REFRIG_AUTO)    ? 1U : 0U)) <<  0;
@@ -3471,17 +3513,18 @@ static size_t build_system_status_envelope(uint8_t *buf, size_t bufsize,
             gate |= ((uint32_t)Settings.OutsideAir.CtrlMode & 0x03U) <<  7;
             gate |= ((uint32_t)Settings.Refrig.FailMode     & 0x03U) <<  9;
             gate |= ((uint32_t)(unsigned char)Settings.OutsideAir.AboveBelow) << 16;
-            DIAG_EMIT_VARINT(0xC0, 0x01, gate);
+            DIAG_EMIT_VARINT(0x90, 0x03, gate);   /* field 50 = (50<<3)|0 */
         }
 
-        /* Field 25 / 26: setpoint + outside-air diff scaled by 10 so we
+        /* Field 51 / 52: setpoint + outside-air diff scaled by 10 so we
          * can recover one decimal place from a varint (negative values
-         * round-trip via int32→uint32 reinterpret). */
+         * round-trip via int32→uint32 reinterpret). MOVED 25/26→51/52
+         * (2026-06-11) alongside the field-24→50 fix above. */
         {
             int32_t pset = (int32_t)(Settings.Plenum.TempSet * 10.0f);
             int32_t pdif = (int32_t)(Settings.OutsideAir.Diff * 10.0f);
-            DIAG_EMIT_VARINT(0xC8, 0x01, (uint32_t)pset);
-            DIAG_EMIT_VARINT(0xD0, 0x01, (uint32_t)pdif);
+            DIAG_EMIT_VARINT(0x98, 0x03, (uint32_t)pset);   /* field 51 */
+            DIAG_EMIT_VARINT(0xA0, 0x03, (uint32_t)pdif);   /* field 52 */
         }
         #undef DIAG_EMIT_VARINT
 diag_done: ;
@@ -3617,11 +3660,13 @@ str_done: ;
     pos += pb_encode_varint(&buf[pos], seq);
 
     /* Envelope.system_status (field 10, length-delimited).
-     * SystemStatus fits in one tag byte AND its body fits in <128 B so
-     * the inner-length varint is always one byte. */
-    if (pos + 2U + ilen > bufsize) return 0;
+     * The body can now exceed 127 B (sensor block + static_pressure +
+     * diag fields + cooling strings), so the inner-length MUST be a real
+     * varint — a single-byte write of a length ≥128 would set the varint
+     * continuation bit and corrupt the COBS frame. */
+    if (pos + 1U + 5U + ilen > bufsize) return 0;
     buf[pos++] = 0x52;
-    buf[pos++] = (uint8_t)ilen;
+    pos += pb_encode_varint(&buf[pos], (uint32_t)ilen);
     if (ilen > 0U) {
         memcpy(&buf[pos], inner, ilen);
         pos += ilen;
@@ -3720,7 +3765,21 @@ static size_t build_sensor_data_envelope(uint8_t *buf, size_t bufsize,
 
             uint32_t sid = (uint32_t)slot * ORBIT_SENSOR_HR_COUNT
                          + (uint32_t)off;
-            float value = (float)(int16_t)raw / 10.0f;
+
+            /* Generic temp/humid convention is int16 × 10. The static-
+             * pressure channel is the lone exception: the orbit encodes
+             * it int16 "wc × 100, so descaling ÷10 here would render it
+             * 10× too large. When this slot is the resolved static-
+             * pressure sensor on the STORAGE orbit (slot 0,
+             * off == SENSOR_STATIC_PRESSURE), descale ÷100 instead. */
+            float value;
+            if (slot == 0U
+                && SENSOR_STATIC_PRESSURE != -1
+                && (uint32_t)SENSOR_STATIC_PRESSURE == (uint32_t)off) {
+                value = (float)(int16_t)raw / 100.0f;
+            } else {
+                value = (float)(int16_t)raw / 10.0f;
+            }
 
             uint8_t reading[16];
             size_t rlen = build_sensor_reading(reading, sid, value, true);
@@ -4450,9 +4509,13 @@ static size_t build_settings_envelope(uint8_t *buf, size_t bufsize,
                                       uint8_t tag1, uint8_t tag2,
                                       LpBodyBuilder body_fn)
 {
-    /* 384 B inner: covers Refrig (8 stages × ~10 B + 13 flat × ~6 B
-     * ≈ 160 B) and leaves headroom for other multi-array pages. */
-    uint8_t inner[384];
+    /* 1024 B inner: covers Refrig (8 stages × ~10 B + 13 flat × ~6 B
+     * ≈ 160 B) and the AnalogBoard wire body, whose worst case is 8
+     * boards × (addr + label + disabled + 4 default sensor slots) ≈
+     * 540 B (LpSettings_BuildAnalogBoardWireBody). Lives on
+     * bridge_uart_task's 16 KB stack alongside envelope_buf[5120] —
+     * comfortable headroom. */
+    uint8_t inner[1024];
     size_t  ilen = body_fn(inner, sizeof(inner));
 
     size_t pos = 0;
@@ -5447,11 +5510,17 @@ static void bridge_uart_task(void *args)
         }
 
         /* AnalogBoard (envelope tag 26): every 5 s, tick%50==30.
-         * (26<<3)|2 = 210 → varint 0xD2 0x01. */
+         * (26<<3)|2 = 210 → varint 0xD2 0x01.
+         * Uses the *wire* body, which emits operator-configured boards
+         * PLUS runtime auto-detected (live-orbit) boards with default
+         * sensor slots so the UI Analog Board page is non-empty on an
+         * un-configured rig. The OSPI persist path (LpSettings_Serialize)
+         * stays on the populated-only LpSettings_BuildAnalogBoardBody so
+         * detected boards are never persisted. */
         if ((tick % 50) == 30) {
             size_t pb_len = build_settings_envelope(
                 envelope_buf, sizeof(envelope_buf), ++analog_board_seq,
-                0xD2, 0x01, LpSettings_BuildAnalogBoardBody);
+                0xD2, 0x01, LpSettings_BuildAnalogBoardWireBody);
             if (pb_len > 0) NovaProto_SendRaw(envelope_buf, pb_len);
         }
 

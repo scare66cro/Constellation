@@ -65,6 +65,10 @@ const SENSOR_TYPE_TEMP     = 3;
 const SENSOR_TYPE_PRESSURE = 4;
 // Generic 4-20 mA analog input (used for the Triton "demand" channel).
 const SENSOR_TYPE_MA       = 5;
+// NEW Gellert 4-20 mA static-pressure transducer (0–2.5 "wc). Nibble 11
+// matches AS2 (ANALOG_SENSOR_TYPE_STATIC_PRESS=11), Nova firmware, and the UI.
+// Wire encoding is ×100 ("wc one-hundredths) — NOT the ×10 temp/humid form.
+const SENSOR_TYPE_STATIC_PRESSURE = 11;
 const SENSOR_TYPE_NONE     = 0xF;
 const SENSOR_VAL_UNDEF    = 0x7FFF;
 
@@ -3643,9 +3647,14 @@ export class OrbitSimulator extends EventEmitter {
         const sensorApiPort = parseInt(process.env.SENSOR_API_PORT ?? '9020', 10);
         const sensorApiHost = process.env.SENSOR_API_HOST ?? 'localhost';
         const st = b.sensorTypes[sensorIndex];
-        // Orbit registers: temp/humid = ×10, CO2 = raw ppm
-        // Sensor board sim: engineering values (°C, %RH, ppm)
-        const engValue = (st === SENSOR_TYPE_CO2) ? Number(value) : Number(value) / 10;
+        // Orbit HR int16 encoding → engineering for the RTU sensor-board sim:
+        //   CO2           = raw ppm   (no scale)
+        //   static press  = ÷100      ("wc, ×100 wire — NOT the ×10 convention)
+        //   temp/humid    = ÷10
+        const engValue =
+          (st === SENSOR_TYPE_CO2)              ? Number(value)
+          : (st === SENSOR_TYPE_STATIC_PRESSURE) ? Number(value) / 100
+          :                                        Number(value) / 10;
         const payload = JSON.stringify({ address: b.address, sensor: sensorIndex, value: engValue });
         const fwdReq = http.request({
           hostname: sensorApiHost,

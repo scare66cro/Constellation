@@ -57,6 +57,14 @@ message SystemStatus {
   // output rail (independent of firmware).
   bool   estop_active    = 22;
   uint32 ro_bits         = 23;  // Settings.RemoteOff[] nibbles, debug
+  // Live static-pressure reading (newer-AS2 port, 2026-06-10), inches
+  // water column, from the resolved STATIC_PRESS(11) sensor. FORCE-encoded
+  // via emit_float_force: 0.0 "wc (fan off / unrestricted plenum) is a
+  // valid live reading and must not be proto3-suppressed, else the UI
+  // readout blanks exactly when the true value is 0.0 (zero-suppression
+  // invariant). Renders "--" only when no static-pressure sensor is
+  // resolved (firmware skips the field entirely in that case).
+  float  static_pressure = 24;
 }
 
 // ─── DateTime (UI_SendDateTime, tag "Date") ──────────────────────────────

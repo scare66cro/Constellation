@@ -203,19 +203,31 @@ the same setting (a problem that bit us hard in Phase-D, see
 | 100 | `ack` | `Ack` | 120 |
 | 101 | `heartbeat` | `Heartbeat` | 121 |
 | 102 | `data_request` | `DataRequest` | 122 |
-| 110 | `fw_begin_update` | `FwBeginUpdate` | 126 |
-| 111 | `fw_data_chunk` | `FwDataChunk` | 127 |
-| 112 | `fw_finalize_update` | `FwFinalizeUpdate` | 128 |
-| 113 | `fw_activate_bank` | `FwActivateBank` | 129 |
-| 114 | `fw_update_status` | `FwUpdateStatus` | 131 |
-| 115 | `fw_bank_info` | `FwBankInfo` | 132 |
-| 120 | `orbit_status` | `OrbitStatus` | 136 |
-| 121 | `orbit_discovery` | `OrbitDiscovery` | 137 |
-| 122 | `orbit_role_assign` | `OrbitRoleAssign` | 139 |
-| 123 | `ao_equip_assign` | `AoEquipAssign` | 140 |
-| 124 | `orbit_sensor_bank` | `OrbitSensorBank` | 142 |
-| 125 | `triton_reg_write` | `TritonRegWrite` | 144 |
-| 200 | `vfd_status` | `VfdStatus` | 149 |
+| 110 | `fw_begin_update` | `FwBeginUpdate` | 130 |
+| 111 | `fw_data_chunk` | `FwDataChunk` | 131 |
+| 112 | `fw_finalize_update` | `FwFinalizeUpdate` | 132 |
+| 113 | `fw_activate_bank` | `FwActivateBank` | 133 |
+| 114 | `fw_update_status` | `FwUpdateStatus` | 135 |
+| 115 | `fw_bank_info` | `FwBankInfo` | 136 |
+| 120 | `orbit_status` | `OrbitStatus` | 140 |
+| 121 | `orbit_discovery` | `OrbitDiscovery` | 141 |
+| 122 | `orbit_role_assign` | `OrbitRoleAssign` | 143 |
+| 123 | `ao_equip_assign` | `AoEquipAssign` | 144 |
+| 124 | `orbit_sensor_bank` | `OrbitSensorBank` | 146 |
+| 125 | `triton_reg_write` | `TritonRegWrite` | 148 |
+| 126 | `orbit_reg_write` | `OrbitRegWrite` | 151 |
+| 127 | `vfd_poll_config` | `VfdPollConfig` | 156 |
+| 130 | `fw_install_begin` | `FwInstallBegin` | 163 |
+| 131 | `fw_install_component_begin` | `FwInstallComponentBegin` | 164 |
+| 132 | `fw_install_chunk` | `FwInstallChunk` | 165 |
+| 133 | `fw_install_component_finalize` | `FwInstallComponentFinalize` | 166 |
+| 134 | `fw_install_complete` | `FwInstallComplete` | 167 |
+| 135 | `fw_install_abort` | `FwInstallAbort` | 168 |
+| 136 | `fw_fleet_probe` | `FwFleetProbe` | 169 |
+| 140 | `fw_install_progress` | `FwInstallProgress` | 171 |
+| 141 | `fw_install_result` | `FwInstallResult` | 172 |
+| 142 | `fw_fleet_snapshot` | `FwFleetSnapshot` | 173 |
+| 200 | `vfd_status` | `VfdStatus` | 178 |
 
 <!-- AUTO-GEN:END -->
 

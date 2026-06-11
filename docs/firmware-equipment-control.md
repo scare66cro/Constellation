@@ -500,6 +500,17 @@ When `RemoteOff[RO_FAN] == 3`, the state machine enters `ST_SYSTEM_REMOTEOFF` wh
 | Orbit Sensor Fault | 0x103 | Warning | Any sensor register = 0x7FFF |
 | Orbit CPU Overtemp | 0x104 | Warning | Orbit CPU > 85°C |
 
+> **Mirror dependency (shadow-mirror bug class).** Every per-equipment
+> failure check above gates on `Settings.Failure[FAIL_X].Mode != FM_NONE`.
+> Those entries are populated from `LpFailure`/`LpFailure2` by
+> `mirror_failure()` in `Nova_Firmware/lp_am2434/lp_engine_shim.c`. If a
+> failure-config field the engine reads ever has no mirror, the value
+> stays BSS-zero (`FM_NONE`) and **the check is silently disabled** — no
+> error, no log, just absent protection. This is the inverse of the more
+> familiar "equipment stuck at 0%" symptom. Before adding any new
+> failure check, confirm its config has a `mirror_*()` populating it.
+> Full audit + bug catalogue: `memories/repo/lp-engine-shadow-mirror-rule.md`.
+
 ---
 
 ## 11. Start Temperature Calculation

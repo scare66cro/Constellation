@@ -96,6 +96,20 @@ float adc_to_co2(uint16_t adc_x16)
     return ((scaled - 180.0f) / 720.0f) * 10000.0f;
 }
 
+/* 1:1 port of Mini_IO 2.0.1.b Analog_Input.c:177-185 ConvertToStaticPressure.
+ * 4-20 mA → 0-2.5"wc, linear. The valid mA range maps to a scaled-ADC
+ * range of ~180-900 (the A/D count arrives ×16 to add resolution, hence
+ * the /16). Below 4 mA (ScaledADC < 180) the reading is invalid → undef;
+ * above 20 mA (> 900) it clamps to the 2.5"wc full-scale. */
+float adc_to_static_pressure(uint16_t adc_x16)
+{
+    if (adc_x16 == 0 || adc_x16 == (uint16_t)ORBIT_SENSOR_VAL_UNDEF) return ADC_NAN;
+    float scaled = (float)adc_x16 / 16.0f;
+    if (scaled < 180.0f) return ADC_NAN;          /* below 4 mA → undefined */
+    if (scaled > 900.0f) return 2.5f;             /* above 20 mA → clamp 2.5"wc */
+    return ((scaled - 180.0f) / 720.0f) * 2.5f;
+}
+
 static int16_t round_to_int16(float v)
 {
     if (v >= 0.0f) return (int16_t)(v + 0.5f);
@@ -122,6 +136,14 @@ int16_t adc_to_orbit_register(uint16_t adc_x16, uint8_t sensor_type)
             eng = adc_to_co2(adc_x16);
             if (adc_is_nan(eng)) return ORBIT_SENSOR_VAL_UNDEF;
             return round_to_int16(eng);
+        case ADC_SENSOR_TYPE_STATIC_PRESS:
+            /* int16 "wc × 100 (0.00-2.50"wc → 0-250). No AS2 ancestor
+             * for the ×100 wire scaling — see the header doc-comment.
+             * Below-range (< 4 mA) returns ADC_NAN → undef, matching
+             * ConvertToStaticPressure's SENSOR_VAL_UNDEFINED path. */
+            eng = adc_to_static_pressure(adc_x16);
+            if (adc_is_nan(eng)) return ORBIT_SENSOR_VAL_UNDEF;
+            return round_to_int16(eng * 100.0f);
         default:
             return ORBIT_SENSOR_VAL_UNDEF;
     }

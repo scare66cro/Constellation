@@ -86,6 +86,9 @@ typedef struct {
     uint32_t temp_ref2;       /* field 8 */
     uint32_t prev_speed;      /* field 9 */
     uint32_t update_mode;     /* field 10 */
+    float    max_static_pressure;  /* field 11 — Settings.Fan.MaxStaticPressure
+                                    * ("wc). Default 1.25; 0.0 = disabled
+                                    * (NOT force-encoded — proto3-suppress is fine). */
 } LpFanSpeed;
 
 /* Mirrors FanBoostSettings (settings.proto field 3, envelope tag 42). */
@@ -262,6 +265,13 @@ typedef struct {
     uint32_t aux_timer;           /* 20 */
     uint32_t cavity_heat_mode;    /* 21 */
     uint32_t cavity_heat_timer;   /* 22 */
+    /* High static-pressure fan-fail (newer Mini_IO 2.0.1.b). Belongs to
+     * THIS first FailureSettings message, NOT FailureSettings2. Maps to
+     * Settings.Failure[FAIL_STATIC_PRESSURE].Mode/.Timer. Defaults Mode=1
+     * (FM_ALARM), Timer=1 (minute). FORCE-encoded (mode 0 = disabled /
+     * timer 0 = fire-immediately are meaningful). */
+    uint32_t static_pressure_fail_mode;   /* 23 */
+    uint32_t static_pressure_fail_timer;  /* 24 */
 } LpFailure;
 
 /* Mirrors FailureSettings2 (settings.proto field 15, envelope tag 54). */
@@ -589,6 +599,10 @@ typedef struct {
     char     label[LP_SET_STR_MAX];   /* 2 */
     float    offset;     /* 3 */
     uint32_t disabled;   /* 4 */
+    uint32_t type;       /* 5 — ANALOG_SENSOR.Type (newer-AS2 port).
+                          * FORCE-encoded: type 0 (IR_TEMP) is a real value.
+                          * Drives SetAnalogBoardTypes role resolution
+                          * (e.g. 11 = STATIC_PRESS). */
     uint32_t populated;  /* derived */
 } LpSensorConfig;
 
@@ -884,7 +898,31 @@ size_t         LpSettings_BuildAuxProgramBody(uint8_t *buf, size_t bufsize);
 /* AnalogBoard (envelope tag 73 emit, SettingsUpdate field 29 RX).
  * Splice-by-address: SAVE sends one board; LOAD emits all populated. */
 bool           LpSettings_ApplyAnalogBoard(const uint8_t *payload, size_t len);
+
+/* Persisted/OSPI body: emits ONLY operator-configured (populated) boards.
+ * This is the OSPI-blob serializer path — auto-detected boards MUST NOT
+ * be persisted, so this function never looks at the runtime detect map. */
 size_t         LpSettings_BuildAnalogBoardBody(uint8_t *buf, size_t bufsize);
+
+/* Wire body (UART envelope tag 73): emits every operator-configured board
+ * PLUS every board flagged live by LpSettings_SetBoardDetected() that the
+ * operator has not yet configured. A detected-but-unconfigured board is
+ * emitted with its address + 4 default sensor slots (empty label, offset
+ * 0, not disabled, default per-slot role) so the UI Analog Board page can
+ * render four configurable rows for it. RUNTIME ONLY — does not touch the
+ * persisted blob. See LpSettings_SetBoardDetected. */
+size_t         LpSettings_BuildAnalogBoardWireBody(uint8_t *buf, size_t bufsize);
+
+/* Runtime auto-detection of live analog boards. The engine tick
+ * (lp_engine_shim.c::mirror_sensors) re-derives this every tick from the
+ * live orbit sensor HR block: a board is "detected" when ANY of its 4
+ * orbit channels holds a real reading (!= 0x7FFF undef sentinel). The
+ * flag is held in RAM only — it is NOT serialized to OSPI and re-derived
+ * from scratch each tick, so a board that loses all live data drops out
+ * of "detected" (but stays emitted if the operator has configured it).
+ * Mirrors AS2's "detected boards are shown; the operator configures their
+ * sensor types/labels" behaviour. */
+void           LpSettings_SetBoardDetected(uint32_t board, uint8_t live);
 
 /* PwmChannel (envelope tag 74 emit, SettingsUpdate field 30 RX).
  * Splice-by-index per nested channel; SAVE typically sends one. */

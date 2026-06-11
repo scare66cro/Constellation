@@ -40,6 +40,7 @@
 #include "SerialShift.h"
 #include "Analog_Input.h"   /* SENSOR_PLENUM_TEMP_1 etc. + extern decls   */
 #include "States.h"          /* CurrentMode, SystemState, RC_*, ST_*, UI_* */
+#include "Modes.h"           /* HUMID_MODE_COOL / RECIRC / REFRIG         */
 #include "Timer.h"           /* SystemAlarm[], AL_*, FM_NONE              */
 #include "Failures.h"        /* NovaFailures_RunMasterBroadcastChk()      */
 
@@ -67,6 +68,39 @@ SAVE_SETTINGS_INFO SaveSettingsRequest;
 float PlenumTempAvg = SENSOR_VAL_UNDEFINED;
 float StartTemp     = SENSOR_VAL_UNDEFINED;
 float *OutsideTemp  = &PlenumTempAvg;   /* gets re-pointed in tick() */
+
+/* Runtime-resolved static-pressure sensor index (newer Mini_IO 2.0.1.b).
+ * -1 = no static-pressure sensor present. Set by SetAnalogBoardTypes()
+ * below (called at the tail of mirror_sensors), read by
+ * nova_controls.c::AdjustFansForStaticPressure and
+ * nova_failures.c::SystemFailuresChk. Declared extern in Analog_Input.h. */
+int SENSOR_STATIC_PRESSURE = -1;
+
+/* 1:1 port of Mini_IO 2.0.1.b Analog_Input.c:82-119 SetAnalogBoardTypes(),
+ * scoped to the one role Constellation consumes today (static pressure).
+ * Scans every present + enabled board/sensor and records the global
+ * sensor index (board*ANALOG_SENSORS_PER_BOARD + sensor) of the slot whose
+ * Type == ANALOG_SENSOR_TYPE_STATIC_PRESS. -1 means "no static sensor".
+ * THIS is why SensorConfig.type is persisted UI→firmware — the controller
+ * learns each sensor's role from the operator's analog-board config rather
+ * than hardcoding it by slot index. */
+void SetAnalogBoardTypes(void)
+{
+    SENSOR_STATIC_PRESSURE = -1;
+
+    for (int board = 0; board < ANALOG_BOARDS_PER_SYSTEM; board++) {
+        if (Settings.AnalogBoard[board].Present == 1
+            && Settings.AnalogBoard[board].Disabled == 0) {
+            for (int sensor = 0; sensor < ANALOG_SENSORS_PER_BOARD; sensor++) {
+                if (Settings.AnalogBoard[board].Sensor[sensor].Type
+                    == ANALOG_SENSOR_TYPE_STATIC_PRESS) {
+                    SENSOR_STATIC_PRESSURE =
+                        board * ANALOG_SENSORS_PER_BOARD + sensor;
+                }
+            }
+        }
+    }
+}
 
 /* `uptime_sec` is the master 1 Hz tick the legacy AS2 engine reads via
  * `XTimer()` (which latches it into `XTimerVal`) and that all PID
@@ -316,8 +350,63 @@ static void build_switch_state(const LpSettingsData *lp)
     IoBoard[MAIN].InputState = bits;
 }
 
+/* Resolve the operator-configured ANALOG_SENSOR.Type for a given
+ * board/channel from the persisted SensorConfig (proto field 5). The
+ * persisted LpAnalogBoard stores sensors in array order with a `slot`
+ * field, so we match on slot rather than array position. Returns a
+ * default role when the operator hasn't configured this slot:
+ *   board 0 (DEFAULT_TEMP_BOARD)  → TEMP/IR_TEMP roles
+ *   board 1 (DEFAULT_HUMID_BOARD) → HUMID, ch3 = CO2
+ * matching the legacy fixed-slot layout so an un-configured system keeps
+ * working exactly as before this feature landed. */
+static uint8_t resolve_sensor_type(const LpSettingsData *lp,
+                                   uint32_t board, uint32_t ch)
+{
+    if (board < LP_ANALOG_BOARD_MAX) {
+        const LpAnalogBoard *ab = &lp->analog_board.boards[board];
+        if (ab->populated) {
+            for (uint32_t j = 0; j < ab->sensors_count
+                                 && j < LP_SENSORS_PER_BOARD; j++) {
+                if (ab->sensors[j].populated && ab->sensors[j].slot == ch) {
+                    uint8_t t = (uint8_t)ab->sensors[j].type;
+                    /* type 0 (IR_TEMP) is also the proto3 default for a
+                     * config persisted before SensorConfig.type existed —
+                     * treat it as "unset" and fall through to the historical
+                     * fixed-slot role, so legacy OSPI blobs (and any save
+                     * that omits type) don't silently re-role HUMID/CO2
+                     * sensors to IR_TEMP. An explicit IR_TEMP is functionally
+                     * identical to TEMP here (both descale ÷10; neither is
+                     * the STATIC_PRESS role), so nothing is lost. */
+                    if (t != 0U) {
+                        return t;
+                    }
+                    break;   /* historical fallback below */
+                }
+            }
+        }
+    }
+    /* No operator config for this slot — fall back to the historical
+     * fixed-slot roles so behaviour is unchanged for un-configured rigs. */
+    if (board == (uint32_t)DEFAULT_HUMID_BOARD) {
+        return (ch == (uint32_t)SENSOR_CO2)
+                   ? ANALOG_SENSOR_TYPE_CO2
+                   : ANALOG_SENSOR_TYPE_HUMID;
+    }
+    return ANALOG_SENSOR_TYPE_TEMP;   /* DEFAULT_TEMP_BOARD + any extra board */
+}
+
 /* Mirror sensor values from orbit telemetry into the legacy
- * Settings.AnalogBoard[].Sensor[] table the engine reads. */
+ * Settings.AnalogBoard[].Sensor[] table the engine reads.
+ *
+ * The orbit publishes HR 200..263 as sensorHr[board*4 + channel] for up
+ * to 16 boards. Convention (documented in memories/repo/orbit-topology.md
+ * + register-and-ui-map.md): sensorHr[b*4 + s] → AnalogBoard[b].Sensor[s],
+ * so UI analog-board N (1-based) maps to AnalogBoard[N-1] on STORAGE orbit
+ * HR (200 + (N-1)*4 + slot). Sensor .Type is driven from the persisted
+ * SensorConfig (resolve_sensor_type) so SetAnalogBoardTypes() can locate
+ * the STATIC_PRESS(11) sensor wherever the operator placed it. Descale is
+ * per-type: TEMP/IR_TEMP/HUMID ÷10, CO2 raw, STATIC_PRESS ÷100 (the orbit
+ * encodes static pressure as int16 "wc × 100; descale to a float "wc). */
 static void mirror_sensors(const LpSettingsData *lp)
 {
     OrbitSample sample;
@@ -327,32 +416,83 @@ static void mirror_sensors(const LpSettingsData *lp)
 
     bool tempF = (Settings.TempType == 0U);
 
-    Settings.AnalogBoard[DEFAULT_TEMP_BOARD].Present = 1;
-    for (uint32_t ch = 0; ch < 4; ch++) {
-        uint16_t raw = sample.sensorHr[ch];
-        if (raw == 0x7FFFU) {
-            Settings.AnalogBoard[DEFAULT_TEMP_BOARD].Sensor[ch].Disabled = 1;
-            Settings.AnalogBoard[DEFAULT_TEMP_BOARD].Sensor[ch].Value = SENSOR_VAL_UNDEFINED;
-        } else {
-            float c = (float)(int16_t)raw / 10.0f;
-            float v = tempF ? (c * 1.8f + 32.0f) : c;
-            Settings.AnalogBoard[DEFAULT_TEMP_BOARD].Sensor[ch].Disabled = 0;
-            Settings.AnalogBoard[DEFAULT_TEMP_BOARD].Sensor[ch].Value = v;
-        }
-    }
+    /* sensorHr[] is 64 wide = ORBIT_SENSOR_HR_COUNT (16 boards × 4).
+     * Bound the board loop to what both the wire and the legacy
+     * Settings.AnalogBoard[] table can hold. */
+    const uint32_t n_boards = ORBIT_SENSOR_HR_COUNT / 4U;   /* 16 */
 
-    Settings.AnalogBoard[DEFAULT_HUMID_BOARD].Present = 1;
-    for (uint32_t i = 0; i < 4; i++) {
-        uint16_t raw = sample.sensorHr[4 + i];
-        bool isCo2 = (i == 3U);
-        if (raw == 0x7FFFU) {
-            Settings.AnalogBoard[DEFAULT_HUMID_BOARD].Sensor[i].Disabled = 1;
-            Settings.AnalogBoard[DEFAULT_HUMID_BOARD].Sensor[i].Value = SENSOR_VAL_UNDEFINED;
-        } else {
-            float v = isCo2 ? (float)(int16_t)raw
-                            : (float)(int16_t)raw / 10.0f;
-            Settings.AnalogBoard[DEFAULT_HUMID_BOARD].Sensor[i].Disabled = 0;
-            Settings.AnalogBoard[DEFAULT_HUMID_BOARD].Sensor[i].Value = v;
+    for (uint32_t b = 0; b < n_boards && b < ANALOG_BOARDS_PER_SYSTEM; b++) {
+        ANALOG_BOARD *board = &Settings.AnalogBoard[b];
+
+        /* Runtime auto-detect: a board is LIVE this tick iff ANY of its 4
+         * orbit channels holds a real reading (!= 0x7FFF undef sentinel).
+         * Re-derived every tick (RAM-only, never persisted) and pushed to
+         * lp_settings so LpSettings_BuildAnalogBoardWireBody emits the
+         * board with 4 configurable default slots — that's what makes the
+         * UI Analog Board page non-empty on an un-configured injector rig.
+         * Bounded to LP_ANALOG_BOARD_MAX (the lp_settings detect map size)
+         * even though the wire/Settings tables run wider. Computed before
+         * the Present/continue gate below so detection is independent of
+         * the legacy "default board 0/1" presence logic. */
+        if (b < LP_ANALOG_BOARD_MAX) {
+            uint8_t live = 0U;
+            for (uint32_t ch = 0; ch < 4U; ch++) {
+                if (sample.sensorHr[b * 4U + ch] != 0x7FFFU) { live = 1U; break; }
+            }
+            LpSettings_SetBoardDetected(b, live);
+        }
+
+        /* Present iff the operator configured it OR it's one of the two
+         * historical defaults (so an un-configured rig keeps the temp +
+         * humid boards live exactly as before). A board with no wire
+         * data and no config stays !Present and the resolver skips it. */
+        bool configured = (b < LP_ANALOG_BOARD_MAX)
+                          && lp->analog_board.boards[b].populated;
+        bool is_default = (b == (uint32_t)DEFAULT_TEMP_BOARD)
+                       || (b == (uint32_t)DEFAULT_HUMID_BOARD);
+        if (!configured && !is_default) {
+            board->Present = 0;
+            continue;
+        }
+        board->Present  = 1;
+        board->Disabled = configured
+            ? (uint8_t)lp->analog_board.boards[b].disabled
+            : 0U;
+
+        for (uint32_t ch = 0; ch < 4; ch++) {
+            uint8_t type = resolve_sensor_type(lp, b, ch);
+            board->Sensor[ch].Type = type;
+
+            uint16_t raw = sample.sensorHr[b * 4U + ch];
+            if (raw == 0x7FFFU) {
+                board->Sensor[ch].Disabled = 1;
+                board->Sensor[ch].Value    = SENSOR_VAL_UNDEFINED;
+                continue;
+            }
+            board->Sensor[ch].Disabled = 0;
+
+            float v;
+            switch (type) {
+            case ANALOG_SENSOR_TYPE_CO2:
+                v = (float)(int16_t)raw;            /* raw ppm */
+                break;
+            case ANALOG_SENSOR_TYPE_STATIC_PRESS:
+                /* orbit encodes int16 "wc × 100 — descale to float "wc.
+                 * NOT a temperature, so no °F conversion is applied. */
+                v = (float)(int16_t)raw / 100.0f;
+                break;
+            case ANALOG_SENSOR_TYPE_TEMP:
+            case ANALOG_SENSOR_TYPE_TEMP_IR: {
+                float c = (float)(int16_t)raw / 10.0f;
+                v = tempF ? (c * 1.8f + 32.0f) : c;   /* user units */
+                break;
+            }
+            case ANALOG_SENSOR_TYPE_HUMID:
+            default:
+                v = (float)(int16_t)raw / 10.0f;      /* %RH */
+                break;
+            }
+            board->Sensor[ch].Value = v;
         }
     }
 
@@ -370,6 +510,13 @@ static void mirror_sensors(const LpSettingsData *lp)
     else if (ok1)        PlenumTempAvg = pt1;
     else if (ok2)        PlenumTempAvg = pt2;
     else                 PlenumTempAvg = SENSOR_VAL_UNDEFINED;
+
+    /* Re-resolve sensor roles now that every board's .Type is set from
+     * the persisted config. Cheap (a 64-slot scan) and always correct —
+     * it picks up an operator analog-config change on the next tick with
+     * no special apply-time hook. Updates the SENSOR_STATIC_PRESSURE
+     * index that AdjustFansForStaticPressure / SystemFailuresChk read. */
+    SetAnalogBoardTypes();
 
     (void)lp;
 }
@@ -511,7 +658,17 @@ static void mirror_refrig(const LpSettingsData *lp)
  * pass through directly. */
 static void mirror_outside_air(const LpSettingsData *lp)
 {
-    Settings.OutsideAir.CtrlMode      = (uint8_t)lp->outside_air.mode;
+    /* CtrlMode is FORCE-PINNED to OSA_CTRL_OUTSIDE (2026-06-07). The legacy
+     * OSA_CTRL_PLENUM option (economizer referencing plenum temp instead of
+     * outside temp) was removed product-wide: an "outside air" economizer
+     * that watches the plenum silently disabled free cooling whenever the
+     * plenum sat above setpoint, even with cold air available outside — it
+     * is NOT enthalpy cooling, just a reference-sensor swap. The UI no longer
+     * offers the choice; pinning here guarantees a stale/default OSPI blob
+     * (which may still hold mode=1) can never re-enable the plenum path.
+     * To intentionally restore the option, revert this line AND the
+     * level1/outside page. lp->outside_air.mode is otherwise ignored. */
+    Settings.OutsideAir.CtrlMode      = OSA_CTRL_OUTSIDE;  /* was lp->outside_air.mode */
     Settings.OutsideAir.Diff          = lp->outside_air.differential;
     Settings.OutsideAir.AboveBelow    = (char)lp->outside_air.above_below;
     Settings.OutsideAir.TempRef       = (char)lp->outside_air.temp_ref;
@@ -619,6 +776,50 @@ static void mirror_climacell(const LpSettingsData *lp)
     }
 }
 
+/* Mirror LpHumidCtrl → Settings.HumidCtrl[NUM_HUMIDIFIERS].
+ *
+ * Without this, `Settings.HumidCtrl[].Mode` and `.DutyCycle[]` stay at
+ * BSS zero. The engine's `CtrlHumidifier` (nova_controls.c:1485) reads
+ * `Settings.HumidCtrl[EquipType].Mode`: BSS zero == HM_MANUAL (0), NOT
+ * the operator's pick. So a humidifier configured for HM_TIMER (1) takes
+ * the HM_MANUAL branch instead of the duty-cycle branch and the PUMP is
+ * latched ON whenever the fan runs (bench symptom: PUMP1.output_on=1
+ * steady, never toggling, in Refrigeration mode). The duty-cycle timer
+ * branch (gated on `Mode == HM_TIMER`) is never entered, and even if it
+ * were, `DutyCycle[SysMode].{On,Off}` would read 0/0 → instant re-arm.
+ *
+ * Field mapping is 1:1 with HUMID_MODE_* (Modes.h:31-33):
+ *   DutyCycle[0] = COOL   ← cool_on/cool_off
+ *   DutyCycle[1] = RECIRC ← recirc_on/recirc_off
+ *   DutyCycle[2] = REFRIG ← refrig_on/refrig_off
+ * The legacy struct stores On/Off as `char` (seconds, 0..255 — added
+ * directly to the 1 Hz XTimerVal counter, no minutes scaling); the proto
+ * carries uint32 for headroom, so cast down. `index` is the humidifier
+ * slot (0..2) and selects which Settings.HumidCtrl[] row to write.
+ *
+ * entries_count guards the loop: on cold boot before any HumidCtrl push
+ * it's 0 (BSS), leaving Settings.HumidCtrl at its init defaults. The
+ * proto LOAD path always emits all 3, so after the first settings sync
+ * entries_count is 3 and all rows are populated. */
+static void mirror_humid_ctrl(const LpSettingsData *lp)
+{
+    uint32_t n = lp->humid_ctrl.entries_count;
+    if (n > LP_HUMID_CTRL_MAX) n = LP_HUMID_CTRL_MAX;
+    for (uint32_t i = 0; i < n; i++) {
+        const LpHumidCtrlEntry *e = &lp->humid_ctrl.entries[i];
+        uint32_t slot = e->index;
+        if (slot >= NUM_HUMIDIFIERS) continue;  /* out-of-range → drop */
+        HUMID_CONTROL *h = &Settings.HumidCtrl[slot];
+        h->Mode                  = (char)e->mode;
+        h->DutyCycle[HUMID_MODE_COOL].On    = (char)e->cool_on;
+        h->DutyCycle[HUMID_MODE_COOL].Off   = (char)e->cool_off;
+        h->DutyCycle[HUMID_MODE_RECIRC].On  = (char)e->recirc_on;
+        h->DutyCycle[HUMID_MODE_RECIRC].Off = (char)e->recirc_off;
+        h->DutyCycle[HUMID_MODE_REFRIG].On  = (char)e->refrig_on;
+        h->DutyCycle[HUMID_MODE_REFRIG].Off = (char)e->refrig_off;
+    }
+}
+
 /* Mirror LpMisc.heat_temp_thresh → Settings.HeatTempThresh. */
 static void mirror_misc(const LpSettingsData *lp)
 {
@@ -714,6 +915,9 @@ static void mirror_fan(const LpSettingsData *lp)
     Settings.Fan.TempRef1     = (char)lp->fan_speed.temp_ref1;
     Settings.Fan.TempRef2     = (char)lp->fan_speed.temp_ref2;
     Settings.Fan.UpdateMode   = (char)lp->fan_speed.update_mode;
+    /* Over-pressure threshold ("wc) for AdjustFansForStaticPressure /
+     * StaticPressureHighFailChk. 0.0 = disabled (proto3-suppressed). */
+    Settings.Fan.MaxStaticPressure = lp->fan_speed.max_static_pressure;
     if (!s_fan_prev_seeded) {
         Settings.Fan.PrevSpeed = (char)lp->fan_speed.prev_speed;
         s_fan_prev_seeded = true;
@@ -724,6 +928,179 @@ static void mirror_fan(const LpSettingsData *lp)
     Settings.FanBoost.Interval = (char)lp->fan_boost.interval;
     Settings.FanBoost.Duration = (char)lp->fan_boost.duration;
     Settings.FanBoost.Temp     = lp->fan_boost.temp;
+}
+
+/* Mirror LpFailure + LpFailure2 + LpMisc.lights_fail_units →
+ * Settings.Failure[NUM_FAILURES] + Settings.LightsFailUnits.
+ *
+ * Without this, EVERY entry of Settings.Failure[] stays BSS-zero, i.e.
+ * Mode == FM_NONE (0). The entire nova_failures.c equipment-failure
+ * monitoring suite (FanFailChk, HeatFailChk, RefrigFailChk, BurnerFail
+ * Chk, HumidFailChk, ClimacellFailChk, LightsMonitor, AuxFailChk,
+ * CavityHeatFailChk, HighCo2FailChk, OutsideAir/Humidity/PlenumSensor/
+ * PlenumHumidity checks) is gated on `Settings.Failure[FAIL_X].Mode !=
+ * FM_NONE` — so with the mirror absent, the operator can configure any
+ * failure response (Alarm / Fail) on the Level-2 failures pages and the
+ * engine silently ignores all of it. For a system feeding live animals,
+ * silently-disabled failure detection is the most dangerous flavour of
+ * the shadow-mirror bug class: no visible symptom, just protection that
+ * isn't there. Same root cause as the humidifier mirror gap (engine
+ * reads BSS zeros instead of the proto-saved settings).
+ *
+ * Index mapping is the AS2-canonical FAIL_* enum (Warnings.h) ↔ proto
+ * field layout, cross-checked against legacy StorePostData.c:827-886 /
+ * 2487-2520 (the POST handlers are the authoritative name→FAIL_* map).
+ * LpFailure carries split mode/timer pairs except where the legacy page
+ * only exposes a timer (humid/climacell expose both via separate proto
+ * fields 18/10 and 15/11).
+ *
+ * `refrig_fail_mode`, `co2_setpt`, `low_humid_set`, `plen_sen_diff` are
+ * NOT Failure[] entries — they live in Settings.Refrig.FailMode /
+ * Settings.Co2.HighFailure / Settings.Plenum.HumidLowFailure /
+ * Settings.Plenum.SensorDiff respectively and are already mirrored by
+ * mirror_refrig / mirror_co2 / mirror_basic_setpoints. */
+static void mirror_failure(const LpSettingsData *lp)
+{
+    Settings.Failure[FAIL_FAN].Mode             = (uint8_t)lp->failure.fan_mode;
+    Settings.Failure[FAIL_FAN].Timer            = (uint8_t)lp->failure.fan_timer;
+    Settings.Failure[FAIL_HEAT].Mode            = (uint8_t)lp->failure.heat_mode;
+    Settings.Failure[FAIL_HEAT].Timer           = (uint8_t)lp->failure.heat_timer;
+    Settings.Failure[FAIL_REFRIGERATION].Mode   = (uint8_t)lp->failure.refrig_mode;
+    Settings.Failure[FAIL_REFRIGERATION].Timer  = (uint8_t)lp->failure.refrig_timer;
+    Settings.Failure[FAIL_BURNER].Mode          = (uint8_t)lp->failure.burner_mode;
+    Settings.Failure[FAIL_BURNER].Timer         = (uint8_t)lp->failure.burner_timer;
+    Settings.Failure[FAIL_HUMIDIFIERS].Mode     = (uint8_t)lp->failure.humid_mode;
+    Settings.Failure[FAIL_HUMIDIFIERS].Timer    = (uint8_t)lp->failure.humid_timer;
+    Settings.Failure[FAIL_CLIMACELL].Mode       = (uint8_t)lp->failure.climacell_mode;
+    Settings.Failure[FAIL_CLIMACELL].Timer      = (uint8_t)lp->failure.climacell_timer;
+    Settings.Failure[FAIL_LIGHTS].Mode          = (uint8_t)lp->failure.lights_mode;
+    Settings.Failure[FAIL_LIGHTS].Timer         = (uint8_t)lp->failure.lights_timer;
+    Settings.Failure[FAIL_REFRIG_STAGES].Mode   = (uint8_t)lp->failure.refrig_stages_mode;
+    Settings.Failure[FAIL_REFRIG_STAGES].Timer  = (uint8_t)lp->failure.refrig_stages_timer;
+    Settings.Failure[FAIL_AUXILIARY].Mode       = (uint8_t)lp->failure.aux_mode;
+    Settings.Failure[FAIL_AUXILIARY].Timer      = (uint8_t)lp->failure.aux_timer;
+    Settings.Failure[FAIL_CAVITY_HEAT].Mode     = (uint8_t)lp->failure.cavity_heat_mode;
+    Settings.Failure[FAIL_CAVITY_HEAT].Timer    = (uint8_t)lp->failure.cavity_heat_timer;
+
+    /* High static-pressure fan-fail (newer Mini_IO 2.0.1.b). Lives in the
+     * FIRST FailureSettings message (proto fields 23/24), NOT FailureSettings2.
+     * Read by StaticPressureHighFailChk (mode FM_NONE/FM_ALARM/FM_FAIL,
+     * timer in minutes). */
+    Settings.Failure[FAIL_STATIC_PRESSURE].Mode  = (uint8_t)lp->failure.static_pressure_fail_mode;
+    Settings.Failure[FAIL_STATIC_PRESSURE].Timer = (uint8_t)lp->failure.static_pressure_fail_timer;
+
+    /* FailureSettings2 page → the four FAIL_* entries the second page owns. */
+    Settings.Failure[FAIL_OUTSIDE_AIR].Mode      = (uint8_t)lp->failure2.out_air_mode;
+    Settings.Failure[FAIL_OUTSIDE_AIR].Timer     = (uint8_t)lp->failure2.out_air_timer;
+    Settings.Failure[FAIL_OUTSIDE_HUMIDITY].Mode = (uint8_t)lp->failure2.out_humid_mode;
+    Settings.Failure[FAIL_OUTSIDE_HUMIDITY].Timer= (uint8_t)lp->failure2.out_humid_timer;
+    Settings.Failure[FAIL_HIGH_CO2].Mode         = (uint8_t)lp->failure2.high_co2_mode;
+    Settings.Failure[FAIL_HIGH_CO2].Timer        = (uint8_t)lp->failure2.high_co2_timer;
+    Settings.Failure[FAIL_PLENUM_HUMIDITY].Mode  = (uint8_t)lp->failure2.low_humid_mode;
+    Settings.Failure[FAIL_PLENUM_HUMIDITY].Timer = (uint8_t)lp->failure2.low_humid_timer;
+    Settings.Failure[FAIL_PLENUM_SENSOR].Mode    = (uint8_t)lp->failure2.plen_sen_mode;
+    Settings.Failure[FAIL_PLENUM_SENSOR].Timer   = (uint8_t)lp->failure2.plen_sen_timer;
+
+    /* Lights-fail timer multiplier (minutes vs hours). Read at
+     * nova_failures.c:150/172 as a direct multiplier on the timer; BSS
+     * zero would make the whole product zero → the lights monitor
+     * would re-trip on the very first tick once Mode is non-zero.
+     * Source: MiscSettings.lights_fail_units (proto field 11). */
+    Settings.LightsFailUnits = (uint8_t)lp->misc.lights_fail_units;
+}
+
+/* Mirror LpAoEquipSet → Settings.AoEquip[16][2].
+ *
+ * Without this, Settings.AoEquip stays BSS-zero (all AO_EQUIP_UNUSED),
+ * so nova_controls.c::nova_any_ao_assigned_for() ALWAYS returns false.
+ * That predicate is the Nova-architecture output-path gate at the top of
+ * CtrlDoors (nova_controls.c:986), CtrlBurner (:635), CtrlFan (:1228),
+ * and CtrlRefrig (:1814). For any operator who drives equipment via the
+ * 4-20 mA orbit-AO path (PWM Config page) rather than pulse-coils / DO
+ * mapping, the gate trips `WarningsSet(WARN_NO_OUTPUT)` and the Ctrl
+ * function returns BEFORE computing any PID output — so fan / doors /
+ * burner / refrig all read 0% on the System Monitor with a spurious
+ * "no output configured" warning, even though the operator DID assign
+ * the AO. Highest-impact instance of the shadow-mirror bug class found
+ * in this audit (it can suppress all four primary equipment outputs).
+ *
+ * Note the AO dispatch path itself (equipment_ao_sync_task in main.c)
+ * reads LpSettings_GetAoEquip() from the proto store directly, so AO
+ * writes to the orbit would actually work — but the engine never gets
+ * far enough to PRODUCE a non-zero PwmChannel[].Output because the gate
+ * fires first. Both halves must agree; this closes the engine half.
+ *
+ * Bounds: legacy Settings.AoEquip is [16][2]; proto LpAoEquipSet is
+ * [LP_AO_EQUIP_SLOT_MAX=16][LP_AO_EQUIP_CH_MAX=2]. Identical shape, so a
+ * full copy is correct — every slot/channel is meaningful (slot 0,
+ * channel 0, value 0 = UNUSED are all valid), no count guard applies. */
+static void mirror_aoequip(const LpSettingsData *lp)
+{
+    for (uint32_t slot = 0; slot < 16U && slot < LP_AO_EQUIP_SLOT_MAX; slot++) {
+        for (uint32_t ch = 0; ch < 2U && ch < LP_AO_EQUIP_CH_MAX; ch++) {
+            Settings.AoEquip[slot][ch] = lp->ao_equip.equip[slot][ch];
+        }
+    }
+}
+
+/* Mirror LpAuxProgramSet → Settings.AuxProgram[NUM_AUX_OUTPUTS].
+ *
+ * Without this, the entire Aux Program feature is dead: CtrlAux
+ * (nova_controls.c:211) reads Settings.AuxProgram[i].{DutyCycle, Period,
+ * Units} and AuxProgramEvaluateRule (:278) walks Settings.AuxProgram[i]
+ * .Rule[]. BSS zero means DutyCycle=0 (never on) AND — worse — every
+ * Rule[0].Type reads 0 == RT_MANUAL (Controls.h:75), which the rule
+ * evaluator treats as an always-true operand. So a partial / naive
+ * mirror that zero-fills the rule array would make EVERY aux channel
+ * evaluate "rule met" the moment the channel's RemoteOff is AUTO — the
+ * exact partial-mirror trap this audit is hunting for.
+ *
+ * The legacy rule loop terminates at the first Rule[i].Type ==
+ * RT_UNDEFINED (== ENUM_UNDEFINED == 0xFF, Controls.h:46/81). So unused
+ * rule slots MUST be stamped RT_UNDEFINED, not left at 0. We copy the
+ * proto's `rules_count` populated rules verbatim, then terminate the
+ * remainder of the NUM_AUX_PROGRAM_RULES (6) legacy array with
+ * RT_UNDEFINED — note the proto only models LP_AUX_RULES_MAX (4) rules,
+ * so slots 4 and 5 are ALWAYS terminated regardless of rules_count.
+ *
+ * Engine-owned runtime fields RuleStatus / OutputState / Timer are NOT
+ * mirrored (CtrlAux owns them across ticks — same discipline as
+ * Fan.DailyRunTime). `eq_index` is a proto-only hint for output mapping
+ * and has no legacy AUX_PROGRAM field; the legacy array is indexed by
+ * aux channel directly (aux_index), which is the splice key the proto
+ * apply path already enforces. */
+static void mirror_aux_program(const LpSettingsData *lp)
+{
+    for (uint32_t i = 0; i < NUM_AUX_OUTPUTS && i < LP_AUX_PROGRAM_MAX; i++) {
+        const LpAuxProgram *ap = &lp->aux_program.channels[i];
+        AUX_PROGRAM        *dst = &Settings.AuxProgram[i];
+
+        dst->DutyCycle = (uint8_t)ap->duty_cycle;
+        dst->Units     = (uint8_t)ap->units;
+        dst->Period    = ap->period;
+
+        uint32_t nrules = ap->rules_count;
+        if (nrules > LP_AUX_RULES_MAX) nrules = LP_AUX_RULES_MAX;
+
+        for (uint32_t r = 0; r < NUM_AUX_PROGRAM_RULES; r++) {
+            if (r < nrules) {
+                const LpAuxRule *src = &ap->rules[r];
+                dst->Rule[r].Type           = (AUXPROG_RULE_TYPE)src->type;
+                dst->Rule[r].IoIndex        = (int16_t)src->io_index;
+                dst->Rule[r].State          = (uint8_t)src->state;
+                dst->Rule[r].Op             = (AUXPROG_OPERATOR)src->op;
+                dst->Rule[r].SensorValue    = src->sensor_val;
+                dst->Rule[r].AndOr          = (AUXPROG_AND_OR)src->and_or;
+                dst->Rule[r].ReferenceIndex = (int16_t)src->ref_index;
+            } else {
+                /* Terminate the rule list so AuxProgramEvaluateRule's
+                 * `Rule[i].Type != RT_UNDEFINED` loop guard stops here.
+                 * Leaving these at BSS 0 (= RT_MANUAL) would inject a
+                 * phantom always-true rule. */
+                dst->Rule[r].Type = RT_UNDEFINED;
+            }
+        }
+    }
 }
 
 /* Mirror LpSettings.io_config.input_map[eq] → Settings.EquipIo[eq].Input
@@ -1025,9 +1402,13 @@ void lp_engine_tick(void)
     mirror_cavity_heat(lp);
     mirror_door(lp);
     mirror_climacell(lp);
+    mirror_humid_ctrl(lp);
     mirror_misc(lp);
     mirror_fan(lp);
     mirror_pid_log(lp);
+    mirror_failure(lp);
+    mirror_aoequip(lp);
+    mirror_aux_program(lp);
     mirror_sensors(lp);
     mirror_remote_off(lp);
     mirror_output_map(lp);

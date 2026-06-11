@@ -112,13 +112,17 @@ main.eq { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1f
 
 <script>
 const TYPES = [
-  { v: 3,  name: 'TEMP',    min: -40, max: 85,    step: 0.5, unit: '°C' },
-  { v: 1,  name: 'HUMID',   min: 0,   max: 100,   step: 0.5, unit: '%RH' },
-  { v: 2,  name: 'CO2',     min: 0,   max: 5000,  step: 50,  unit: 'ppm' },
-  { v: 0,  name: 'IR_TEMP', min: -40, max: 85,    step: 0.5, unit: '°C' },
-  { v: 15, name: 'NONE',    min: 0,   max: 0,     step: 1,   unit: '' },
+  { v: 3,  name: 'TEMP',     min: -40, max: 85,    step: 0.5,  unit: '°C' },
+  { v: 1,  name: 'HUMID',    min: 0,   max: 100,   step: 0.5,  unit: '%RH' },
+  { v: 2,  name: 'CO2',      min: 0,   max: 5000,  step: 50,   unit: 'ppm' },
+  { v: 0,  name: 'IR_TEMP',  min: -40, max: 85,    step: 0.5,  unit: '°C' },
+  // Static pressure: slider is in "wc directly (0.00–2.50). Value stored and
+  // pushed as canonical "wc; engToHrInt16(type 11) packs ×100 to the wire.
+  { v: 11, name: 'STATIC_P', min: 0,   max: 2.5,   step: 0.05, unit: '"wc' },
+  { v: 15, name: 'NONE',     min: 0,   max: 0,     step: 1,    unit: '' },
 ];
-function typeMeta(v) { return TYPES.find(t => t.v === v) ?? TYPES[4]; }
+// NONE is the fallback meta — find it by value, not a fragile array index.
+function typeMeta(v) { return TYPES.find(t => t.v === v) ?? TYPES.find(t => t.v === 15); }
 
 const $unit = document.getElementById('unit');
 // User-selected display unit for TEMP channels. The canonical in-memory
@@ -160,6 +164,8 @@ function formatVal(value, type) {
     if (displayUnit === 'F') return cToF(value).toFixed(1) + ' °F';
     return value.toFixed(1) + ' °C';
   }
+  // Static pressure: 2 decimals "wc (the 0.05 slider step can drift floats).
+  if (type === 11) return value.toFixed(2) + ' "wc';
   return value + ' ' + meta.unit;
 }
 

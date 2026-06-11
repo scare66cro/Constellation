@@ -796,6 +796,61 @@ static int RefrigStageChk(int io, int alarm)
 }
 
 /* ─── Public dispatcher ───────────────────────────────────────────────── */
+/* High static-pressure fan-fail check — 1:1 port of newer Mini_IO
+ * 2.0.1.b Failures.c:209-248.
+ *
+ * NOT static: also called from nova_controls.c::AdjustFansForStaticPressure.
+ * Both call sites MUST share the GLOBAL SystemAlarm[AL_STATICPRESSUREHIGH]
+ * / AlarmTimer[AL_STATICPRESSUREHIGH] latch+timer state (a function-local
+ * timer would reset the over-pressure latch every CtrlFan tick and never
+ * accumulate to the configured delay — the exact static-counter trap the
+ * bridge-protocol invariants warn about).
+ *
+ * Threshold is a strict `>` compare against Settings.Fan.MaxStaticPressure.
+ * FM_FAIL latches SystemState = ST_FAILURE in-line; FM_ALARM only raises
+ * the warning. Returns 1 on the tick the alarm trips. */
+int StaticPressureHighFailChk(float sp)
+{
+    unsigned int Counter = XTimerVal;
+    uint8_t mode = Settings.Failure[FAIL_STATIC_PRESSURE].Mode;
+
+    if (mode == FM_NONE)
+    {
+        SystemAlarm[AL_STATICPRESSUREHIGH] = FM_NONE;
+        AlarmTimer[AL_STATICPRESSUREHIGH] = 0;
+        return 0;
+    }
+
+    if (   sp > Settings.Fan.MaxStaticPressure
+        || SystemAlarm[AL_STATICPRESSUREHIGH] == FM_FAIL)
+    {
+        if (AlarmTimer[AL_STATICPRESSUREHIGH] == 0)
+        {
+            AlarmTimer[AL_STATICPRESSUREHIGH] = Counter;
+        }
+        else if (Counter - AlarmTimer[AL_STATICPRESSUREHIGH]
+                 >= Settings.Failure[FAIL_STATIC_PRESSURE].Timer * T_MINS)
+        {
+            SystemAlarm[AL_STATICPRESSUREHIGH] = mode;
+            WarningsSet(WARN_STATICPRESSUREHIGH, FM_ALARM, mode, NA);
+
+            if (mode == FM_FAIL)
+            {
+                SystemState = ST_FAILURE;
+            }
+
+            return 1;
+        }
+    }
+    else
+    {
+        SystemAlarm[AL_STATICPRESSUREHIGH] = FM_NONE;   // clear the alarm
+        AlarmTimer[AL_STATICPRESSUREHIGH] = 0;
+    }
+
+    return 0;
+} // end StaticPressureHighFailChk
+
 int SystemFailuresChk(void)
 {
     int RetVal = 0;
@@ -826,6 +881,30 @@ int SystemFailuresChk(void)
 
     RetVal += BayLightsMonitor(EQ_LIGHTS1, AL_LIGHTS1);
     RetVal += BayLightsMonitor(EQ_LIGHTS2, AL_LIGHTS2);
+
+    /* High static-pressure fan-fail (newer Mini_IO 2.0.1.b,
+     * Failures.c:1444-1462). Keep it in the central failure path so it
+     * consistently drives ST_FAILURE handling. Only contributes to
+     * RetVal when the alarm tripped AND the mode is FM_FAIL — FM_ALARM
+     * must NOT force ST_FAILURE (ST_FAILURE is set inside the check only
+     * for FM_FAIL). Skip entirely when no static sensor is resolved or
+     * the configured sensor is disabled. */
+    if (SENSOR_STATIC_PRESSURE != -1)
+    {
+        ANALOG_SENSOR *staticPressureSensor =
+            &Settings.AnalogBoard[SENSOR_STATIC_PRESSURE / ANALOG_SENSORS_PER_BOARD]
+                     .Sensor[SENSOR_STATIC_PRESSURE % ANALOG_SENSORS_PER_BOARD];
+        if (staticPressureSensor->Disabled == 0)
+        {
+            int staticPressureAlarm =
+                StaticPressureHighFailChk(staticPressureSensor->Value);
+            if (   staticPressureAlarm != 0
+                && Settings.Failure[FAIL_STATIC_PRESSURE].Mode == FM_FAIL)
+            {
+                RetVal += 1;
+            }
+        }
+    }
 
     /* Reports-only — never contributes to RetVal. */
     MasterBroadcastFailChk();

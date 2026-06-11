@@ -310,6 +310,126 @@ Start-Sleep 35
 
 ---
 
+## 13. Engine shadow-mirror — every engine-read `Settings.*` group needs a `mirror_*`
+
+The Nova equipment engine (`nova_controls.c` / `nova_states.c` /
+`nova_modes.c` / `nova_failures.c` / `nova_pwm.c` / `nova_serialshift.c`)
+does **not** read the proto-saved settings directly. It reads the legacy
+`Settings.*` struct (`Platform/include/legacy/Settings.h`), which
+`lp_engine_shim.c::lp_engine_tick()` repopulates **every tick** from
+`LpSettingsData` (the proto-saved source) via a set of `mirror_*()`
+functions.
+
+**Invariant:** every `Settings.X` group the engine reads, and that is
+operator-settable (carried in `LpSettingsData`), MUST have a
+corresponding `mirror_X()` that copies **all** of its fields / array
+slots / per-mode rows. A missing or **partial** mirror is **silent**:
+the engine reads zero-initialised BSS, which for most fields is a
+valid-looking default — `FM_NONE`, `HM_MANUAL`, `0%`, `RT_MANUAL`,
+unassigned — so the firmware runs with the operator's config ignored and
+nothing complains.
+
+This bit hard on 2026-06-05: four groups had no mirror —
+`humid_ctrl` (pump latched on instead of timer-cycling),
+**`failure` (all 15 `FAIL_*` equipment failure detections silently
+disabled — `FM_NONE`)**, `aoequip` (4-20 mA outputs gated off), and
+`aux_program` (rule engine mis-evaluated). Same class, three different
+severities. Full audit + root cause:
+[`memories/repo/lp-engine-shadow-mirror-rule.md`](../memories/repo/lp-engine-shadow-mirror-rule.md).
+
+**Guards:**
+- **Static (CI):** [`scripts/Check-SettingsMirrorCoverage.ps1`](../scripts/Check-SettingsMirrorCoverage.ps1)
+  diffs the `Settings.*` groups the engine reads against the ones any
+  `mirror_*` writes, minus a documented allowlist of intentionally-
+  unmirrored groups (engine-owned runtime accumulators, device-config-
+  seeded, proto-schema gaps). Run it after touching the engine or the
+  shim; it exits non-zero on an unaccounted-for gap.
+- **Two adjacent gaps the static check can NOT catch** (both real today):
+  1. **Partial mirrors** — a mirror that copies group `X` but misses a
+     field / array slot / mode row. The coverage script works at
+     group granularity; sub-field gaps need the round-trip check below.
+  2. **Proto-schema gaps** — settings the engine reads that aren't in
+     the proto at all yet (e.g. `Refrig.Defrost[].Diagnostic`,
+     `Co2.Purge.RefrigThresh`). No mirror can exist until the schema
+     carries them.
+
+> **🚨 PRE-SHIP GATE (must be done before finalizing for customers).**
+> The static coverage check (group-level) and code-read audits are
+> necessary but not sufficient — they cannot prove *partial* mirrors or
+> wrong-field mappings (e.g. the `HUMIDITY_CTRL.Output`-is-the-pump
+> naming trap). Before the product ships, build a **settings round-trip
+> verification harness**: for every operator-settable field, write it via
+> the proto path, then read back the value the *engine* actually acts on,
+> and assert equality. This is the only check that catches partial
+> mirrors, inverted field maps, and unit/scale drift across the whole
+> UI→firmware settings path. Tracked as a finalization blocker; do not
+> declare the settings path "done" without it.
+
+---
+
+## 14. Hand-rolled repeated-submsg WRITES must match the firmware decoder shape — verify field numbers AND nesting
+
+When a UI page builds raw proto bytes for a repeated-submessage settings write
+(via `writeProtoRaw` + `buildForceVarintBytes`/`wrapAsLengthDelim`), the wire
+shape MUST match the firmware decoder exactly — both the **nesting** and the
+**field numbers**. ts-proto is NOT in this loop; nothing validates the bytes.
+
+A long-lived example (fixed 2026-06-10): `AnalogConfigForm.saveAnalog` emitted a
+FLAT `{ boardIdx@1 varint, sensor@6 }` while the firmware
+(`lp_settings.c::LpSettings_ApplyAnalogBoard`) decodes a NESTED
+`{ board@1:{ address@1, sensors@4:{ slot@1, label@2, offset@3, disabled@4,
+type@5 } } }`. Field 1 was a bare varint where the decoder expected a submessage,
+so the **entire write was silently skipped** — no per-sensor analog config ever
+persisted. See [`memories/repo/analog-config-write-path-nested-2026-06-10.md`].
+
+Compounding trap: the analog wire has **two incompatible numbering schemes** —
+the firmware decode/emit use `settings.proto SensorConfig` numbering
+(`slot@1,label@2,offset@3,disabled@4,type@5`), but the UI READ decodes the same
+frame with `io.proto AnalogSensor` (`slot@1,type@2,label@3,offset@4,disabled@5,
+value@6,…`). The WRITE must match the firmware (settings.proto); the read-back
+display is mis-decoded until the two are reconciled. Rule of thumb: **the
+firmware `apply_*` decoder is authoritative for writes; read it, don't trust the
+.proto declaration or the io.proto twin.**
+
+## 15. Live-alarm WARN_/AL_ enums are an append-only index, locked to `warningKeys.ts`
+
+`Warning.code` on the wire indexes directly into
+`constellation-ui/src/lib/business/warningKeys.ts`, which must mirror the firmware
+`WARNING_ITEMS` enum (`Platform/include/legacy/Warnings.h`) **index-for-index**.
+Add new codes by APPENDING (firmware enum end before `NUM_WARNINGS`, UI array end)
+at the **same index in the same commit** — never reorder, never copy an AS2
+positional value (the Nova override enum is a different length than AS2). Example:
+`WARN_STATICPRESSUREHIGH` landed at index **97** on both sides (fw 0.A.234).
+`FAILURES`/`EQUIP_ALARMS` arrays (`Settings.Failure[]`, `SystemAlarm[]`,
+`AlarmTimer[]`) auto-resize off `NUM_*`, so appending is safe.
+
+## 16. Raw diagnostic varints in SystemStatus must NOT collide with schema'd typed fields
+
+`build_system_status_envelope` (`lp_am2434/main.c`) hand-emits SystemStatus. Some
+slots are typed schema fields (decoded by ts-proto on the UI: `static_pressure`=24
+float, `estop_active`=22, …); others are **raw `DIAG_EMIT_VARINT` diagnostics** the
+probe tools read by hand. A diag varint and a typed field that share a field number
+are a silent **last-wins collision** — proto3 keeps whichever occurs last in the
+message body, and the other is dropped.
+
+This bit us 2026-06-11: the new `static_pressure` (field 24, float, wire 5) was
+emitted *before* a pre-existing `gate_bits` refrigeration diagnostic
+`DIAG_EMIT_VARINT(0xC0,0x01,…)` (`0xC0 0x01` = varint 192 = `(24<<3)|0` = field 24,
+wire 0). Decoders kept the diag varint (a constant `0x1058F` = 67087), and the live
+static-pressure float never reached the UI. Fixed by relocating the gate/setpoint
+diag varints to a **high reserved diagnostic block (fields 50/51/52)**, well above
+the typed range.
+
+**Rule:** keep raw SystemStatus diagnostics in a dedicated high range (≥50) that no
+typed `system.proto` member will ever occupy. Before adding ANY typed SystemStatus
+field, grep `main.c::build_system_status_envelope` for a `DIAG_EMIT_VARINT` already
+parked on that number. `system.proto`'s comment block (fields 18-21,23) documents
+which low numbers are diag — but the safe long-term home for raw diag is the high
+block. (The same latent collision still exists on the OLD diag numbers 25/26 if
+someone adds typed `system.proto` fields 25/26 — they were moved to 51/52 too.)
+
+---
+
 ## See also
 
 - [`Simulator-to-Production-Transition.md`](Simulator-to-Production-Transition.md)

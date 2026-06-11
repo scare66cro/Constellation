@@ -104,7 +104,8 @@ export const DEFAULT_WARNING_TEXT: Record<string, string> = {
 	WARN_LIGHTS1_AS1: 'Lights 1',
 	WARN_LIGHTS2_AS1: 'Lights 2',
 	WARN_LIGHTS: 'Lights',
-	WARN_LOADLOG_FULL: 'Loading Monitor Log Full - Terminating data acquisition'
+	WARN_LOADLOG_FULL: 'Loading Monitor Log Full - Terminating data acquisition',
+	WARN_STATICPRESSUREHIGH: 'High Static Pressure Failure'
 };
 
 // ALARM_FAIL suffix array — maps `value0` (or severity) to status text.

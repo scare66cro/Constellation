@@ -81,6 +81,13 @@ static size_t emit_uint32(uint8_t *buf, size_t bufsize, size_t pos,
     return pos;
 }
 
+/* FORCE variant of emit_uint32 (no proto3 zero-suppression) — used for
+ * fields where 0 is a meaningful value. Defined further down (near the
+ * OrbitRole builders); forward-declared here so the Failure/SensorConfig
+ * builders above its definition can reference it. */
+static size_t emit_uint32_force(uint8_t *buf, size_t bufsize, size_t pos,
+                                uint32_t field, uint32_t v);
+
 /* fixed32 (LE) — float fields. proto3-suppress when bit-pattern is 0
  * (i.e. 0.0f). */
 static size_t emit_float(uint8_t *buf, size_t bufsize, size_t pos,
@@ -188,6 +195,7 @@ void LpSettings_DataInit(void)
     s_data.fan_speed.temp_diff     = 1.0f;
     s_data.fan_speed.temp_ref2     = 255;         /* return-air sentinel */
     s_data.fan_speed.prev_speed    = 25;          /* = min_speed */
+    s_data.fan_speed.max_static_pressure = 1.25f; /* "wc (Mini_IO 2.0.1.b default) */
 
     /* fan boost */
     s_data.fan_boost.speed    = 80;
@@ -304,6 +312,10 @@ void LpSettings_DataInit(void)
         s_data.failure.fan_mode      = 2;         /* AS2: fan failure → fail */
         s_data.failure.lights_timer  = 1;
         s_data.failure.lights_units  = 60;        /* hours */
+        /* High static-pressure fan-fail (newer Mini_IO 2.0.1.b):
+         * Mode=1 (FM_ALARM), Timer=1 minute. */
+        s_data.failure.static_pressure_fail_mode  = 1;
+        s_data.failure.static_pressure_fail_timer = 1;
     }
 
     /* failures 2 */
@@ -606,6 +618,10 @@ bool LpSettings_ApplyFanSpeed(const uint8_t *payload, size_t len)
             float f;
             consumed = decode_float(payload + pos, len - pos, &f);
             if (consumed > 0U) { s_data.fan_speed.temp_diff = f; changed = true; }
+        } else if (wire == 5U && field == 11U) {  /* max_static_pressure (float) */
+            float f;
+            consumed = decode_float(payload + pos, len - pos, &f);
+            if (consumed > 0U) { s_data.fan_speed.max_static_pressure = f; changed = true; }
         } else if (wire == 0U) {
             uint32_t v;
             consumed = decode_varint(payload + pos, len - pos, &v);
@@ -645,6 +661,9 @@ size_t LpSettings_BuildFanSpeedBody(uint8_t *buf, size_t bufsize)
     pos = emit_uint32(buf, bufsize, pos,  8, s_data.fan_speed.temp_ref2);
     pos = emit_uint32(buf, bufsize, pos,  9, s_data.fan_speed.prev_speed);
     pos = emit_uint32(buf, bufsize, pos, 10, s_data.fan_speed.update_mode);
+    /* max_static_pressure — emit_float (NOT force): 0.0 = disabled, fine
+     * to suppress (matches the proto comment / mode-OFF semantics). */
+    pos = emit_float (buf, bufsize, pos, 11, s_data.fan_speed.max_static_pressure);
     return pos;
 }
 
@@ -1539,6 +1558,8 @@ bool LpSettings_ApplyFailure(const uint8_t *payload, size_t len)
             case 20: nw.aux_timer = v;           break;
             case 21: nw.cavity_heat_mode = v;    break;
             case 22: nw.cavity_heat_timer = v;   break;
+            case 23: nw.static_pressure_fail_mode = v;  break;
+            case 24: nw.static_pressure_fail_timer = v; break;
             default: break;
             }
         } else {
@@ -1577,6 +1598,13 @@ size_t LpSettings_BuildFailureBody(uint8_t *buf, size_t bufsize)
     pos = emit_uint32(buf, bufsize, pos, 20, s_data.failure.aux_timer);
     pos = emit_uint32(buf, bufsize, pos, 21, s_data.failure.cavity_heat_mode);
     pos = emit_uint32(buf, bufsize, pos, 22, s_data.failure.cavity_heat_timer);
+    /* Static-pressure fan-fail mode/timer — FORCE-encode (mode 0 =
+     * disabled, timer 0 = fire-immediately are meaningful values that
+     * must round-trip; same discipline as the other failure mode/timer
+     * fields if they were ever 0). emit_uint32_force is declared lower in
+     * this file — forward-declare so the builder can use it here. */
+    pos = emit_uint32_force(buf, bufsize, pos, 23, s_data.failure.static_pressure_fail_mode);
+    pos = emit_uint32_force(buf, bufsize, pos, 24, s_data.failure.static_pressure_fail_timer);
     return pos;
 }
 
@@ -2949,6 +2977,7 @@ static size_t apply_sensor_config(LpSensorConfig *sc,
                 switch (field) {
                 case 1: sc->slot     = v; break;
                 case 4: sc->disabled = v; break;
+                case 5: sc->type     = v; break;   /* ANALOG_SENSOR.Type */
                 default: break;
                 }
             }
@@ -3058,44 +3087,169 @@ bool LpSettings_ApplyAnalogBoard(const uint8_t *payload, size_t len)
     return changed;
 }
 
-size_t LpSettings_BuildAnalogBoardBody(uint8_t *buf, size_t bufsize)
+/* Runtime auto-detect bitmap — RAM only, never persisted. Set/cleared
+ * every engine tick by mirror_sensors() via LpSettings_SetBoardDetected.
+ * A "1" means the board's orbit HR channels carried a live reading this
+ * tick. See lp_settings.h for the full rationale + AS2 parallel. */
+static uint8_t s_board_detected[LP_ANALOG_BOARD_MAX];
+
+void LpSettings_SetBoardDetected(uint32_t board, uint8_t live)
 {
-    size_t pos = 0;
-    for (uint32_t i = 0; i < LP_ANALOG_BOARD_MAX; i++) {
-        const LpAnalogBoard *ab = &s_data.analog_board.boards[i];
-        if (!ab->populated) continue;
-        uint8_t inner[256];
-        size_t  ilen = 0;
-        /* address force-encoded (address 0 valid). */
-        if (ilen + 1U + 5U > sizeof(inner)) continue;
-        inner[ilen++] = (uint8_t)((1U << 3) | 0U);
-        ilen += encode_varint(&inner[ilen], ab->address);
-        ilen = emit_string(inner, sizeof(inner), ilen, 2, ab->label);
-        ilen = emit_uint32(inner, sizeof(inner), ilen, 3, ab->disabled);
+    if (board < LP_ANALOG_BOARD_MAX) {
+        s_board_detected[board] = live ? 1U : 0U;
+    }
+}
+
+/* Default per-slot sensor role for a detected-but-unconfigured board.
+ * Mirrors the historical fixed-slot fallback in
+ * lp_engine_shim.c::resolve_sensor_type so the UI shows a sensible
+ * starting type the operator can override. Values are the canonical
+ * ANALOG_SENSOR_TYPE_* enum (Platform/include/legacy/Analog_Input.h):
+ *   DEFAULT_HUMID_BOARD (1): slot SENSOR_CO2 (3) -> CO2 (2), else HUMID (1)
+ *   all other boards: TEMP (3)
+ * Inlined numerically here (lp_settings.c does not pull legacy headers)
+ * with the cross-reference above so the two sites stay in lock-step. */
+#define LP_DEFAULT_HUMID_BOARD_IDX   1U
+#define LP_SENSOR_CO2_SLOT           3U
+#define LP_ANALOG_TYPE_HUMID         1U
+#define LP_ANALOG_TYPE_CO2           2U
+#define LP_ANALOG_TYPE_TEMP          3U
+static uint32_t default_sensor_type(uint32_t board, uint32_t slot)
+{
+    if (board == LP_DEFAULT_HUMID_BOARD_IDX) {
+        return (slot == LP_SENSOR_CO2_SLOT) ? LP_ANALOG_TYPE_CO2
+                                            : LP_ANALOG_TYPE_HUMID;
+    }
+    return LP_ANALOG_TYPE_TEMP;
+}
+
+/* Encode one SensorConfig submessage into sinner (settings.proto field
+ * numbering: slot@1, label@2, offset@3, disabled@4, type@5). Returns the
+ * encoded length, or 0 if it didn't fit. */
+static size_t encode_sensor_config(uint8_t *sinner, size_t sinner_sz,
+                                   const LpSensorConfig *sc)
+{
+    size_t silen = 0;
+    /* slot force-encoded (slot 0 valid). */
+    if (silen + 1U + 5U > sinner_sz) return 0U;
+    sinner[silen++] = (uint8_t)((1U << 3) | 0U);
+    silen += encode_varint(&sinner[silen], sc->slot);
+    silen = emit_string(sinner, sinner_sz, silen, 2, sc->label);
+    silen = emit_float (sinner, sinner_sz, silen, 3, sc->offset);
+    silen = emit_uint32(sinner, sinner_sz, silen, 4, sc->disabled);
+    /* type force-encoded: type 0 (IR_TEMP) is a real value that
+     * must round-trip (proto3 zero-suppression invariant). */
+    silen = emit_uint32_force(sinner, sinner_sz, silen, 5, sc->type);
+    return silen;
+}
+
+/* Encode the inner AnalogBoardSettings.board submessage for board `idx`
+ * into `inner`. When the board is operator-configured, emits its real
+ * stored sensors; otherwise (detected-only) synthesizes 4 default sensor
+ * slots so the UI renders four configurable rows. Returns inner length,
+ * or 0 if the board produced no body. */
+static size_t encode_analog_board(uint8_t *inner, size_t inner_sz,
+                                  uint32_t idx, bool configured)
+{
+    const LpAnalogBoard *ab = &s_data.analog_board.boards[idx];
+    size_t ilen = 0;
+
+    /* address force-encoded (address 0 valid). For a detected-only board
+     * the operator hasn't written an address, so use the board index as
+     * the address — that is the orbit board number the UI maps to. */
+    uint32_t address = configured ? ab->address : idx;
+    if (ilen + 1U + 5U > inner_sz) return 0U;
+    inner[ilen++] = (uint8_t)((1U << 3) | 0U);
+    ilen += encode_varint(&inner[ilen], address);
+    ilen = emit_string(inner, inner_sz, ilen, 2, configured ? ab->label : "");
+    ilen = emit_uint32(inner, inner_sz, ilen, 3,
+                       configured ? ab->disabled : 0U);
+
+    if (configured) {
         for (uint32_t j = 0; j < ab->sensors_count; j++) {
-            const LpSensorConfig *sc = &ab->sensors[j];
             uint8_t sinner[96];
-            size_t  silen = 0;
-            /* slot force-encoded (slot 0 valid). */
-            if (silen + 1U + 5U > sizeof(sinner)) continue;
-            sinner[silen++] = (uint8_t)((1U << 3) | 0U);
-            silen += encode_varint(&sinner[silen], sc->slot);
-            silen = emit_string(sinner, sizeof(sinner), silen, 2, sc->label);
-            silen = emit_float (sinner, sizeof(sinner), silen, 3, sc->offset);
-            silen = emit_uint32(sinner, sizeof(sinner), silen, 4, sc->disabled);
+            size_t  silen = encode_sensor_config(sinner, sizeof(sinner),
+                                                 &ab->sensors[j]);
             if (silen == 0U) continue;
-            if (ilen + 1U + 5U + silen > sizeof(inner)) break;
+            if (ilen + 1U + 5U + silen > inner_sz) break;
             inner[ilen++] = (uint8_t)((4U << 3) | 2U);
             ilen += encode_varint(&inner[ilen], (uint32_t)silen);
             memcpy(&inner[ilen], sinner, silen);
             ilen += silen;
         }
+    } else {
+        /* Detected-but-unconfigured: synthesize 4 default slots. */
+        for (uint32_t s = 0; s < LP_SENSORS_PER_BOARD; s++) {
+            LpSensorConfig sc = { 0 };
+            sc.slot     = s;
+            sc.offset   = 0.0f;
+            sc.disabled = 0U;
+            sc.type     = default_sensor_type(idx, s);
+            uint8_t sinner[96];
+            size_t  silen = encode_sensor_config(sinner, sizeof(sinner), &sc);
+            if (silen == 0U) continue;
+            if (ilen + 1U + 5U + silen > inner_sz) break;
+            inner[ilen++] = (uint8_t)((4U << 3) | 2U);
+            ilen += encode_varint(&inner[ilen], (uint32_t)silen);
+            memcpy(&inner[ilen], sinner, silen);
+            ilen += silen;
+        }
+    }
+    return ilen;
+}
+
+size_t LpSettings_BuildAnalogBoardBody(uint8_t *buf, size_t bufsize)
+{
+    /* OSPI/persist path: ONLY operator-configured boards. Detected-only
+     * boards are intentionally excluded so they never persist. */
+    size_t pos = 0;
+    for (uint32_t i = 0; i < LP_ANALOG_BOARD_MAX; i++) {
+        if (!s_data.analog_board.boards[i].populated) continue;
+        uint8_t inner[256];
+        size_t  ilen = encode_analog_board(inner, sizeof(inner), i, true);
         if (ilen == 0U) continue;
         if (pos + 1U + 5U + ilen > bufsize) return 0U;
         buf[pos++] = (uint8_t)((1U << 3) | 2U);
         pos += encode_varint(&buf[pos], (uint32_t)ilen);
         memcpy(&buf[pos], inner, ilen);
         pos += ilen;
+    }
+    return pos;
+}
+
+size_t LpSettings_BuildAnalogBoardWireBody(uint8_t *buf, size_t bufsize)
+{
+    /* Wire path (UART envelope tag 73): operator-configured boards PLUS
+     * runtime auto-detected boards. A configured board always wins (its
+     * real sensors are emitted); a detected-only board gets 4 default
+     * slots so the UI can render configurable rows. */
+    size_t pos = 0;
+    bool   capped = false;
+    for (uint32_t i = 0; i < LP_ANALOG_BOARD_MAX; i++) {
+        bool configured = s_data.analog_board.boards[i].populated != 0U;
+        bool detected   = s_board_detected[i] != 0U;
+        if (!configured && !detected) continue;
+
+        uint8_t inner[256];
+        size_t  ilen = encode_analog_board(inner, sizeof(inner), i,
+                                           configured);
+        if (ilen == 0U) continue;
+        /* Cap-aware: stop and keep what fits rather than discarding the
+         * whole message (build_settings_envelope hands us a 384 B inner;
+         * 8 fully-defaulted boards ~ 540 B would otherwise wipe the lot).
+         * Configured boards are walked first-to-last so an over-cap
+         * detected board at a high index is what gets dropped, never an
+         * operator's saved config. */
+        if (pos + 1U + 5U + ilen > bufsize) { capped = true; break; }
+        buf[pos++] = (uint8_t)((1U << 3) | 2U);
+        pos += encode_varint(&buf[pos], (uint32_t)ilen);
+        memcpy(&buf[pos], inner, ilen);
+        pos += ilen;
+    }
+    if (capped) {
+        DebugP_log("[ANALOG] wire body capped at %u B (bufsize %u) — "
+                   "some detected boards omitted this tick\r\n",
+                   (unsigned)pos, (unsigned)bufsize);
     }
     return pos;
 }

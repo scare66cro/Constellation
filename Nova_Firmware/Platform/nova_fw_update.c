@@ -565,10 +565,23 @@ uint32_t NovaFwUpdate_Finalize(uint32_t expected_crc)
     hdr.valid = 1;
     hdr.active = 0;  /* Not yet active — wait for Activate command */
 
-    /* Sequence: higher than both existing banks */
-    uint32_t maxSeq = s_bank_a_hdr.sequence;
-    if (s_bank_b_hdr.sequence > maxSeq) maxSeq = s_bank_b_hdr.sequence;
-    hdr.sequence = maxSeq + 1;
+    /* Sequence: strictly higher than both existing banks so the F2c
+     * chooser picks the freshly-written bank by sequence on next boot.
+     *
+     * Guard each bank's sequence on magic validity — same idiom as
+     * NovaFwUpdate_OrbitFinalize (see this file ~line 700). A blank OSPI
+     * sector (all 0xFF) loads as sequence=0xFFFFFFFF; using that as
+     * `maxSeq` overflows to 0 on `+1`, producing a new-bank header with
+     * seq=0 < the valid bank's seq=1 — the chooser then picks the OLD
+     * bank and the self-update boots the old image. This bit the
+     * CONTROLLER self-update on JTAG-seeded boards: Write-SeedMetaBlock.ps1
+     * writes only Bank A's header at 0x300000+0x80; the Bank B sector at
+     * 0x310000 stays blank, so s_bank_b_hdr.magic != NOVA and its
+     * sequence loads as 0xFFFFFFFF. Same overflow class as the orbit
+     * sequence-overflow fixed 2026-05-31 (0.A.210). */
+    uint32_t aSeq = (s_bank_a_hdr.magic == FW_BANK_MAGIC) ? s_bank_a_hdr.sequence : 0U;
+    uint32_t bSeq = (s_bank_b_hdr.magic == FW_BANK_MAGIC) ? s_bank_b_hdr.sequence : 0U;
+    hdr.sequence = ((aSeq > bSeq) ? aSeq : bSeq) + 1U;
 
     strncpy(hdr.version, s_staged_version, sizeof(hdr.version) - 1);
     debug_printf("[FwUpd] Finalize: calling write_bank_header(bank=%u, seq=%lu)\r\n",

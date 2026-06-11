@@ -39,6 +39,12 @@ COMMENTS:
 #define ANALOG_SENSOR_TYPE_TEMP_IR      0
 #define ANALOG_SENSOR_TYPE_PRESSURE     4
 #define ANALOG_SENSOR_TYPE_MA           5   /* Generic 4-20 mA, scaled per-sensor */
+/* Static-pressure 4-20 mA → 0-2.5"wc sensor (newer Mini_IO 2.0.1.b,
+ * Analog_Input.h:48). Value 11 matches AS2 AND the UI sensor-type
+ * picker (AnalogConfigForm.svelte offers '11'). SetAnalogBoardTypes()
+ * scans every present+enabled board/sensor and records the slot whose
+ * Type == this value into the SENSOR_STATIC_PRESSURE global below. */
+#define ANALOG_SENSOR_TYPE_STATIC_PRESS 11
 
 #define BOARD_LABELS                    25
 
@@ -92,6 +98,16 @@ extern float *OutsideTemp;
 extern float PlenumTempAvg;
 extern float StartTemp;
 
+/* Runtime-resolved sensor-role index (newer Mini_IO 2.0.1.b port).
+ * -1 = no static-pressure sensor present. When >= 0 it is the global
+ * sensor index board*ANALOG_SENSORS_PER_BOARD + sensor; decode it back
+ * as board = idx/ANALOG_SENSORS_PER_BOARD, sensor = idx%ANALOG_SENSORS_PER_BOARD.
+ * Set by SetAnalogBoardTypes() (Analog_Input.c:82-119), consumed by
+ * AdjustFansForStaticPressure() (Controls) and SystemFailuresChk()
+ * (Failures). This is why SensorConfig.type is persisted — the
+ * controller learns each sensor's role from the operator config. */
+extern int SENSOR_STATIC_PRESSURE;
+
 /*** external functions ***/
 
 extern unsigned int DiscoverAnalogBoards(void);
@@ -100,6 +116,13 @@ extern void DiscoverAnalogBoardsRequest(unsigned int request);
 extern void FindAnalogBoards(void);
 extern void ReadAnalogBoards(char ReadType);
 extern void TempTable_Init(void);
+
+/* Rescan Settings.AnalogBoard[].Sensor[].Type and update the
+ * SENSOR_STATIC_PRESSURE role index. Call after any sensor-config
+ * change takes effect (the LP shim calls it at the tail of every
+ * mirror_sensors pass). 1:1 port of Mini_IO SetAnalogBoardTypes(),
+ * scoped to the one role Constellation consumes today. */
+extern void SetAnalogBoardTypes(void);
 
 #endif
 

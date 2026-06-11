@@ -43,6 +43,9 @@
   const updatePeriodStr = numField(draft, 'updatePeriod', 'int');
   const tempDiffStr     = numField(draft, 'tempDiff',     'float');
   const prevSpeedStr    = numField(draft, 'prevSpeed',    'int');
+  // Static-pressure fan-fail cap (newer-AS2 port). FanSpeedSettings field 11,
+  // float "wc. Plain-encoded: 0.0 = disabled (proto3 suppress is correct).
+  const maxStaticPressureStr = numField(draft, 'maxStaticPressure', 'float');
 
   $: tempRef1 = [
     { text: $t('global.plenum-setpoint-default'), value: 0 },
@@ -84,10 +87,6 @@
 
   $: textSize = edit ? 'text-size-large' : 'text-size-xl';
   $: compSize = edit ? 'lg' : 'xl';
-
-  // Static-pressure visibility: legacy slot [10]; not present in proto schema
-  // yet, so the optional UI block stays hidden for now.
-  const staticPressureSupported = false;
 
   onMount(() => {
     // Page-only: the dashboard modal manages its own dismissal and must not
@@ -154,10 +153,11 @@
         <Column class="xl:py-1 w-2/3 {textSize} border-r border-gray-400">{ $t('level1.fanspeed.recirculation-mode') }</Column>
         <Column class="xl:py-1 w-1/3"><TextField class="w-36" size={compSize} bind:value={$recircSpeedStr} {edit} label="Recirculation Mode" keyboardType={KeyboardTypes.Numeric} adornmentType={AdornmentType.Percent} validation={validation.recircFanSpeed}/></Column>
       </Row>
+      <Row>
+        <Column class="xl:py-1 w-2/3 {textSize} border-r border-gray-400">{ $t('level1.fanspeed.maximum-static-pressure') }</Column>
+        <Column class="xl:py-1 w-1/3"><TextField class="w-36" size={compSize} bind:value={$maxStaticPressureStr} {edit} label="Maximum Static Pressure" keyboardType={KeyboardTypes.Float} adornmentType={AdornmentType.StaticPressure} validation={validation.maxStaticPressure}/></Column>
+      </Row>
     </Table>
-    {#if staticPressureSupported}
-      <!-- Reserved: static-pressure cap (legacy slot 10). Not in current proto schema. -->
-    {/if}
     <Card class="mb-0 w-full mx-auto bg-surface-100">
       <p class="text-center {textSize}">{ $t('level1.fanspeed.in-cooling-mode-fan-speed-will-update-every') }
         <TextField class="w-16 md:w-24 xl:w-36" size={compSize} bind:value={$updatePeriodStr} {edit} label="Update Time" keyboardType={KeyboardTypes.Numeric} validation={validation.updFanSpeed}/> { $t('global.hours') } { $t('level1.fanspeed.to-maintain') }

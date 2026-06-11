@@ -85,6 +85,13 @@ message FanSpeedSettings {
   uint32 temp_ref2      = 8;   // Settings.Fan.TempRef2 (sensor id)
   uint32 prev_speed     = 9;   // Settings.Fan.PrevSpeed (current cooling %)
   uint32 update_mode    = 10;  // Settings.Fan.UpdateMode (onion mode select)
+  // Static-pressure fan-fail cap (newer-AS2 port, 2026-06-10). Mirrors
+  // Settings.Fan.MaxStaticPressure (inches water column, default 1.25).
+  // When the resolved STATIC_PRESS sensor exceeds this, CtrlFan drops the
+  // fan to MinSpeed (AdjustFansForStaticPressure) and StaticPressureFailChk
+  // raises WARN_STATICPRESSUREHIGH. 0.0 = feature disabled (proto3-suppress
+  // is correct; 0 is not a meaningful pressure cap).
+  float  max_static_pressure = 11;  // Settings.Fan.MaxStaticPressure ("wc)
 }
 
 // ─── Fan Boost (StoreFanBoost / UI_SendFanBoost, tag "selBoostMode") ─────
@@ -284,6 +291,13 @@ message FailureSettings {
   uint32 aux_timer              = 20;  // Settings.Failure[FAIL_AUXILIARY].Timer
   uint32 cavity_heat_mode       = 21;  // Settings.Failure[FAIL_CAVITY_HEAT].Mode
   uint32 cavity_heat_timer      = 22;  // Settings.Failure[FAIL_CAVITY_HEAT].Timer
+  // High-static-pressure fan-fail (newer-AS2 port, 2026-06-10).
+  // Settings.Failure[FAIL_STATIC_PRESSURE]. Mode FM_NONE=0 / FM_ALARM=1 /
+  // FM_FAIL=2 (default 1=alarm); timer in minutes (default 1). Both
+  // force-encoded: mode 0 = "disabled" and timer 0 = "fire immediately"
+  // are meaningful and must round-trip (proto3 zero-suppression invariant).
+  uint32 static_pressure_fail_mode  = 23;  // Settings.Failure[FAIL_STATIC_PRESSURE].Mode
+  uint32 static_pressure_fail_timer = 24;  // Settings.Failure[FAIL_STATIC_PRESSURE].Timer
 }
 
 // ─── Failure Limits, Group 2 (StoreFailures2 / UI_SendFailures2, 13 fields)
@@ -496,6 +510,16 @@ message SensorConfig {
   string label      = 2;
   float  offset     = 3;
   uint32 disabled   = 4;
+  // Sensor role/type (newer-AS2 port, 2026-06-10). Mirrors legacy
+  // ANALOG_SENSOR.Type so the firmware can resolve which slot is the
+  // STATIC_PRESS(11) sensor (SetAnalogBoardTypes-style scan), instead of
+  // hardcoding roles by slot index. Values match Analog_Input.h
+  // ANALOG_SENSOR_TYPE_* (0=IR_TEMP, 1=TEMP, 2=HUMID, 3=CO2, 11=STATIC_PRESS,
+  // ...). FORCE-encoded: type 0 (IR_TEMP) is a real value that must
+  // round-trip (proto3 zero-suppression invariant). This is the first
+  // slice of the sensor-type-persistence keystone (gap #4); it also
+  // unblocks the future dual-bay (RETURN_*_2 / CO2_2) resolution.
+  uint32 type       = 5;   // ANALOG_SENSOR.Type
 }
 
 // ─── PWM Channels (StorePWMChannels / UI_SendPWMChannels) ────────────────

@@ -39,6 +39,14 @@ extern int SystemFailuresChk(void);
  * AS2-faithful behaviour. */
 extern void NovaFailures_RunMasterBroadcastChk(void);
 
+/* High static-pressure fan-fail check (newer Mini_IO 2.0.1.b,
+ * Failures.c:209-248). NOT static — it is called from BOTH
+ * AdjustFansForStaticPressure() (nova_controls.c) and SystemFailuresChk()
+ * (nova_failures.c) and they MUST share the GLOBAL
+ * SystemAlarm[AL_STATICPRESSUREHIGH] / AlarmTimer[AL_STATICPRESSUREHIGH]
+ * latching+timer state. Returns 1 if the alarm tripped this call. */
+extern int StaticPressureHighFailChk(float sp);
+
 #endif
 
 /***   End Of File   ***/

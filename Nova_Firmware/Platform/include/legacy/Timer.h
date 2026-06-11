@@ -66,6 +66,7 @@ typedef enum
   AL_OUTTEMPSENSOR,
   AL_PLENHUMID,
   AL_PLENSENSOR,
+  AL_STATICPRESSUREHIGH,   // newer Mini_IO 2.0.1.b — high static-pressure fan-fail (= index 41)
   NUM_ALARMS
 } EQUIP_ALARMS;
 

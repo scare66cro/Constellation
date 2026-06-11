@@ -8,8 +8,12 @@
     "dev": "tsx watch src/index.ts"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
     "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.0"
   }
 }

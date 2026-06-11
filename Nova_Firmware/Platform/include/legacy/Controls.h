@@ -154,6 +154,11 @@ extern int AdjustDoors(int PWM);
 extern void FanBoostOff(void);
 extern int ClimacellClockMode(void);
 
+/* High static-pressure fan protection (newer Mini_IO 2.0.1.b,
+ * Controls.c:1176-1196). Returns 1 if it pinned the fan at MinSpeed
+ * (over-pressure latched); CtrlFan returns immediately in that case. */
+extern uint8_t AdjustFansForStaticPressure(void);
+
 extern void CtrlAux(void);
 extern void CtrlBayLights(void);
 extern void CtrlBurner(int Output);

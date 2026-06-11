@@ -171,6 +171,11 @@ typedef struct
   char  TempRef1;       // select
   char  TempRef2;       // select
   char  UpdateMode;     // select (onion)
+  float MaxStaticPressure;   // "wc — over-pressure threshold (newer Mini_IO 2.0.1.b,
+                             // SettingsTypes.h:178). When the configured static-pressure
+                             // sensor exceeds this, AdjustFansForStaticPressure() pins the
+                             // fan at MinSpeed and StaticPressureHighFailChk() latches the
+                             // alarm. Default 1.25; mirrored from FanSpeedSettings field 11.
   uint32_t DailyDay;         // day value for daily reset
   uint32_t DailyRunTime;     // secs (displayed as hours)
   uint32_t TotalRefrigTime;  // secs (displayed as hours) (FanTotalRecircTime & FanTotalStandbyTime defined at bottom)

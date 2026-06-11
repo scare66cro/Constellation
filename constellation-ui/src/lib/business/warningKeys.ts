@@ -105,5 +105,9 @@ export const WARNING_KEYS: string[] = [
 	'WARN_LIGHTS',
 	'WARN_LOADLOG_FULL',
 	'WARN_ALARMS_FILE',
-	'WARN_EQUIPDESC_FILE'
+	'WARN_EQUIPDESC_FILE',
+	// Index 97 — high static-pressure fan-fail (newer-AS2 port, 2026-06-10).
+	// MUST stay at index 97 to match WARN_STATICPRESSUREHIGH in the Nova
+	// firmware WARNING_ITEMS enum (Platform/include/legacy/Warnings.h).
+	'WARN_STATICPRESSUREHIGH'
 ];

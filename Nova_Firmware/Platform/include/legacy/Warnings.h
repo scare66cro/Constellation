@@ -45,6 +45,7 @@ typedef enum
   FAIL_OUTSIDE_HUMIDITY,
   FAIL_PLENUM_HUMIDITY,
   FAIL_HIGH_CO2,
+  FAIL_STATIC_PRESSURE,   // newer Mini_IO 2.0.1.b — high static-pressure fan-fail (= index 15)
   NUM_FAILURES
 } FAILURES;
 
@@ -152,6 +153,9 @@ typedef enum
 
   WARN_ALARMS_FILE,   // keep these at the end
   WARN_EQUIPDESC_FILE,
+  WARN_STATICPRESSUREHIGH,  // newer Mini_IO 2.0.1.b — appended at END (= index 97) so
+                            // NO existing warning index shifts; UI warningKeys.ts mirror
+                            // appends 'WARN_STATICPRESSUREHIGH' at the same final index.
   NUM_WARNINGS
 } WARNING_ITEMS;  // NOTE: changes to any of these values must be also be reflected in LtxWarnings.h in the http server code
 

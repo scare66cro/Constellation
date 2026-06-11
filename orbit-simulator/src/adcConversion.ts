@@ -68,6 +68,11 @@ export const SENSOR_TYPE_IR_TEMP = 0;
 export const SENSOR_TYPE_HUMID   = 1;
 export const SENSOR_TYPE_CO2     = 2;
 export const SENSOR_TYPE_TEMP    = 3;
+// NEW Gellert sensor type — 4-20 mA static-pressure transducer (0–2.5 "wc).
+// Nibble value 11 matches AS2 (ANALOG_SENSOR_TYPE_STATIC_PRESS=11), the Nova
+// orbit firmware, and the UI AnalogConfigForm sensor-type '11'. Fits the 4-bit
+// type nibble (0–15). DO NOT renumber.
+export const SENSOR_TYPE_STATIC_PRESSURE = 11;
 export const SENSOR_TYPE_NONE    = 0xF;
 
 /**
@@ -105,12 +110,40 @@ export function adcToCo2(adc: number): number {
 }
 
 /**
+ * Convert raw ADC × 16 → static pressure (inches water column, 0–2.5 "wc).
+ *
+ * Verbatim AS2 `ConvertToStaticPressure` math (the AS2 SOURCE has the
+ * conversion shape; only the ×100 wire encoding below is the new Gellert
+ * addition — see adcToOrbitRegister):
+ *   scaled = adc / 16
+ *   scaled <  180  → UNDEF  (below the 4 mA floor)
+ *   scaled >  900  → 2.5    (clamp at full scale / 20 mA)
+ *   else           → ((scaled - 180) / 720) * 2.5
+ *
+ * Returns NaN below 180 (firmware returns SENSOR_VAL_UNDEFINED).
+ */
+export function adcToStaticP(adc: number): number {
+  if (adc <= 0 || adc === SENSOR_VAL_UNDEF) return NaN;
+  const scaled = adc / 16.0;
+  if (scaled < 180.0) return NaN;       // below 4 mA → UNDEF
+  if (scaled > 900.0) return 2.5;       // clamp at full scale
+  return ((scaled - 180.0) / 720.0) * 2.5;
+}
+
+/**
  * Convert raw ADC × 16 to engineering value, then scale for Orbit's
  * sensor register format.
  *
  * Orbit register format (matching nova_thread_overrides.c expectations):
- *   • Temp/Humid: value × 10, as int16    (e.g., 21.5°C → 215)
- *   • CO2:        raw ppm, as int16        (e.g., 800 ppm → 800)
+ *   • Temp/Humid:   value × 10,  as int16   (e.g., 21.5°C → 215)
+ *   • CO2:          raw ppm,     as int16   (e.g., 800 ppm → 800)
+ *   • Static press: value × 100, as int16   (e.g., 1.25 "wc → 125)
+ *
+ * ⚠ Static pressure uses a ×100 wire encoding — NOT the ×10 temp/humid
+ *   convention. This is a NEW Gellert encoding with no AS2 ancestor: AS2
+ *   stored static pressure as a plain integer "wc, the ×100 one-hundredths
+ *   packing is Constellation-only. The Nova controller descales ÷100. Keep
+ *   this bit-exact with the orbit firmware adc_convert.c static-pressure case.
  *
  * Returns SENSOR_VAL_UNDEF (0x7FFF) if the conversion fails.
  */
@@ -134,6 +167,11 @@ export function adcToOrbitRegister(adc: number, sensorType: number): number {
       eng = adcToCo2(adc);
       if (isNaN(eng)) return SENSOR_VAL_UNDEF;
       return Math.round(eng) & 0xFFFF;       // raw ppm
+
+    case SENSOR_TYPE_STATIC_PRESSURE:
+      eng = adcToStaticP(adc);
+      if (isNaN(eng)) return SENSOR_VAL_UNDEF;
+      return Math.round(eng * 100) & 0xFFFF; // × 100 (one-hundredths "wc)
 
     default:
       return SENSOR_VAL_UNDEF;

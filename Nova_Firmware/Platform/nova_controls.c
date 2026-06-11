@@ -39,6 +39,7 @@
 
 #include "Analog_Input.h"
 #include "Controls.h"
+#include "Failures.h"      /* StaticPressureHighFailChk (shared global alarm/timer) */
 #include "Modes.h"
 #include "PIDLogs.h"
 #include "PWM.h"
@@ -1192,6 +1193,43 @@ void UpdateFanSpeed(char *prev) {
 
 /***************************************************************************
 
+FUNCTION:   AdjustFansForStaticPressure()
+
+PURPOSE:    Adjusts the fan speed for static pressure (over-pressure
+            protection — newer Mini_IO 2.0.1.b Controls.c:1176-1196).
+
+COMMENTS:   Returns 1 if the fan speed was pinned at MinSpeed, 0 if not.
+            Shares the global AL_STATICPRESSUREHIGH alarm/timer with
+            SystemFailuresChk via StaticPressureHighFailChk.
+
+***************************************************************************/
+uint8_t AdjustFansForStaticPressure(void)
+{
+  if (SENSOR_STATIC_PRESSURE == -1)
+  {
+    return 0;
+  }
+
+  ANALOG_SENSOR *staticSensor =
+      &Settings.AnalogBoard[SENSOR_STATIC_PRESSURE / ANALOG_SENSORS_PER_BOARD]
+               .Sensor[SENSOR_STATIC_PRESSURE % ANALOG_SENSORS_PER_BOARD];
+  if (staticSensor->Disabled == 1)
+  {
+    return 0;
+  }
+
+  if (StaticPressureHighFailChk(staticSensor->Value) == 1)
+  {
+    PwmChannel[PWM_FAN].Output = PercentToPWMVal(Settings.Fan.MinSpeed);
+    PWM_UpdateChannel(PWM_FAN);
+    return 1;
+  }
+
+  return 0;
+} // end AdjustFansForStaticPressure()
+
+/***************************************************************************
+
 FUNCTION:   CtrlFan()
 
 PURPOSE:    Turn the fan output on and off
@@ -1244,17 +1282,29 @@ void CtrlFan(int speed)
     return;
   }
 
+  // make sure the fan is on before adjusting the speed
+  if (!CheckOutputs(EQ_FAN))
+  {
+    OutputOn(EQ_FAN);
+  }
+
+  /* High static-pressure protection (newer Mini_IO 2.0.1.b CtrlFan call
+   * site, Controls.c:1377). Runs AFTER the fan-off/remote-off early
+   * return and AFTER ensuring the fan output is ON, but BEFORE the
+   * purge / fan-boost guard and the normal/auto speed logic — matching
+   * AS2 ordering exactly. Static-pressure protection is SAFETY and must
+   * OVERRIDE purge, fan-boost, and auto speed: if it pins the fan at
+   * MinSpeed it returns non-zero and CtrlFan returns immediately. */
+  if (AdjustFansForStaticPressure() != 0)
+  {
+    return;
+  }
+
   // don't adjust the fan during a purge or fan boost cycle
   if (   Settings.Co2.Purge.Start != 0
       || IntervalTimer[IT_FANBOOSTCYCLE] != 0)
   {
     return;
-  }
-
-  // make sure the fan is on before adjusting the speed
-  if (!CheckOutputs(EQ_FAN))
-  {
-    OutputOn(EQ_FAN);
   }
 
   // determine the fan speed
