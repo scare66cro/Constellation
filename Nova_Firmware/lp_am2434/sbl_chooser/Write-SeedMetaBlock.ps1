@@ -6,16 +6,22 @@
 
 .DESCRIPTION
   Sequence:
-    1. Build a 256-byte .bin in-memory:
-         [0..127]    FwBootMeta   (boot_count=1, boot_reason=0, strikes=1)
-         [128..255]  FwBankHeader (magic=NOVA, sequence=1, valid=1, active=1,
-                                   image_size=0, image_crc=0, version="seed")
+    1. Build a 0x10080-byte (65664 B) .bin in-memory -- the Bank A seed AND a
+       deterministic-invalid Bank B header in ONE 256 KB-block-aligned image:
+         [0x00000..0x0007F]  FwBootMeta   (boot_count=1, boot_reason=0, strikes=1)
+         [0x00080..0x000FF]  FwBankHeader (magic=NOVA, sequence=1, valid=1,
+                                           active=1, image_size=0, version="seed")
+         [0x00100..0x0FFFF]  0xFF filler (post-erase state, unused)
+         [0x10000..0x1007F]  Bank B FwBankHeader, magic=0 -> deterministic INVALID
     2. Write to a temp file
-    3. Call uniflash_run.js with UNIFLASH_FILE=<temp>, UNIFLASH_OFFSET=0x300000
-    4. Flasher's Flash_write does erase-then-program on the 64 KB sector.
-       The remaining ~63.7 KB of the sector stays 0xFF (matches the post-
-       erase state -- FwBootMeta and Bank A header are the only populated
-       fields).
+    3. Call uniflash_run.js (manifest mode) with ONE entry @ 0x300000.
+    4. The JTAG auto-flasher erases the 256 KB block at 0x300000 (which covers
+       BOTH header sectors), programs the image, then read-back-verifies it.
+       0x300000 % 256 KB == 0 so the block-aligned write is accepted. The old
+       two-entry layout (separate Bank B write @ 0x310000) failed STEP_BAD_OFFSET
+       because 0x310000 % 256 KB != 0, AND was redundant (the Bank A write's
+       block erase already clears 0x310000). Root cause + dump-confirmed:
+       memories/repo/seed-meta-block-nonaligned-offset-2026-06-11.md.
 
   After this runs, SblBankSelect_Choose on next boot will:
     - Read FwBootMeta: boots=2 (after SBL's increment), strikes=2
@@ -115,21 +121,64 @@ $seed[$hdrBase + 24 + $verLen] = 0  # null terminator
 # reserved[80] @ +56 = 0xFF
 for ($i = 56; $i -lt 128; $i++) { $seed[$hdrBase + $i] = 0xFF }
 
-# --- Write to temp file ------------------------------------------------
+# --- Place a DETERMINISTIC-INVALID Bank B header in the SAME write ------
+#   Bank B's header lives at FW_BANK_B_HDR (0x310000) -- 0x10000 bytes past
+#   the Bank A seed at FW_HEADER_OFFSET (0x300000), INSIDE the same 256 KB
+#   OSPI erase block. nova_fw_update.c reads it unconditionally at boot into
+#   s_bank_b_hdr; a 0xFF sector loads as magic=0xFFFFFFFF and (crucially)
+#   sequence=0xFFFFFFFF. Without the magic-guard in Finalize that would
+#   overflow max(seq)+1 to 0 and make the controller's first OTA self-update
+#   boot the OLD bank (the 230->231 brick, same class as the 2026-05-31 orbit
+#   overflow). The firmware fix guards on magic; we ALSO seed Bank B
+#   explicitly INVALID so a JTAG-flashed board's Bank B state is well-defined.
+#
+#   It CANNOT be a separate manifest entry: the JTAG auto-flasher
+#   (flasher_uart/main.c) rejects any write whose offset isn't block-aligned
+#   (`flashOffset % blockSize != 0 -> STEP_BAD_OFFSET`, blockSize=256 KB), and
+#   0x310000 % 0x40000 != 0. The previous two-entry version therefore failed
+#   `Flash 2/2 status=1` and -- because uniflash_run.js only warm-resets on
+#   status==0 -- left the freshly-flashed board DARK (silent UART+Ethernet)
+#   until a manual JTAG reset. See
+#   memories/repo/seed-meta-block-nonaligned-offset-2026-06-11.md.
+#
+#   Fix: fold Bank B into ONE block-aligned image flashed at 0x300000.
+#   The flasher's 256 KB block erase covers 0x300000..0x33FFFF (BOTH header
+#   sectors), so one erase + one write + one read-back-verify lands both
+#   headers atomically. Layout (0x10080 = 65664 B):
+#     [0x00000..0x000FF]  $seed  (FwBootMeta + Bank A FwBankHeader)
+#     [0x00100..0x0FFFF]  0xFF   (post-erase filler, unused)
+#     [0x10000..0x1007F]  Bank B FwBankHeader, magic=0x00000000 -> INVALID
+$bankB = New-Object byte[] 128   # magic=0x00000000, rest 0 -> clearly invalid
+
+$BANK_B_REL_OFFSET = 0x10000     # FW_BANK_B_HDR (0x310000) - FW_HEADER_OFFSET (0x300000)
+$combined = New-Object byte[] ($BANK_B_REL_OFFSET + $bankB.Length)   # 0x10080
+for ($i = 0; $i -lt $combined.Length; $i++) { $combined[$i] = 0xFF } # post-erase filler
+$seed.CopyTo( $combined, 0)                    # Bank A seed @ +0x0     (256 B)
+$bankB.CopyTo($combined, $BANK_B_REL_OFFSET)   # Bank B invalid @ +0x10000 (128 B)
+
+# --- Write the single combined seed image to a temp file ---------------
 $tmpDir  = Join-Path $env:TEMP "constellation-f2c"
 if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir | Out-Null }
-$tmpFile = Join-Path $tmpDir "seed_meta_block.bin"
-[System.IO.File]::WriteAllBytes($tmpFile, $seed)
+$tmpFile = Join-Path $tmpDir "seed_meta_combined.bin"
+[System.IO.File]::WriteAllBytes($tmpFile, $combined)
+
+# Manifest drives uniflash_run.js to write the combined image in one DSS
+# session at the block-aligned base 0x300000 (Bank A @ +0, Bank B @ +0x10000):
+$tmpManifest = Join-Path $tmpDir "seed_manifest.txt"
+@(
+    "0x300000 $($tmpFile -replace '\\', '/')"
+) | Set-Content -Path $tmpManifest -Encoding ASCII
 
 $validStr = if ($Valid) { "VALID" } else { "INVALID" }
 Write-Host "=== F2c seed metadata block ===" -ForegroundColor Cyan
 Write-Host "  Probe:      $Probe"
-Write-Host "  Block size: 256 bytes (FwBootMeta + Bank A FwBankHeader)"
+Write-Host "  Image:      $($combined.Length) bytes — one 256 KB-aligned write @ 0x300000"
+Write-Host "              (Bank A seed @ +0x0, Bank B INVALID @ +0x10000)"
 Write-Host "  Bank A:     $validStr (valid=$($Valid -as [int]), magic=NOVA, sequence=1, active=1)"
 Write-Host "  Image size: $ImageSize bytes"
 Write-Host "  Image CRC:  0x$($ImageCrc.ToString('X8'))"
 Write-Host "  Version:    `"$Version`""
-Write-Host "  OSPI offset: 0x300000"
+Write-Host "  OSPI offset: 0x300000 (single block-aligned write; Bank B @ +0x10000 = INVALID magic=0)"
 Write-Host "  Temp file:   $tmpFile"
 Write-Host ""
 
@@ -162,18 +211,21 @@ if (Test-Path $xdsdfu) {
     }
 }
 
-# --- Drive uniflash_run.js ---------------------------------------------
+# --- Drive uniflash_run.js (manifest mode: both seed blocks, one session) ---
 $env:LP_CCXML        = $ccxml
-$env:UNIFLASH_FILE   = $tmpFile -replace '\\', '/'   # DSS Java wants forward slashes
-$env:UNIFLASH_OFFSET = "0x300000"
+$env:UNIFLASH_MANIFEST = $tmpManifest -replace '\\', '/'  # DSS Java wants forward slashes
+# Clear the single-file vars so MANIFEST mode is used unambiguously
+# (uniflash_run.js prefers MANIFEST when both are set, but be explicit).
+Remove-Item Env:\UNIFLASH_FILE   -ErrorAction SilentlyContinue
+Remove-Item Env:\UNIFLASH_OFFSET -ErrorAction SilentlyContinue
 
 $dss = "C:\ti\ccs2050\ccs\ccs_base\scripting\bin\dss.bat"
 $uniflashScript = "$LpDir\ospi_flash\uniflash_run.js"
 
-Write-Host "=== Running uniflash_run.js ===" -ForegroundColor Cyan
-Write-Host "  ccxml:   $ccxml"
-Write-Host "  file:    $env:UNIFLASH_FILE"
-Write-Host "  offset:  $env:UNIFLASH_OFFSET"
+Write-Host "=== Running uniflash_run.js (manifest mode) ===" -ForegroundColor Cyan
+Write-Host "  ccxml:    $ccxml"
+Write-Host "  manifest: $env:UNIFLASH_MANIFEST"
+Write-Host "    0x300000  $tmpFile  ($($combined.Length) B: Bank A seed @ +0x0 + Bank B INVALID @ +0x10000)"
 Write-Host ""
 
 & $dss $uniflashScript
