@@ -11,7 +11,8 @@
   // ═══════════════════════════════════════════════════════════════════
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
-  import { systemStatus, sensorData, warningReport, plenumSettings, equipmentStatus, ioConfig, co2Settings, fanSpeedSettings, basicSetup, burnerSettings } from "$lib/business/protoStores";
+  import { systemStatus, sensorData, warningReport, plenumSettings, equipmentStatus, ioConfig, co2Settings, fanSpeedSettings, basicSetup, burnerSettings, climacellSettings } from "$lib/business/protoStores";
+  import { moistureLossIndex } from "$lib/business/moistureIndex";
   import { navigationStore, frontMatterStore, modeToColorStore, localeStore, themeStore, keysStore, keyboardStore } from "$lib/store";
   import { getHttpUrl, checkPassword } from "$lib/business/util";
   import { writeProto } from "$lib/business/protoWrite";
@@ -929,12 +930,21 @@
     const vs = stations.map(stationVal).filter((v): v is number => Number.isFinite(v as number));
     return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
   })();
-  // Moisture index = the classic "Moisture Loss" MI 1/2 (unit "mi"), same slot
-  // the home page reads (frontMatterStore.main[38]/[39]). Shows '--' until the
-  // value is computed in the proto pipeline (frontMatterComposite stubs it).
-  $: miMain = ($frontMatterStore?.main as string[]) ?? [];
-  $: mi1 = miMain[38] ?? '--';
-  $: mi2 = miMain[39] ?? '--';
+  // Moisture Loss Index ("mi"), per bay — 1:1 port of AS2 States.c
+  // CalculateMoistureLossIndex (Mini_IO 2.0.1.b). It's a stateless calc, so this
+  // produces the IDENTICAL number the firmware emits as MainData[22]/[23]
+  // ("Moisture Loss 1/2"). mli2 is '--' on a single-bay system (no return-2
+  // sensors), exactly as AS2 shows it. See lib/business/moistureIndex.ts.
+  $: mli = moistureLossIndex({
+    plenumTempAvg: ss?.plenumTemp, plenumHumid: ss?.plenumHumid,
+    returnTemp: ss?.returnTemp,    returnHumid1: ss?.returnHumid,
+    tempSet: tempSP, humidSet: humidSP,
+    altitude: ($climacellSettings as any)?.altitude,
+    altUnits: ($climacellSettings as any)?.altUnits,
+    tempType: tempIsC ? 1 : 0,
+  });
+  $: mi1 = mli.mli1 != null ? mli.mli1.toFixed(1) : '--';
+  $: mi2 = mli.mli2 != null ? mli.mli2.toFixed(2) : '--';
 
   // equipment box helper: returns the 3 visible faces of a box at world
   // (x,y) footprint [w×d] standing height h.
