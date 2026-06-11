@@ -192,3 +192,11 @@ backups/*.zst
 # local sudo-password file used by image_pi5.sh (never commit)
 .pi_sudo_pw
 pi_sudo_pw*
+
+# legacy language-file import scratch (raw AS2/Pi3B translation files)
+_legacy_lang/
+
+# server runtime state — self-bootstraps (accountStore.defaultMeta() / created
+# on first append). Never track: login counters, audit-log IPs, account secrets.
+constellation-ui/server/data/account-meta.json*
+constellation-ui/server/data/audit-log.ndjson*
